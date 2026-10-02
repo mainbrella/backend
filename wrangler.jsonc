@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-api",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "cache": {
+    "enabled": true
+  },
+  "vars": {
+    "GOOGLE_CLIENT_ID": "1012970891673-v92hm6ub74bc4be4jmr3pdvk6c78qifa.apps.googleusercontent.com",
+    "IAP_APP_APPLE_ID": "6803508836"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "delta",
+      "database_id": "41be6d7b-26fb-4701-a3fb-fdf3454e14f9",
+      "migrations_dir": "migrations",
+      "migrations_table": "schema_migrations"
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
+  },
+  "routes": [
+    {
+      "pattern": "api.mainbrella.com",
+      "custom_domain": true
+    }
+  ]
+}

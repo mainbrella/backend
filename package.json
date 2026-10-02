@@ -1,0 +1,23 @@
+{
+  "name": "mainbrella-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "dev:lan": "wrangler dev --local --ip 0.0.0.0",
+    "db:migrate:local": "wrangler d1 migrations apply delta --local",
+    "db:migrate:remote": "wrangler d1 migrations apply delta --remote",
+    "generate-types": "wrangler types",
+    "type-check": "npm run generate-types && tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.134.0"
+  },
+  "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0"
+  }
+}
