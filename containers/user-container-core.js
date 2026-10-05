@@ -59,7 +59,8 @@ export class UserContainerController {
       }
       if (request.method === "POST") {
         try {
-          const result = await this.start();
+          const selection = request.body ? await request.json() : {};
+          const result = await this.start(selection);
           return result instanceof Response ? result : this.respond(result);
         } catch (error) {
           console.error("User container start failed", error);
@@ -88,6 +89,7 @@ export class UserContainerController {
           name: "Small container",
           instance: INSTANCE,
           status: "running",
+          ...(metadata.imageId ? { imageId: metadata.imageId, imageName: metadata.imageName } : {}),
           createdAt: new Date(metadata.createdAt).toISOString(),
           expiresAt: new Date(metadata.expiresAt).toISOString(),
         }]
@@ -150,10 +152,14 @@ export class UserContainerController {
     });
   }
 
-  async start() {
+  async start(selection = {}) {
     if (this.container.running) {
       return this.respond({ error: "container_limit_exceeded" }, 409);
     }
+
+    const imageKey = selection.imageKey || "terminal";
+    const image = Object.hasOwn(this.container.images, imageKey) ? this.container.images[imageKey] : undefined;
+    if (!image) return this.respond({ error: "image_not_available" }, 409);
 
     const now = this.now();
     const month = monthFor(new Date(now));
@@ -168,6 +174,7 @@ export class UserContainerController {
     await this.ctx.storage.put(USAGE_KEY, usage);
     const metadata = {
       createdAt: now,
+      ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       expiresAt: now + BUILDER_LIMITS.maxSessionMs,
       idleExpiresAt: now + BUILDER_LIMITS.idleTimeoutMs,
       idleTimeoutMs: BUILDER_LIMITS.idleTimeoutMs,
@@ -177,7 +184,7 @@ export class UserContainerController {
 
     try {
       this.container.start({
-        image: this.container.images.terminal,
+        image,
         instance: INSTANCE,
         entrypoint: ["sleep", "infinity"],
         enableInternet: true,

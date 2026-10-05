@@ -4,6 +4,7 @@ import { handleSubscriptionRequest } from "./subscription";
 import { handleAdminRequest } from "./admin";
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
+import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
 
 export async function handleRequest(
@@ -11,6 +12,9 @@ export async function handleRequest(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/images" || url.pathname.startsWith("/images/")) return handleImagesRequest(request, env);
+  if (url.pathname.startsWith("/internal/image-builds/")) return handleImageBuildRequest(request, env);
 
   if (url.pathname === "/containers/terminal") return handleTerminalRequest(request, env);
 
