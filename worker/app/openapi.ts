@@ -7,6 +7,7 @@ import { registerCommandRoutes } from "./openapi-commands";
 import { registerFileRoutes } from "./openapi-files";
 import { registerCapabilityRoutes } from './openapi-capabilities';
 import { registerExecutionRoutes } from './openapi-executions';
+import { registerStatusRoutes } from './openapi-status';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerOperationsRoutes } from "./openapi-operations";
@@ -31,6 +32,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     sshGateway: { type: "http", scheme: "bearer", description: "Trusted SSH gateway secret." },
     imageBuild: { type: "http", scheme: "bearer", description: "Trusted image build service secret." },
     stripeSignature: { type: "apiKey", in: "header", name: "Stripe-Signature" },
+    monitoring: { type: 'http', scheme: 'bearer', description: 'Dedicated MONITORING_SECRET; operational observations and incidents only.' },
   } as const;
   for (const [name, scheme] of Object.entries(securitySchemes)) {
     api.registry.registerComponent("securitySchemes", name, scheme);
@@ -38,6 +40,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerOperationsRoutes(api, handler);
   registerCapabilityRoutes(api, handler);
   registerExecutionRoutes(api, handler);
+  registerStatusRoutes(api, handler);
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);

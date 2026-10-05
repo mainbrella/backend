@@ -162,9 +162,9 @@ export class Execution {
         while (true) {
           const { done, value } = await reader.read();
           buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-          if (buffer.length > 64 * 1024) throw new Error();
           let boundary;
           while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+            if (boundary > 64 * 1024) throw new Error();
             const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
             const type = frame.split('\n').find(line => line.startsWith('event: '))?.slice(7);
             const data = frame.split('\n').find(line => line.startsWith('data: '))?.slice(6);
@@ -178,6 +178,7 @@ export class Execution {
               if (item.sequence > cursor) { this.cursor = cursor = item.sequence; yield item; }
             }
           }
+          if (buffer.length > 64 * 1024) throw new Error();
           if (done || completed) break;
         }
       } catch { throw new MainbrellaError('execution_stream_unavailable', 0, { cursor }); }

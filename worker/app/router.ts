@@ -13,6 +13,7 @@ import { handleCommandRequest } from "./commands";
 import { handleFileRequest } from "./files";
 import { handleCapabilitiesRequest } from './capabilities';
 import { handleExecutionRequest } from './executions';
+import { handleStatusRequest } from './status';
 
 async function handleLegacyRequest(
   request: Request,
@@ -22,6 +23,7 @@ async function handleLegacyRequest(
   const url = new URL(request.url);
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
+  if (['/status', '/status/history', '/internal/status/observations', '/internal/status/incidents'].includes(url.pathname)) return handleStatusRequest(request, env);
   if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
 
   if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);

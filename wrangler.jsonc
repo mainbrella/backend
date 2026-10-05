@@ -7,6 +7,7 @@
   "cache": {
     "enabled": true
   },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
   },

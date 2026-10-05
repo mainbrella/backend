@@ -109,8 +109,8 @@ test('restart recovery interrupts only matching generations and retained keys re
   f.values.set('execution-record:' + id, { id, createdAt: '2099-01-01T00:00:00.000Z', status: 'running', cursor: 0, retainUntil: now + 3600_000 });
   await f.manager.recover();
   assert.equal(f.ctx.container.running, true);
-  f.values.clear();
+  f.values.delete('execution-record:' + id);
   for (let n = 0; n < MAX_RETAINED_EXECUTIONS; n++) f.values.set('execution-record:' + n, { id: String(n), key: String(n), createdAt, status: 'succeeded', retainUntil: now + 3600_000 });
   const denied = await f.manager.fetch(request('', 'POST', { command: 'echo x' }, 'new'));
-  assert.equal(denied.status, 409); // No metadata means no live lease.
+  assert.equal(denied.status, 429);
 });

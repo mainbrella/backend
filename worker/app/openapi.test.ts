@@ -5,6 +5,8 @@ import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
   '/capabilities': ['get'],
+  '/status': ['get'], '/status/history': ['get'],
+  '/internal/status/observations': ['post'], '/internal/status/incidents': ['post'],
   '/containers/executions': ['post'],
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],

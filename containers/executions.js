@@ -87,14 +87,17 @@ export class ManagedExecutions {
       const record = { id: crypto.randomUUID(), createdAt, startedAt: new Date(now).toISOString(), status: 'starting',
         retainUntil: now + EXECUTION_RETENTION_MS, cursor: 0, outputBytes: 0, exitCode: null,
         timedOut: false, outputTruncated: false, key, fingerprint };
-      await this.save(record);
       let stop;
-      const session = { close: () => stop?.('canceled') };
+      let canceled = false;
+      const session = { close: () => { canceled = true; stop?.('canceled'); } };
       this.active.add(session);
       this.sessions.set(record.id, session);
+      try { await this.save(record); } catch (error) {
+        this.active.delete(session); this.sessions.delete(record.id); throw error;
+      }
       // run() starts after this admission lock releases. Request abort never owns
       // the managed process lifetime; the durable identity is already committed.
-      const work = Promise.resolve().then(() => this.run(record, body, metadata, session, fn => { stop = fn; }));
+      const work = Promise.resolve().then(() => this.run(record, body, metadata, session, fn => { stop = fn; if (canceled) stop('canceled'); }));
       this.ctx.waitUntil(work.catch(() => { console.error('managed_execution_persistence_failed'); }));
       return this.controller.respond(summary(record), 202);
     });
@@ -134,7 +137,7 @@ export class ManagedExecutions {
           const bytes = value.subarray(offset, offset + Math.min(8192, remaining));
           record.outputBytes += bytes.byteLength;
           if (bytes.byteLength) await manager.output(record, name, decoder.decode(bytes, { stream: true }));
-          if (++chunks >= MAX_EXECUTION_EVENTS || bytes.byteLength < Math.min(8192, value.byteLength - offset)) stop('output_limit');
+          if (++chunks >= MAX_EXECUTION_EVENTS - 2 || bytes.byteLength < Math.min(8192, value.byteLength - offset)) stop('output_limit');
         }
       }
       await manager.output(record, name, decoder.decode());
