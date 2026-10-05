@@ -5,7 +5,7 @@ The dashboard and automation share the same account-owned containers and allowan
 
 ## Authentication
 
-Sign in at `https://mainbrella.com/login/`, open **Account → API Keys (`/api-keys/`)**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, execution, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
+Sign in at `https://mainbrella.com/login/`, open **Account → API Keys (`/api-keys/`)**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, execution, file, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
 
 Manage keys using a browser session cookie:
 
@@ -17,7 +17,7 @@ Key creation and revocation require a trusted Origin. API keys cannot manage key
 
 Bearer requests can omit Origin. If Origin is supplied, it must be allowlisted.
 Browser clients continue using the session cookie and must send a trusted Origin
-for mutations. Bearer authentication is limited to lifecycle, execution, images, and SSH issuance;
+for mutations. Bearer authentication is limited to lifecycle, execution, files, images, and SSH issuance;
 the browser WebSocket terminal remains cookie-authenticated with a trusted Origin.
 
 Keep credentials in a secret store or protected local file, never in a repository,
@@ -61,8 +61,8 @@ for the authorized job's duration.
 The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
 integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
-No Mainbrella SDK is published yet. Use native HTTP requests for lifecycle and
-command execution; local SSH tools are optional for interactive access.
+No Mainbrella SDK is published yet. Use native HTTP requests for lifecycle,
+command execution, and file transfer; local SSH tools are optional for interactive access.
 
 Download and inspect the dependency-free Node 22+ tools:
 
@@ -75,15 +75,16 @@ node mainbrella-verify.mjs
 ```
 
 Keep both scripts in the same directory. The doctor performs only GET requests,
-checks access, quotas, image availability, Node version, and project markers, and
+checks access, quotas, image availability, HTTP execution/file routes, Node version, and project markers, and
 never prints credentials. Both commands print JSON and exit 0 for a pass or 1
 for a failure. `MAINBRELLA_API_URL` can select another HTTPS API origin, or HTTP
 localhost for development. `MAINBRELLA_CATALOG_ID` selects an advertised image for
 verification; it defaults to `node`.
 
 Verification runs `echo "hello from mainbrella"`, checks stdout and exit code 0,
-and deletes the newly created generation in `finally`. Pass requires
-`ok: true` and `cleanup: "completed"`. It preserves pre-existing containers.
+writes and reads a six-byte binary probe under `/tmp`, and compares every byte.
+It deletes the newly created generation in `finally`. Pass requires
+`ok: true`, `files: "verified"`, and `cleanup: "completed"`. It preserves pre-existing containers.
 It uses a unique idempotency key and the returned `creation` identity, so concurrent
 launches cannot confuse ownership. It retries the same operation up to three times
 on a lost response or a `starting` result. Unresolved startup produces
@@ -122,6 +123,8 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; optional `Idempotency-Key` resolves retries to one reservation for 24 hours and adds `creation` identity/status; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
+| `GET /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: raw `application/octet-stream` bytes for a regular file, up to 1 MiB. ID, exact generation, and URL-encoded path are required. |
+| `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` with a raw byte body | 200: `{path, size}` after writing up to 1 MiB. An empty body creates an empty file. Requires an existing parent directory. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
 
 Lifecycle response example (UTC timestamps and usage month):
@@ -217,6 +220,45 @@ are not supported. Results are not retained. An HTTP failure can hide a complete
 command: do not blindly retry commands with side effects. SSH remains available
 for longer-running and interactive workflows.
 
+## HTTP files
+
+File requests require an owned, running, paid generation, checked again immediately
+before the guest process starts. Send raw bytes with `Content-Type: application/octet-stream`
+for PUT; consume GET as bytes (`response.arrayBuffer()` in JavaScript), not JSON or text.
+Both uploads and downloads are limited to 1 MiB. Oversized uploads are rejected before
+writing, and oversized reads return an error without partial data. Paths must be absolute,
+at most 4096 UTF-8 bytes, with no NUL, empty, `.` or `..` segments. URL-encode all query values.
+Paths refer to the owned guest filesystem; `/workspace` is a convention, not an access boundary.
+
+GET reads regular files and follows symlinks inside the guest. PUT writes a temporary
+file beside the destination and atomically replaces it; it rejects directories and
+existing symlinks. New files use mode 0600; replacement preserves permission bits.
+Parent directories are not created automatically. Use HTTP execution for directory
+creation and listing until dedicated directory APIs are available.
+
+Runtime file operations are bounded by 30 seconds and the hard container deadline,
+share the four-command execution pool, and renew idle activity. Disconnect or stop
+requests cancellation. A lost response may hide a completed write; read to reconcile
+before retrying. Files are ephemeral and disappear when the machine stops. Custom
+images must retain `/bin/sh` and GNU coreutils, supplied by Mainbrella's base image.
+
+```js
+// sandbox is the running creation identity; apiKey stays in a server environment.
+const query = new URLSearchParams({
+  id: sandbox.containerId, createdAt: sandbox.createdAt, path: '/workspace/input.bin',
+});
+const url = `https://api.mainbrella.com/containers/files?${query}`;
+const headers = { Authorization: `Bearer ${apiKey}` };
+const upload = await fetch(url, {
+  method: 'PUT', headers: { ...headers, 'Content-Type': 'application/octet-stream' },
+  body: new Uint8Array([0, 128, 255]),
+});
+if (!upload.ok) throw new Error(`Upload failed: ${upload.status}`);
+const download = await fetch(url, { headers });
+if (!download.ok) throw new Error(`Download failed: ${download.status}`);
+const bytes = new Uint8Array(await download.arrayBuffer());
+```
+
 ## Browser billing endpoints
 
 Billing mutations require the login cookie and a trusted browser Origin.
@@ -245,21 +287,26 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 | Status | Code | Action |
 | --- | --- | --- |
 | 400 | `invalid_container_id` / `container_id_required` | Select an ID returned by GET; supply it when multiple containers exist. |
+| 400 | `invalid_generation` / `invalid_file_path` | Send the exact returned creation timestamp and a valid absolute file path. |
 | 401 | `not_authenticated` | API key or session missing, malformed, expired, or revoked. Provision a valid credential. |
 | 402 | `subscription_required` | No paid container access. Use the web billing controls to subscribe or resolve payment; do not retry creation. |
 | 403 | `origin_required` / `origin_not_allowed` | Cookie mutations need a trusted Origin; Bearer requests may omit it. Supplied Origins must be trusted. |
 | 404 | `not_found` | Use the exact documented route; no arbitrary container IDs. |
 | 413 | `request_too_large` | HTTP execution body exceeds 32 KiB. |
+| 413 | `file_too_large` | File transfer exceeds 1 MiB. Use authorized SSH for larger files. |
+| 404 | `file_not_found` | Check the file path; for writes, create the parent directory first. |
+| 409 | `not_regular_file` | Use a regular file; writes also reject existing symlinks. |
+| 403 | `file_access_denied` | Check guest filesystem permissions and available disk space. |
 | 405 | `method_not_allowed` | Use the documented HTTP method. |
 | 409 | `container_limit_exceeded` | The plan's concurrency cap is occupied. GET status and reuse it, or stop it only if the task authorizes replacement. |
 | 404 | `image_not_found` | Choose an advertised catalog ID or an owned custom image. |
 | 409 | `image_not_ready` / `image_not_available` | Wait for custom-image readiness or choose a currently published catalog image. |
-| 409 | `container_not_running` | Execution and SSH need the exact live generation; GET status before deciding whether to start. |
+| 409 | `container_not_running` | Execution, files, and SSH need the exact live generation; GET status before deciding whether to start. |
 | 429 | `container_quota_exceeded` | The plan's starts are exhausted this UTC month. Wait for next month; do not retry or create another account to evade the limit. |
 | 429 | `terminal_limit` | Four terminal connections are attached to this container. Close or reuse an existing connection. |
-| 429 | `execution_limit` | Four HTTP commands are already active on this container. Wait for completion. |
+| 429 | `execution_limit` | Four HTTP command/file operations are already active on this container. Wait for completion. |
 | 429 | `ssh_token_limit` | Ten live SSH access tokens for this account. Reuse existing access or wait for expiration. |
-| 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` / `execution_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
+| 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` / `execution_unavailable` / `files_unavailable` | Service unavailable. Reconcile with GET before any further launch; read a file to reconcile an uncertain write. |
 
 Use `Idempotency-Key` on `POST /containers` for safe creation retries. Keys accept
 1–128 letters, digits, underscores or hyphens, are scoped to the authenticated

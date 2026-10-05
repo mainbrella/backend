@@ -4,6 +4,7 @@ import { registerAPIKeyRoutes } from "./openapi-api-keys";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
 import { registerCommandRoutes } from "./openapi-commands";
+import { registerFileRoutes } from "./openapi-files";
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerOperationsRoutes } from "./openapi-operations";
@@ -38,6 +39,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerSubscriptionRoutes(api, handler);
   registerContainerRoutes(api, handler);
   registerCommandRoutes(api, handler);
+  registerFileRoutes(api, handler);
   registerImageRoutes(api, handler);
   app.all("*", context => forward(context, handler));
   return app;

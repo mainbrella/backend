@@ -57,7 +57,7 @@ export function authCorsHeaders(request: Request): StringHeaders | null {
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-credentials": "true",
-    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, idempotency-key",
     "access-control-max-age": "600",
     vary: "Origin",

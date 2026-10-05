@@ -1,6 +1,6 @@
 ---
 name: mainbrella-containers
-description: Set up Mainbrella API access, integrate account-owned Linux containers into agent projects, verify HTTP execution, and clean up containers created for the task.
+description: Set up Mainbrella API access, integrate account-owned Linux containers into agent projects, verify HTTP execution and file transfer, and clean up containers created for the task.
 ---
 
 # Mainbrella container automation
@@ -8,7 +8,7 @@ description: Set up Mainbrella API access, integrate account-owned Linux contain
 Use this workflow when asked to set up Mainbrella or execute work in its containers.
 Read [API.md](API.md) for endpoint contracts, images, quotas, and billing rules.
 Use `https://api.mainbrella.com` unless the user specifies another environment.
-Mainbrella uses REST for lifecycle and foreground command execution. No published
+Mainbrella uses REST for lifecycle, foreground command execution, and file transfer. No published
 SDK is available. Do not install invented SDK packages.
 
 ## Quick Setup
@@ -44,7 +44,7 @@ SDK is available. Do not install invented SDK packages.
 ## Integrate
 
 Use native HTTP facilities (`fetch` in Node, `urllib.request` in Python). Follow [API.md](API.md) for authenticated
-create, status, HTTP execution, and deletion. Keep credentials server-side.
+create, status, HTTP execution, file read/write, and deletion. Keep credentials server-side.
 If agent/tool-calling code already exists, add Mainbrella where execution occurs;
 otherwise add a small example matching the detected language.
 
@@ -62,17 +62,25 @@ with a null exitCode. Timeout is at most 60 seconds and output at most 1 MiB.
 Commands are not idempotent; reconcile effects before retrying after a transport
 failure. Use SSH only when the task needs longer or interactive execution.
 
+Use `GET` and `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>`
+for file transfer up to 1 MiB. URL-encode query values. Send raw bytes with
+`Content-Type: application/octet-stream`; read the download as bytes, not JSON.
+The parent directory must exist. Writes replace regular files atomically and reject
+symlinks/directories. New files use mode 0600. File operations share the command
+concurrency pool and have a 30-second runtime limit. Reconcile an uncertain write
+by reading before retrying. Use execution for directory creation and listing.
+
 ## Verify
 
 Run `node mainbrella-verify.mjs` with the provisioned key in the environment.
 Set `MAINBRELLA_CATALOG_ID` to the available image selected for the project;
 without it the script selects `node`. This verification consumes one monthly start.
 It creates a new container, runs `echo "hello from mainbrella"` through HTTP, checks
-stdout and exit code, and deletes **only that container generation** in a `finally`
-block.
+stdout and exit code, writes and reads a binary probe under `/tmp`, compares every
+byte, and deletes **only that container generation** in a `finally` block.
 
-Pass requires `ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`, and
-`cleanup: "completed"`. Never report success without all four. On a failure, use
+Pass requires `ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`,
+`files: "verified"`, and `cleanup: "completed"`. Never report success without all five. On a failure, use
 Troubleshooting to fix the demonstrated cause and re-run at most once **only after
 cleanup is confirmed and allowance permits**. If creation was ambiguous or cleanup
 failed, reconcile first and report any remaining machine; do not blindly re-run.
@@ -93,7 +101,10 @@ renew idle time, and SSH issuance does not extend the hard deadline.
 | 429 `container_quota_exceeded` | Wait for the next UTC month; stop launch attempts. |
 | 429 `ssh_token_limit` / `terminal_limit` | Reuse authorized access, close an authorized connection, or wait for expiry. |
 | `execution_failed` / `timedOut` / `outputTruncated` | Inspect exit status and execution flags. Reduce the job or use authorized SSH access for longer tasks. |
-| 429 `execution_limit` | Wait for an active HTTP command to finish; do not stop unrelated work. |
+| 429 `execution_limit` | Wait for an active command/file operation to finish; do not stop unrelated work. |
+| `file_verification_failed` / `files_unavailable` | Check deployment alignment and image utilities. Preserve unexpected file contents and diagnostics outside shared logs. |
+| `file_too_large` / `invalid_file_path` | Use files up to 1 MiB and valid absolute paths; use authorized SSH for larger transfers. |
+| `file_not_found` / `not_regular_file` / `file_access_denied` | Check the path, parent directory and guest permissions. Writes need a regular file or an unused path. |
 | `idempotency_key_conflict` | The key belongs to a different image selection. Use the original request to reconcile it; use a new key only for an intentional new launch. |
 | `creation_no_longer_running` | The original operation stopped or failed. Do not touch a replacement in its slot. |
 | `creation_ambiguous` / launch timeout / 503 | Retry the same creation key and image selection within 24 hours; `starting` means wait and retry. Preserve `creationKey` if verification remains unresolved. Failed starts may consume quota. |
@@ -103,6 +114,6 @@ renew idle time, and SSH issuance does not extend the hard deadline.
 ## Report
 
 One paragraph: which integration changed, what command ran, stdout, exit code,
-and whether cleanup completed. State any blocker or remaining container plainly.
+whether the binary file round trip passed, and whether cleanup completed. State any blocker or remaining container plainly.
 Offer one relevant next step: an owned custom image, an LLM tool that runs commands,
 or a coding agent inside a container. Do not start that additional work unasked.

@@ -16,6 +16,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
+  "/containers/files": ["get", "put"],
   "/ssh/validate": ["post"], "/ssh/connect": ["get"],
   "/images": ["get", "post"], "/images/{id}": ["get", "delete"], "/images/{id}/logs": ["get"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
@@ -81,6 +82,20 @@ test("Swagger and ReDoc are available without service bindings", async () => {
     assert.match(response.headers.get("content-type") || "", /text\/html/);
     assert.match(await response.text(), /openapi\.json/);
   }
+});
+
+test('file schemas describe raw binary transport, generation identity and bounded writes', async () => {
+  const { paths } = await document();
+  const files = paths['/containers/files'];
+  assert.equal(files.get.operationId, 'readContainerFile');
+  assert.equal(files.put.operationId, 'writeContainerFile');
+  assert.equal(files.get.responses[200].content['application/octet-stream'].schema.format, 'binary');
+  assert.equal(files.put.requestBody.content['application/octet-stream'].schema.format, 'binary');
+  assert.equal(files.put.requestBody.required, false);
+  assert.deepEqual(files.put.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+  for (const name of ['id', 'createdAt', 'path']) assert.ok(files.get.parameters.some((p: any) => p.name === name && p.required));
+  assert.match(files.put.description, /atomic rename/);
+  assert.match(files.get.description, /1048576 bytes/);
 });
 
 test("registered routes forward untouched requests, streaming responses, bindings, and execution context", async () => {

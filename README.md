@@ -340,3 +340,24 @@ private runtime will return execution_unavailable. Run the web `verify:agent`
 command with the provisioned API key after rollout; it consumes one start and
 cleans up only its own generation. Until rollout, local process tests and API
 fixtures verify the contract but do not satisfy the production release gate.
+
+## HTTP files
+
+`GET` and `PUT /containers/files?id=<id>&createdAt=<ISO generation>&path=<absolute-path>`
+transfer raw binary files up to 1 MiB. Writes use atomic replacement and an existing
+parent directory. Reads return `application/octet-stream`; see API.md for path,
+permission and retry semantics. File operations recheck the generation and paid
+lease before process launch, renew idle activity, and share the four-command pool.
+The runtime bounds each operation by 30 seconds and the hard deadline.
+
+No database migration or image rebuild is needed for catalog/base images, which
+already include `/bin/sh` and GNU coreutils. Deploy the container Worker, then API,
+then web. The doctor checks that both file routes are advertised, and verification
+now checks a binary write/read as well as command execution and generation cleanup.
+Until the API rollout, the new doctor reports missing file routes.
+
+`node --test containers/files.test.mjs` runs real local filesystem/process checks.
+Write tests require GNU coreutils on PATH, as provided by the Linux catalog images;
+on macOS, prepend an available coreutils `libexec/gnubin` directory to PATH. Without
+it those tests explicitly skip. `npx tsx --test worker/app/files.test.ts` verifies
+public authentication, account ownership, error handling and binary forwarding.
