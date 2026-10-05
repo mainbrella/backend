@@ -278,3 +278,39 @@ syntax. It uses simulated GitHub/Cloudflare boundaries; a production build and
 launch still need a smoke test after rollout. The broader `npm test` currently
 also includes legacy admin/Apple tests referencing removed Groupicorn migrations;
 those unrelated fixtures need separate repair.
+
+## OpenAPI documentation
+
+The API uses the same Chanfana + Hono + Zod setup as Cubacadabra. Run `npm run dev`
+and open `http://localhost:8787/docs` for Swagger UI or `/redocs` for ReDoc.
+The OpenAPI 3.1 document is served at `/openapi.json` and generated directly from
+`worker/app/openapi-*.ts`. Existing handlers retain runtime validation, CORS,
+authentication, background work, and WebSocket responses.
+
+Export a standalone document without starting Wrangler or configuring secrets:
+
+```sh
+npm run docs:generate
+# Optional output path (parent directory must exist):
+npm run docs:generate -- /tmp/mainbrella-openapi.json
+```
+
+The default generated `openapi.json` is ignored by Git. To document a new endpoint,
+add its schema alongside related routes in `worker/app/openapi-*.ts`, using
+`register(api, method, path, schema, handler)`. Use Hono path parameters such as
+`/images/:id` and describe them with `request.params`; the document uses `{id}`.
+Include a unique `operationId`, summary, tag, request schema, response schemas,
+and the correct security scheme. The shared helpers in `openapi-shared.ts` cover
+JSON bodies/responses and common errors. For a new feature module, register it in
+`openapi.ts`. Add the method/path to `openapi.test.ts` and run:
+
+```sh
+npm run test:openapi
+npm run type-check
+npm run docs:generate
+```
+
+Billing mutations use browser cookies and a trusted Origin; container/image
+automation uses the session Bearer credential. Native app and internal service
+tokens have separate security schemes. WebSocket routes describe the HTTP upgrade;
+Swagger UI does not open terminal WebSocket sessions.

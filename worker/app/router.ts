@@ -1,3 +1,4 @@
+import { createOpenAPIApp } from "./openapi";
 import { syncAccountEntitlement } from "../lib/container-service";
 import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
@@ -8,7 +9,7 @@ import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
 
-export async function handleRequest(
+async function handleLegacyRequest(
   request: Request,
   env: Env,
   ctx?: ExecutionContext,
@@ -64,4 +65,12 @@ async function handleState(request: Request, env: Env): Promise<Response> {
 
   const state = env.APP_STATE.get(env.APP_STATE.idFromName("global"));
   return state.fetch(new Request("https://internal/state", request));
+}
+
+export const app = createOpenAPIApp(handleLegacyRequest);
+
+export async function handleRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  // Hono supplies automatic HEAD handling; retain the existing method policy.
+  if (request.method === "HEAD") return handleLegacyRequest(request, env, ctx);
+  return app.fetch(request, env, ctx);
 }

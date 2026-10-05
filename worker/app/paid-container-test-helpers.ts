@@ -147,8 +147,8 @@ export async function paidContainerFixture(t: TestContext, initialContainers: Re
       get(name: string) { return { async fetch(request: Request) {
         machineCalls.push({ name, request });
         const path = new URL(request.url).pathname;
-        if (path === '/terminal') return terminalStatus === 101 ? { status: 101, webSocket: {} } as Response : Response.json({ error: 'internal detail' }, { status: terminalStatus });
-        if (path === '/ssh') return sshStatus === 101 ? { status: 101, webSocket: {} } as Response : Response.json({ error: 'internal detail' }, { status: sshStatus });
+        if (path === '/terminal') return terminalStatus === 101 ? upgradeResponse() : Response.json({ error: 'internal detail' }, { status: terminalStatus });
+        if (path === '/ssh') return sshStatus === 101 ? upgradeResponse() : Response.json({ error: 'internal detail' }, { status: sshStatus });
         return Response.json({ containers: [] });
       } }; },
     },
@@ -166,4 +166,12 @@ export async function paidContainerFixture(t: TestContext, initialContainers: Re
     setSSHStatus(status: number) { sshStatus = status; },
     close() { sqlite.close(); },
   };
+}
+
+// Node rejects status 101 in the constructor. Retain the real Response prototype
+// so the router models a Worker WebSocket upgrade instead of a JSON object.
+function upgradeResponse(): Response {
+  return Object.defineProperties(new Response(null), {
+    status: { value: 101 }, webSocket: { value: {} },
+  });
 }
