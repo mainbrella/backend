@@ -1,20 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleSubscriptionRequest } from "./subscription";
-import { PRO_PRICE_ID, type BillingEnv } from "../lib/stripe";
+import { PRO_PRICE_ID, PLAN_PRICES, billingSubscription, type BillingEnv } from "../lib/stripe";
 
-function request(path = "/subscription/checkout", origin: string | null = "https://mainbrella.com", method = "POST") {
+function request(path = "/subscription/checkout", origin: string | null = "https://mainbrella.com", method = "POST", body: unknown = { plan: "pro" }, authenticated = false) {
   return new Request(`https://api.mainbrella.com${path}`, {
-    method, headers: origin ? { Origin: origin } : {},
+    method, headers: { ...(origin ? { Origin: origin } : {}), ...(authenticated ? { Cookie: "mainbrella_session=test_token" } : {}) },
+    body: method === "POST" ? JSON.stringify(body) : undefined,
   });
 }
 
 const env = {
+  STRIPE_PUBLISHABLE_KEY: "pk_test_example",
   STRIPE_SECRET_KEY: "sk_test_example",
   DB: { prepare() { throw new Error("Guest checkout must not require account storage"); } },
 } as unknown as BillingEnv;
 
-test("guest checkout uses the fixed Pro plan without an account or pre-created customer", async (t) => {
+test("guest checkout uses inline Pro checkout without an account or pre-created customer", async (t) => {
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     assert.equal(input, "https://api.stripe.com/v1/checkout/sessions");
     assert.equal(init?.method, "POST");
@@ -24,13 +26,16 @@ test("guest checkout uses the fixed Pro plan without an account or pre-created c
     assert.equal(params.get("line_items[0][quantity]"), "1");
     assert.equal(params.has("customer"), false);
     assert.equal(params.has("client_reference_id"), false);
-    assert.equal(params.get("success_url"), "https://mainbrella.com/?subscription_return=1#pricing");
-    assert.equal(params.get("cancel_url"), "https://mainbrella.com/?subscription_cancelled=1#pricing");
-    return Response.json({ id: "cs_test_guest", url: "https://checkout.stripe.com/guest" });
+    assert.equal(params.get("ui_mode"), "custom");
+    assert.equal(params.get("payment_method_types[0]"), "card");
+    assert.equal(params.has("success_url"), false);
+    assert.equal(params.has("cancel_url"), false);
+    assert.equal(params.get("return_url"), "https://mainbrella.com/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing");
+    return Response.json({ id: "cs_test_guest", client_secret: "cs_test_guest_secret" });
   });
   const response = await handleSubscriptionRequest(request(), env);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { url: "https://checkout.stripe.com/guest" });
+  assert.deepEqual(await response.json(), { client_secret: "cs_test_guest_secret", publishable_key: "pk_test_example" });
 });
 
 test("guest checkout keeps origin and method restrictions", async (t) => {
@@ -41,15 +46,15 @@ test("guest checkout keeps origin and method restrictions", async (t) => {
   assert.equal(stripe.mock.callCount(), 0);
 });
 
-test("subscription status, completion and portal still require authentication", async () => {
-  for (const path of ["/subscription", "/subscription/complete", "/subscription/portal"]) {
+test("subscription status and portal still require authentication", async () => {
+  for (const path of ["/subscription", "/subscription/portal"]) {
     const response = await handleSubscriptionRequest(request(path, undefined, path === "/subscription" ? "GET" : "POST"), env);
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: "not_authenticated" });
   }
 });
 
-test("guest checkout handles unavailable billing and missing checkout URLs", async (t) => {
+test("guest checkout handles unavailable billing and missing client secrets", async (t) => {
   t.mock.method(console, "error", () => {});
   const stripe = t.mock.method(globalThis, "fetch", async () => Response.json({ id: "cs_test_guest", url: null }));
   const unavailable = await handleSubscriptionRequest(request(), { DB: env.DB } as BillingEnv);
@@ -58,4 +63,112 @@ test("guest checkout handles unavailable billing and missing checkout URLs", asy
   const missingURL = await handleSubscriptionRequest(request(), env);
   assert.equal(missingURL.status, 503);
   assert.deepEqual(await missingURL.json(), { error: "billing_unavailable" });
+});
+
+for (const [plan, price] of Object.entries(PLAN_PRICES)) {
+  test(`guest checkout selects ${plan} from the server allowlist`, async (t) => {
+    t.mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+      const params = new URLSearchParams(String(init?.body));
+      assert.equal(params.get("line_items[0][price]"), price);
+      assert.equal(params.get("metadata[plan]"), plan);
+      assert.equal(params.get("subscription_data[metadata][plan]"), plan);
+      return Response.json({ id: "cs_test_guest", client_secret: "cs_test_secret" });
+    });
+    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan }), env)).status, 200);
+  });
+}
+
+test("invalid plans cannot reach Stripe, including prototype properties and price injection", async (t) => {
+  const stripe = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected request"); });
+  for (const body of [{}, { plan: "enterprise" }, { plan: "toString" }, { plan: "__proto__" }, { price_id: PRO_PRICE_ID }, { plan: 5 }]) {
+    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", body), env)).status, 400);
+  }
+  assert.equal(stripe.mock.callCount(), 0);
+});
+
+test("inline checkout requires both Stripe keys", async (t) => {
+  const stripe = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected request"); });
+  const response = await handleSubscriptionRequest(request(), { ...env, STRIPE_PUBLISHABLE_KEY: undefined } as unknown as BillingEnv);
+  assert.equal(response.status, 503);
+  assert.equal(stripe.mock.callCount(), 0);
+});
+
+test("guest completion verifies ownership and actual subscription status", async (t) => {
+  let status = "complete";
+  let price = PLAN_PRICES.builder as string;
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    id: "cs_test_guest", status, client_secret: "cs_test_secret", metadata: { checkout_type: "guest" },
+    subscription: { id: "sub_test", status: "active", items: { data: [{ price: { id: price } }] } },
+  }));
+  const complete = (secret: string) => handleSubscriptionRequest(request("/subscription/complete", undefined, "POST", {
+    session_id: "cs_test_guest", client_secret: secret,
+  }), env);
+  assert.equal((await complete("wrong_secret")).status, 403);
+  status = "open";
+  assert.equal((await complete("cs_test_secret")).status, 409);
+  status = "complete";
+  price = "price_unrelated";
+  assert.equal((await complete("cs_test_secret")).status, 409);
+  price = PLAN_PRICES.builder;
+  const result = await complete("cs_test_secret");
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { plan: "builder", active: true });
+});
+
+function accountEnv(checkout = "cs_old") {
+  return {
+    ...env,
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind() { return this; },
+          async first() { return sql.includes("FROM sessions") ? { id: "user_test", email: "user@example.com", name: "Test" } : { stripe_customer_id: "cus_test", checkout_session_id: checkout }; },
+          async run() { return {}; },
+        };
+      },
+    },
+  } as unknown as BillingEnv;
+}
+
+test("changing plans expires the prior session and creates checkout for the selected price", async (t) => {
+  const calls: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/subscriptions?")) return Response.json({ data: [], has_more: false });
+    if (url.endsWith("/cs_old")) return Response.json({ id: "cs_old", status: "open", ui_mode: "custom", metadata: { plan: "pro" }, client_secret: "cs_old_secret" });
+    if (url.endsWith("/cs_old/expire")) return Response.json({ id: "cs_old", status: "expired" });
+    assert.ok(url.endsWith("/checkout/sessions"));
+    const params = new URLSearchParams(String(init?.body));
+    assert.equal(params.get("line_items[0][price]"), PLAN_PRICES.scale);
+    assert.equal(params.get("customer"), "cus_test");
+    assert.ok((init?.headers as Record<string, string>)["Idempotency-Key"].includes("-scale-"));
+    return Response.json({ id: "cs_new", client_secret: "cs_new_secret" });
+  });
+  const result = await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan: "scale" }, true), accountEnv());
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { client_secret: "cs_new_secret", publishable_key: "pk_test_example" });
+  assert.equal(calls.length, 4);
+});
+
+test("existing Builder or Scale subscriptions block duplicate purchases", async (t) => {
+  let price: string = PLAN_PRICES.builder;
+  const stripe = t.mock.method(globalThis, "fetch", async () => Response.json({ data: [
+    { id: "sub_test", status: "active", items: { data: [{ price: { id: price } }] } },
+  ], has_more: false }));
+  for (price of [PLAN_PRICES.builder, PLAN_PRICES.scale]) {
+    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan: "pro" }, true), accountEnv())).status, 409);
+  }
+  assert.equal(stripe.mock.callCount(), 2);
+});
+
+test("subscription discovery searches older pages and ignores canceled plans", async (t) => {
+  let page = 0;
+  t.mock.method(globalThis, "fetch", async () => Response.json(++page === 1 ? {
+    data: [{ id: "sub_old", status: "canceled", items: { data: [{ price: { id: PRO_PRICE_ID } }] } }], has_more: true,
+  } : {
+    data: [{ id: "sub_scale", status: "active", items: { data: [{ price: { id: PLAN_PRICES.scale } }] } }], has_more: false,
+  }));
+  assert.equal((await billingSubscription(env, "cus_test"))?.id, "sub_scale");
+  assert.equal(page, 2);
 });
