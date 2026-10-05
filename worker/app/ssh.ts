@@ -1,4 +1,5 @@
-import { authCorsHeaders, authJson, currentUser, hashToken, randomToken } from './auth-core';
+import { authCorsHeaders, authJson, hashToken, randomToken } from './auth-core';
+import { containerUser } from './container-auth';
 
 type SSHEnv = Env & { SSH_GATEWAY_SECRET?: string; SSH_HOSTNAME?: string };
 type AccessToken = { user_id: string; container_created_at: string; expires_at: number };
@@ -72,9 +73,9 @@ async function issueAccess(request: Request, env: SSHEnv): Promise<Response> {
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'POST') return authJson({ error: 'method_not_allowed' }, 405, cors);
-  if (!request.headers.get('origin')) return authJson({ error: 'origin_required' }, 403, cors);
+  if (!request.headers.get('origin') && !request.headers.has('Authorization')) return authJson({ error: 'origin_required' }, 403, cors);
   try {
-    const user = await currentUser(env, request);
+    const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (!env.SSH_GATEWAY_SECRET) return authJson({ error: 'ssh_unavailable' }, 503, cors);
     const { container } = await runningContainer(env, user.id);

@@ -54,7 +54,7 @@ function fixture(initialTime = Date.UTC(2026, 9, 5, 12), timers = globalThis) {
   return { ctx, controller, request, read, setTime, now: () => now };
 }
 
-test("concurrent POSTs share one running container and reserve one monthly start", async () => {
+test("concurrent POSTs reject a second container and reserve only one monthly start", async () => {
   const f = fixture();
   let releaseReadiness;
   f.ctx.container.readyGate = new Promise((resolve) => { releaseReadiness = resolve; });
@@ -65,8 +65,10 @@ test("concurrent POSTs share one running container and reserve one monthly start
   releaseReadiness();
   const [a, b] = await Promise.all([first, second]);
   assert.equal(a.status, 200);
-  assert.equal(b.status, 200);
-  const result = await b.json();
+  assert.equal(b.status, 409);
+  assert.deepEqual(await b.json(), { error: "container_limit_exceeded" });
+  const result = (await f.read()).body;
+  assert.equal(result.plan, "builder");
   assert.deepEqual(result.containers.map(({ id, name, instance, status }) => ({ id, name, instance, status })), [
     { id: "small", name: "Small container", instance: "lite", status: "running" },
   ]);

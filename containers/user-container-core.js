@@ -1,4 +1,5 @@
-export const DEVELOPMENT_LIMITS = Object.freeze({
+// Temporary plan resolution: every account uses Builder until DB-backed tiers land.
+export const BUILDER_LIMITS = Object.freeze({
   maxContainers: 1,
   maxStartsPerMonth: 10,
   maxSessionMs: 60 * 60 * 1000,
@@ -93,7 +94,8 @@ export class UserContainerController {
       : [];
     return {
       containers,
-      limits: DEVELOPMENT_LIMITS,
+      plan: "builder",
+      limits: BUILDER_LIMITS,
       usage: { month, starts: usage[month] ?? 0 },
     };
   }
@@ -102,7 +104,7 @@ export class UserContainerController {
     // Older metadata without idleExpiresAt still gets a fixed idle deadline
     // derived from creation time, never from the current poll or restart time.
     const idleExpiresAt = metadata.idleExpiresAt
-      ?? metadata.createdAt + DEVELOPMENT_LIMITS.idleTimeoutMs;
+      ?? metadata.createdAt + BUILDER_LIMITS.idleTimeoutMs;
     return Math.min(idleExpiresAt, metadata.expiresAt);
   }
 
@@ -138,23 +140,25 @@ export class UserContainerController {
       if (!metadata || new Date(metadata.createdAt).toISOString() !== createdAt
         || this.now() >= this.deadline(metadata)) return false;
       metadata.idleExpiresAt = Math.min(
-        this.now() + DEVELOPMENT_LIMITS.idleTimeoutMs,
+        this.now() + BUILDER_LIMITS.idleTimeoutMs,
         metadata.expiresAt,
       );
       await this.ctx.storage.put(METADATA_KEY, metadata);
       await this.ctx.storage.setAlarm(this.deadline(metadata));
-      await this.container.setInactivityTimeout(DEVELOPMENT_LIMITS.idleTimeoutMs);
+      await this.container.setInactivityTimeout(BUILDER_LIMITS.idleTimeoutMs);
       return true;
     });
   }
 
   async start() {
-    if (this.container.running) return this.status();
+    if (this.container.running) {
+      return this.respond({ error: "container_limit_exceeded" }, 409);
+    }
 
     const now = this.now();
     const month = monthFor(new Date(now));
     const usage = (await this.ctx.storage.get(USAGE_KEY)) ?? {};
-    if ((usage[month] ?? 0) >= DEVELOPMENT_LIMITS.maxStartsPerMonth) {
+    if ((usage[month] ?? 0) >= BUILDER_LIMITS.maxStartsPerMonth) {
       return this.respond({ error: "container_quota_exceeded" }, 429);
     }
 
@@ -164,9 +168,9 @@ export class UserContainerController {
     await this.ctx.storage.put(USAGE_KEY, usage);
     const metadata = {
       createdAt: now,
-      expiresAt: now + DEVELOPMENT_LIMITS.maxSessionMs,
-      idleExpiresAt: now + DEVELOPMENT_LIMITS.idleTimeoutMs,
-      idleTimeoutMs: DEVELOPMENT_LIMITS.idleTimeoutMs,
+      expiresAt: now + BUILDER_LIMITS.maxSessionMs,
+      idleExpiresAt: now + BUILDER_LIMITS.idleTimeoutMs,
+      idleTimeoutMs: BUILDER_LIMITS.idleTimeoutMs,
     };
     await this.ctx.storage.put(METADATA_KEY, metadata);
     await this.ctx.storage.setAlarm(this.deadline(metadata));
@@ -178,7 +182,7 @@ export class UserContainerController {
         entrypoint: ["sleep", "infinity"],
         enableInternet: true,
       });
-      await this.container.setInactivityTimeout(DEVELOPMENT_LIMITS.idleTimeoutMs);
+      await this.container.setInactivityTimeout(BUILDER_LIMITS.idleTimeoutMs);
       let readinessTimer;
       let output;
       try {

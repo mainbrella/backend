@@ -39,7 +39,7 @@ test('container routes require a session and trusted origins for mutations', asy
   assert.equal(calls.length, 0);
 });
 
-test('all tiers use their own single slot and browser overrides are not forwarded', async () => {
+test('all accounts temporarily use their own single slot and browser overrides are not forwarded', async () => {
   const state = environment();
   for (const method of ['GET', 'POST', 'DELETE']) {
     const response = await handleRequest(request(method), state.env);
@@ -68,8 +68,12 @@ test('arbitrary container IDs and unsupported methods are rejected', async () =>
 test('quota errors are preserved and service failures are sanitized', async (t) => {
   t.mock.method(console, 'error', () => {});
   const state = environment();
-  state.setStatus(429);
+  state.setStatus(409);
   let response = await handleRequest(request('POST'), state.env);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {error:'container_limit_exceeded'});
+  state.setStatus(429);
+  response = await handleRequest(request('POST'), state.env);
   assert.equal(response.status, 429);
   assert.deepEqual(await response.json(), {error:'container_quota_exceeded'});
   state.setStatus(500);
@@ -78,4 +82,27 @@ test('quota errors are preserved and service failures are sanitized', async (t) 
   assert.deepEqual(await response.json(), {error:'containers_unavailable'});
   response = await handleRequest(request('GET'), {...state.env, USER_CONTAINER: undefined} as unknown as Env);
   assert.equal(response.status, 503);
+});
+
+test('automation accepts Bearer sessions without Origin and never forwards credentials', async () => {
+  const state = environment();
+  for (const method of ['GET', 'POST', 'DELETE']) {
+    const req = new Request('https://api.mainbrella.com/containers', {
+      method, headers: { Authorization: `Bearer ${'a'.repeat(64)}` },
+    });
+    assert.equal((await handleRequest(req, state.env)).status, 200);
+    assert.equal(state.names.at(-1), 'user:account-one');
+    assert.equal(state.calls.at(-1)!.headers.get('Authorization'), null);
+  }
+  for (const authorization of ['', 'Basic abc', 'Bearer invalid']) {
+    const req = new Request('https://api.mainbrella.com/containers', {
+      method: 'POST', headers: { Authorization: authorization, Cookie: 'mainbrella_session=test' },
+    });
+    assert.equal((await handleRequest(req, state.env)).status, 401);
+  }
+  assert.equal(state.calls.length, 3);
+  const untrusted = new Request('https://api.mainbrella.com/containers', {
+    method: 'POST', headers: { Authorization: `Bearer ${'a'.repeat(64)}`, Origin: 'https://attacker.com' },
+  });
+  assert.equal((await handleRequest(untrusted, state.env)).status, 403);
 });

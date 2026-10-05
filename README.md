@@ -1,6 +1,6 @@
 # Mainbrella API
 
-The cookie-authenticated `/containers` API maps each account server-side to
+The session-authenticated `/containers` API maps each account server-side to
 ``USER_CONTAINER.idFromName(`user:${user.id}`)`` in the private
 `mainbrella-containers` Worker (`containers/`). Container creation and quota
 reservation remain exclusively in `POST /containers`.
@@ -114,3 +114,28 @@ uploading. Push that Dockerfile to main and wait for CI to publish its image.
 Registry references and hashes are public metadata; API tokens stay in Actions
 secrets and are never put in the deployment manifest. The GitHub release and
 repository must remain accessible to the authenticated deployment user.
+
+## API automation and Builder enforcement
+
+See [API.md](API.md) for authentication, endpoints, curl examples, limits, and
+retry behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both
+files are mirrored in `../web`; update both copies when the API changes.
+
+Lifecycle and SSH issuance accept `Authorization: Bearer <login-session-value>`
+without Origin, using the existing hashed, expiring, revocable session record.
+Cookie mutations still require a trusted Origin. Browser terminal authentication
+and gateway credentials are unchanged. No migration or new secret is required.
+
+`BUILDER_LIMITS` in `containers/user-container-core.js` is the effective policy
+for every account until database-backed plan resolution is implemented. Status
+includes `plan: "builder"`. The serialized controller returns 409
+`container_limit_exceeded` for attempts to launch a second running container,
+without spending quota; monthly exhaustion remains 429
+`container_quota_exceeded`. Ownership and resources come exclusively from the
+backend, and UI/API launches share the same slot and reservations. Deploy the
+container Worker before the API to activate the new lifecycle behavior.
+
+To install the skill in Codex, copy `SKILL.md` and `API.md` into
+`~/.codex/skills/mainbrella-containers/` (or the equivalent skills directory for
+your agent), then invoke `$mainbrella-containers`. Provision the session credential
+separately using the instructions in `API.md`.

@@ -58,7 +58,7 @@ export function authCorsHeaders(request: Request): StringHeaders | null {
     "access-control-allow-origin": origin,
     "access-control-allow-credentials": "true",
     "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type, authorization",
     "access-control-max-age": "600",
     vary: "Origin",
   };
@@ -322,9 +322,13 @@ export async function createSession(env: Env, userID: string): Promise<string> {
 }
 
 export async function currentUser(env: Env, request: Request): Promise<AuthUser | null> {
-  if (!env.DB) return null;
   const token = readCookie(request, AUTH_COOKIE_NAME);
-  if (!token) return null;
+  return token ? sessionUser(env, token) : null;
+}
+
+// Shared session lookup; callers decide which credential transport they accept.
+export async function sessionUser(env: Env, token: string): Promise<AuthUser | null> {
+  if (!env.DB) return null;
   const row = await env.DB.prepare(
     `SELECT users.id, users.email, users.name, users.dob, users.google_sub, users.created_at
      FROM sessions JOIN users ON users.id = sessions.user_id

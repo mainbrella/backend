@@ -162,3 +162,23 @@ test('per-user cap permits ten live tokens and isolates another user', async () 
   assert.deepEqual(rows.map(({ user_id, count }) => ({ user_id, count })),
     [{ user_id: USER_ONE, count: 10 }, { user_id: USER_TWO, count: 1 }]);
 });
+
+test('automation SSH issuance uses the same session owner, expiration and revocation', async () => {
+  const f = await fixture();
+  const token = 'a'.repeat(64);
+  f.sqlite.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+    .run(await hashToken(token), USER_TWO, '2099-01-01T00:00:00.000Z');
+  const req = () => new Request('https://api.mainbrella.com/containers/ssh', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, Cookie: `mainbrella_session=${SESSION_ONE}` },
+  });
+  const issued = await handleSSHRequest(req(), f.env);
+  assert.equal(issued.status, 200);
+  assert.equal(f.names.at(-1), `user:${USER_TWO}`);
+  f.sqlite.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?')
+    .run('2000-01-01T00:00:00.000Z', await hashToken(token));
+  assert.equal((await handleSSHRequest(req(), f.env)).status, 401);
+  f.sqlite.prepare('DELETE FROM sessions WHERE token_hash = ?').run(await hashToken(token));
+  assert.equal((await handleSSHRequest(req(), f.env)).status, 401);
+  assert.equal(f.forwarded.length, 1);
+  assert.equal(f.forwarded[0].request.headers.get('Authorization'), null);
+});
