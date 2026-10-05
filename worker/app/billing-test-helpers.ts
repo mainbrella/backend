@@ -29,7 +29,7 @@ export function billingRequest(path = '/subscription', body: unknown = undefined
 }
 export async function billingFixture(t: TestContext, plan: Plan = 'builder', record = true) {
   const sqlite = new DatabaseSync(':memory:');
-  for (const migration of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '006_billing_webhooks']) {
+  for (const migration of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks']) {
     sqlite.exec(readFileSync(fileURLToPath(new URL(`../../migrations/${migration}.sql`, import.meta.url)), 'utf8'));
   }
   sqlite.prepare('INSERT INTO users (id,email,name) VALUES (?,?,?)').run(TEST_USER, 'test@example.com', 'Test');

@@ -4,6 +4,7 @@ import { cookieSecurity, errors, jsonResponse, planSchema, register, requestBody
 
 const subscriptionState = z.object({
   subscription: z.object({ id: z.string(), status: z.string(), cancel_at_period_end: z.boolean() }).loose().nullable(),
+  trial: z.object({ plan: planSchema, expires_at: z.number().describe("Unix milliseconds; access ends automatically without charges.") }).nullable(),
   plan: planSchema.nullable(), active: z.boolean(), valid_until: z.number().nullable().describe("Unix milliseconds."),
   pro: z.boolean(), configured: z.boolean(), scheduled_plan: planSchema.nullable(),
   scheduled_change_at: z.number().nullable().describe("Unix seconds."),
@@ -24,6 +25,7 @@ export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandl
     responses: { 200: jsonResponse(subscriptionState), ...errors(401, 403, 503) },
   }, handler);
   const mutations = [
+    { path: "trial", id: "redeemTrialCoupon", summary: "Redeem a card-free trial coupon; one trial per account", body: z.object({ plan: planSchema, code: z.string().min(4).max(64) }), result: subscriptionState },
     { path: "checkout", id: "createCheckout", summary: "Create or reuse embedded checkout", body: z.object({ plan: planSchema }),
       result: z.object({ client_secret: z.string(), publishable_key: z.string() }) },
     { path: "complete", id: "completeCheckout", summary: "Verify owned checkout and paid entitlement", body: z.object({ session_id: z.string() }), result: subscriptionState },

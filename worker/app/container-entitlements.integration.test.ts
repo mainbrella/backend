@@ -275,3 +275,35 @@ test('paid custom-image launches resolve ownership before forwarding selection t
   const unavailableMachine = system.machines.get('user:account-one:slot:2')!;
   assert.equal(unavailableMachine.runtime.startCalls, 0);
 });
+
+
+test('card-free trial boots real controllers and ends container access at trial expiry', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = await paidContainerFixture(t);
+  t.after(() => f.close());
+  f.sqlite.prepare('DELETE FROM pro_billing WHERE user_id = ?').run(USER_ONE);
+  const { hashToken } = await import('./auth-core');
+  const { redeemTrial } = await import('../lib/trial-coupons');
+  const hash = await hashToken('TRIAL123');
+  f.sqlite.prepare('INSERT INTO trial_coupons (code_hash,plan,trial_days,max_redemptions,expires_at) VALUES (?,?,?,?,?)')
+    .run(hash, 'builder', 14, 1, now + 86400000);
+  await redeemTrial(f.env as never, USER_ONE, 'builder', 'TRIAL123');
+  const end = now + 20 * 60000;
+  f.sqlite.prepare('UPDATE trial_redemptions SET expires_at = ? WHERE user_id = ?').run(end, USER_ONE);
+  const system = realControllers(f.env, () => now);
+  const request = (method: string) => new Request('https://api.mainbrella.com/containers', {
+    method, headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` },
+  });
+  const started = await handleRequest(request('POST'), system.env);
+  assert.equal(started.status, 200);
+  const state = await started.json() as any;
+  assert.equal(state.plan, 'builder'); assert.equal(state.active, true);
+  assert.equal(Date.parse(state.containers[0].expiresAt), end);
+  now = end + 1;
+  const expired = await handleRequest(request('GET'), system.env);
+  const expiredState = await expired.json() as any;
+  assert.equal(expiredState.active, false);
+  assert.equal(expiredState.containers.length, 0);
+  assert.equal((await handleRequest(request('POST'), system.env)).status, 402);
+});

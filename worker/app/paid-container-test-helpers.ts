@@ -22,7 +22,7 @@ function migratedDatabase() {
   for (const migration of [
     '../../migrations/001_initial.sql', '../../migrations/002_auth_sessions.sql',
     '../../migrations/003_pro_billing.sql', '../../migrations/004_subscription_details.sql',
-    '../../migrations/005_ssh_access.sql', '../../migrations/007_ssh_container_id.sql',
+    '../../migrations/009_trial_coupons.sql', '../../migrations/005_ssh_access.sql', '../../migrations/007_ssh_container_id.sql',
   ]) {
     sqlite.exec(readFileSync(fileURLToPath(new URL(migration, import.meta.url)), 'utf8'));
   }

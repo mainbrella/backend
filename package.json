@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "coupon:create": "node scripts/create-trial-coupon.mjs",
     "dev": "wrangler dev --local",
     "dev:lan": "wrangler dev --local --ip 0.0.0.0",
     "db:migrate:local": "wrangler d1 migrations apply delta --local",

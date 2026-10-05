@@ -1,7 +1,7 @@
 # Container automation API
 
 Base URL: `https://api.mainbrella.com` (local API: `http://localhost:8787`).
-The dashboard and automation share the same account-owned containers and allowance. A paid plan is required.
+The dashboard and automation share the same account-owned containers and allowance. An active paid plan or coupon trial is required.
 
 ## Authentication
 
@@ -60,7 +60,7 @@ for the authorized job's duration.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /containers` | 200: current containers, effective paid plan, limits, and usage. Does not renew idle time. |
+| `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
 | `POST /containers` | 200: reserves a start and boots a fixed lite container; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
@@ -122,7 +122,7 @@ reservation; stopping early does not refund usage. Quota persists across stops,
 restarts, upgrades, downgrades, cancellation and resubscription, and resets at the
 next UTC month. At capacity, additional POSTs return 409 without spending usage.
 
-A successful payment for the current recognized plan period is required. Trials,
+A successful payment for the current recognized plan period is required. Unapproved Stripe trials,
 failed payments, expired periods, paused/canceled subscriptions and stale database
 plan fields grant no access. Stripe outages return 503 instead of guessing a plan.
 DELETE cleanup remains available during billing outages. Hard deadlines are fixed
@@ -180,3 +180,17 @@ enough for the server's 60-second readiness check. SSH tokens stop working when
 the container stops or is recreated; do not print the returned token-bearing
 command in shared logs. Use the returned SSH command with trusted `ssh` and
 `cloudflared` tools to run the requested job; there is no HTTP exec endpoint.
+
+## Card-free trial coupons
+
+`POST /subscription/trial` with `{"plan":"builder","code":"<promo-code>"}` requires a login cookie and trusted browser Origin. It returns the same subscription state as `GET /subscription`, with `trial: {plan, expires_at}` (Unix milliseconds), `active: true`, and `valid_until` capped to trial expiry. Codes are case insensitive and may be redeemed on `/pricing/:slug` before entering payment details. This is an application trial, with no Stripe subscription or automatic charges. Subscribe separately to continue after expiry; paid subscriptions supersede trial access. Ordinary Stripe trials still grant no access.
+
+Apply migration `009_trial_coupons.sql` before deploying. From the backend directory, issue a code using:
+
+```sh
+npm run coupon:create -- --local builder 14 100 2026-12-31T23:59:59Z
+```
+
+Use `--remote` to issue a production code after migrating production. The command generates a random code and stores only its SHA-256 hash. Select plan, trial length (1–90 days), maximum redemptions, and redemption deadline explicitly. No codes are enabled by default. Disable future redemptions with `UPDATE trial_coupons SET enabled = 0 WHERE code_hash = '<hash>';` using your database tooling. Disabling a code does not revoke already granted trials.
+
+Each account may redeem one trial ever. Retrying the same valid redemption returns the original deadline, without extending access or consuming another use. The redemption cap and account uniqueness are enforced atomically. An existing live Stripe subscription blocks redemption. Invalid, expired, disabled, exhausted, or wrong-plan codes return 400 `invalid_promo_code`; an account that used a trial returns 409 `trial_already_used`. Trials share the plan's normal account quotas, and containers/SSH/terminals remain capped to trial expiry.

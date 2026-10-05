@@ -1,3 +1,4 @@
+import { redeemTrial } from '../lib/trial-coupons';
 import { authCorsHeaders, authJson, currentUser, readJSON, type StringHeaders } from "./auth-core";
 import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
 import { resolveBillingState, syncSubscriptionRecord, type BillingRecord, type BillingState } from "../lib/entitlements";
@@ -7,8 +8,8 @@ import { handleSubscriptionWebhook, type EntitlementChanged } from "./subscripti
 
 function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_PRICES, value); }
 async function stateResponse(env: BillingEnv, state: BillingState, cors: StringHeaders): Promise<Response> {
-  const plan = subscriptionPlan(state.subscription);
-  return authJson({ subscription: state.subscription, plan, active: state.entitlement.active,
+  const plan = state.entitlement.plan || subscriptionPlan(state.subscription);
+  return authJson({ subscription: state.subscription, trial: state.trial || null, plan, active: state.entitlement.active,
     valid_until: state.entitlement.validUntil, pro: state.entitlement.active && (plan === "pro" || plan === "scale"),
     configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
 }
@@ -24,7 +25,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS,
       configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
   }
-  if (!["/subscription", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume"].includes(path)) {
+  if (!["/subscription", "/subscription/trial", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume"].includes(path)) {
     return authJson({ error: "not_found" }, 404, cors);
   }
   if (request.method !== (path === "/subscription" ? "GET" : "POST")) return authJson({ error: "method_not_allowed" }, 405, cors);
@@ -36,7 +37,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
     const body = request.method === "POST" ? await readJSON(request, 2000) : null;
     if (request.method === "POST" && !body) return authJson({ error: "invalid_request" }, 400, cors);
-    if (["/subscription/checkout", "/subscription/change"].includes(path) && !validPlan(body?.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
+    if (["/subscription/checkout", "/subscription/trial", "/subscription/change"].includes(path) && !validPlan(body?.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (path === "/subscription/portal" && body?.plan !== undefined && !validPlan(body.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (["/subscription/change", "/subscription/cancel"].includes(path) && body?.confirm !== true) return authJson({ error: "confirmation_required" }, 400, cors);
     if (!["/subscription", "/subscription/complete"].includes(path)) {
@@ -68,6 +69,14 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       return stateResponse(env, state, cors);
     }
     if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
+    if (path === "/subscription/trial") {
+      const state = await resolveBillingState(env, user.id);
+      if (state.subscription) return authJson({ error: "subscription_exists" }, 409, cors);
+      await redeemTrial(env, user.id, body!.plan as Plan, body!.code);
+      const updated = await resolveBillingState(env, user.id);
+      await changed?.(user.id, updated.entitlement);
+      return stateResponse(env, updated, cors);
+    }
     if (path !== "/subscription/checkout") {
       if (!record) return authJson({ error: "no_subscription" }, 409, cors);
       const state = await resolveBillingState(env, user.id);
@@ -139,6 +148,8 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
   } catch (error) {
     const code = error instanceof Error ? error.message : "unknown";
     console.error("subscription_request_failed", code);
+    if (code === "invalid_promo_code") return authJson({ error: code }, 400, cors);
+    if (code === "trial_already_used") return authJson({ error: code }, 409, cors);
     if (code === "unsupported_schedule") return authJson({ error: "unsupported_schedule" }, 409, cors);
     return authJson({ error: "billing_unavailable" }, 503, cors);
   } finally {

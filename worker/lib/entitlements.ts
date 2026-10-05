@@ -1,8 +1,9 @@
+import { activeTrial, type Trial } from './trial-coupons';
 import { billingSubscription, PLAN_PRICES, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
 
 export interface Entitlement { plan: Plan | null; active: boolean; validUntil: number | null; checkedAt?: number }
 export interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
-export interface BillingState { record: BillingRecord | null; subscription: StripeSubscription | null; entitlement: Entitlement }
+export interface BillingState { record: BillingRecord | null; subscription: StripeSubscription | null; entitlement: Entitlement; trial?: Trial | null }
 const unpaid = (): Entitlement => ({ plan: null, active: false, validUntil: null });
 
 interface InvoiceLine {
@@ -96,12 +97,13 @@ export async function resolveBillingState(env: BillingEnv, userId: string): Prom
   const checkedAt = Date.now();
   const record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
     .bind(userId).first<BillingRecord>();
-  if (!record) return { record: null, subscription: null, entitlement: { ...unpaid(), checkedAt } };
-  const subscription = await billingSubscription(env, record.stripe_customer_id);
+  const subscription = record ? await billingSubscription(env, record.stripe_customer_id) : null;
   const entitlement = await subscriptionEntitlement(env, subscription);
+  const trial = !subscription ? await activeTrial(env, userId) : null;
+  if (trial) Object.assign(entitlement, { plan: trial.plan, active: true, validUntil: trial.expires_at });
   entitlement.checkedAt = checkedAt;
-  await syncSubscriptionRecord(env, userId, subscription);
-  return { record, subscription, entitlement };
+  if (record) await syncSubscriptionRecord(env, userId, subscription);
+  return { record, subscription, entitlement, trial };
 }
 
 // Stripe outages deliberately throw: callers must fail closed, never trust stale D1 status.

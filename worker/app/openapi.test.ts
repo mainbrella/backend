@@ -10,7 +10,7 @@ const endpointMethods: Record<string, string[]> = {
   "/auth/app/anonymous": ["post"], "/auth/app/me": ["get", "delete"],
   "/auth/app/refresh": ["post"], "/auth/app/logout": ["post"],
   "/subscription/config": ["get"], "/subscription": ["get"],
-  "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
+  "/subscription/trial": ["post"], "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
   "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
