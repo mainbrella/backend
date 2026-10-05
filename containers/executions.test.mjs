@@ -19,7 +19,7 @@ function fixture(t) {
     ['builderMachine', { createdAt: now, expiresAt, idleExpiresAt: expiresAt, idleTimeoutMs: 600_000 }],
     ['machineEntitlement', { plan: 'builder', active: true, validUntil: expiresAt, checkedAt: now }],
   ]);
-  let killsAfterExit = 0;
+  let killsAfterExit = 0, time = now, alarm = null;
   const ctx = {
     waitUntil(promise) { work.push(promise); },
     storage: { async get(key) { return structuredClone(values.get(key)); }, async put(key, value) {
@@ -27,7 +27,7 @@ function fixture(t) {
       else values.set(key, structuredClone(value));
     }, async delete(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) values.delete(key); },
     async list({ prefix, startAfter, limit }) { return new Map([...values].filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter)).sort().slice(0, limit).map(([k,v]) => [k, structuredClone(v)])); },
-    async setAlarm() {} },
+    async setAlarm(at) { alarm = at; }, async deleteAlarm() { alarm = null; } },
     container: { running: true, async setInactivityTimeout() {}, async destroy() { this.running = false; for (const child of children) child.kill('SIGKILL'); },
       async exec(argv, options) {
         const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' }); children.push(child);
@@ -38,11 +38,12 @@ function fixture(t) {
         return { stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout), stderr: Readable.toWeb(child.stderr), exitCode, kill };
       } },
   };
-  const controller = new UserContainerController(ctx, () => now);
+  const controller = new UserContainerController(ctx, () => time);
   const active = new Set();
   const manager = new ManagedExecutions(controller, active, ctx);
   t.after(async () => { for (const session of active) session.close(); for (const child of children) child.kill('SIGKILL'); await Promise.all(work); });
-  return { ctx, values, children, active, manager, work, get killsAfterExit() { return killsAfterExit; } };
+  return { ctx, values, children, active, manager, work, setTime(at) { time = at; },
+    get alarm() { return alarm; }, get killsAfterExit() { return killsAfterExit; } };
 }
 
 test('managed creation is idempotent across concurrent retries and returns real retained output', async t => {
@@ -113,4 +114,30 @@ test('restart recovery interrupts only matching generations and retained keys re
   for (let n = 0; n < MAX_RETAINED_EXECUTIONS; n++) f.values.set('execution-record:' + n, { id: String(n), key: String(n), createdAt, status: 'succeeded', retainUntil: now + 3600_000 });
   const denied = await f.manager.fetch(request('', 'POST', { command: 'echo x' }, 'new'));
   assert.equal(denied.status, 429);
+});
+
+test('stopping the VM preserves retained-output cleanup and maintenance erases expired output', async t => {
+  const f = fixture(t), id = crypto.randomUUID(), retainUntil = now + 3600_000;
+  f.values.set('execution-record:' + id, { id, createdAt, status: 'succeeded', cursor: 1, retainUntil });
+  const eventKey = `execution-event:${id}:00000001`;
+  f.values.set(eventKey, { sequence: 1, type: 'stdout', data: 'private output' });
+  const stop = new Request('https://internal/container', { method: 'DELETE' });
+  assert.equal((await f.manager.lifecycleFetch(stop)).status, 200);
+  assert.equal(f.ctx.container.running, false);
+  assert.equal(f.alarm, retainUntil);
+  f.setTime(retainUntil);
+  assert.equal((await f.manager.fetch(request(`/${id}`))).status, 404);
+  await f.manager.prune();
+  assert.equal(f.values.has('execution-record:' + id), false);
+  assert.equal(f.values.has(eventKey), false);
+});
+
+test('restart cleans already expired interrupted records and schedules remaining history', async t => {
+  const f = fixture(t), expired = crypto.randomUUID(), retained = crypto.randomUUID();
+  f.values.set('execution-record:' + expired, { id: expired, createdAt, status: 'running', cursor: 0, retainUntil: now });
+  f.values.set('execution-record:' + retained, { id: retained, createdAt, status: 'succeeded', cursor: 0, retainUntil: now + 3600_000 });
+  await f.manager.recover();
+  assert.equal(f.values.has('execution-record:' + expired), false);
+  assert.equal(f.ctx.container.running, false);
+  assert.equal(f.alarm, now + 3600_000);
 });

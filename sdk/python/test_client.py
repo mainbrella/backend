@@ -60,6 +60,9 @@ class ClientTests(unittest.TestCase):
             def do_GET(self):
                 if self.path == "/redirect":
                     self.send_response(302); self.send_header("Location", "/leak"); self.end_headers()
+                elif "/events?" in self.path:
+                    self.send_response(200); self.end_headers()
+                    self.wfile.write('id: 1\nevent: stdout\ndata: {"sequence":1,"type":"stdout","data":"héllo 界"}\n\nevent: status\ndata: {"status":"succeeded"}\n\n'.encode())
                 else:
                     owner.assertNotEqual(self.path, "/leak")
                     self.send_response(200); self.end_headers(); self.wfile.write(Handler.stored)
@@ -73,6 +76,11 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(MainbrellaError) as error:
                 client.request("/redirect")
             self.assertEqual(error.exception.status, 302)
+            from mainbrella import Execution
+            execution = Execution(sandbox, 'd688d42a-25ef-4c13-9b28-21a0fde6e163')
+            events = list(execution.events())
+            self.assertEqual(events[0]["data"], "héllo 界")
+            self.assertEqual(execution.cursor, 1)
         finally:
             server.shutdown(); server.server_close(); thread.join()
 

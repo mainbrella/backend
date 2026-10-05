@@ -10,6 +10,10 @@ Read [API.md](API.md) for endpoint contracts, images, quotas, and billing rules.
 Use `https://api.mainbrella.com` unless the user specifies another environment.
 Mainbrella uses REST for lifecycle, foreground command execution, and file transfer. No published
 SDK is available. Do not install invented SDK packages.
+Local SDKs exist under `sdk/javascript` and `sdk/python` when this backend checkout
+is available. Install from those paths only; see their READMEs for the actual API.
+Use public `GET /capabilities` to discover deployment support before choosing an
+execution mode. Obtain account allowances and deployed images from `/containers`.
 
 ## Quick Setup
 
@@ -60,7 +64,17 @@ Use `POST /containers/exec?id=<id>&createdAt=<generation>` with
 exitCode. Check timedOut and outputTruncated; either means incomplete execution
 with a null exitCode. Timeout is at most 60 seconds and output at most 1 MiB.
 Commands are not idempotent; reconcile effects before retrying after a transport
-failure. Use SSH only when the task needs longer or interactive execution.
+failure. For work beyond a foreground request, use managed execution if advertised
+by `/capabilities`; use SSH when the task needs interactive access.
+
+Managed jobs use `POST /containers/executions?id=<id>&createdAt=<generation>` with
+a required unique `Idempotency-Key` and a command/timeout body. Preserve the returned
+execution ID. Poll GET for results, use DELETE to cancel, or stream `/events` and
+reconnect with the last received sequence as `cursor`. Disconnect only detaches.
+Matching retries resolve the original job for one hour; never retry beyond that
+window. Maximum timeout is 15 minutes within the hard lease. Runtime restart
+marks unfinished jobs interrupted and stops their matching container generation,
+so choose a dedicated container when unrelated work must remain independent.
 
 Use `GET` and `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>`
 for file transfer up to 1 MiB. URL-encode query values. Send raw bytes with

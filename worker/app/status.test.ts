@@ -78,3 +78,28 @@ test('scheduled probes persist failures without claiming synthetic provisioning 
   assert.equal(result.components.find((c: any) => c.component === 'provisioning').state, 'unknown');
   assert.equal(targets.length, 2);
 });
+
+test('history cursors preserve equal timestamps and hide expired evidence before maintenance', async t => {
+  const f = fixture(t);
+  const checkedAt = new Date(Date.now() - 1000);
+  await recordObservations(f.env, Array.from({ length: 105 }, () => ({ component: 'api', state: 'operational', scope: 'reachability' })), checkedAt);
+  await recordObservations(f.env, [{ component: 'api', state: 'outage', scope: 'reachability' }], new Date(Date.now() - 32 * 86_400_000));
+  const first = await (await handleRequest(request('/status/history?component=api'), f.env)).json() as any;
+  assert.equal(first.observations.length, 100);
+  const params = new URLSearchParams({ component: 'api', before: first.next.before, beforeId: String(first.next.beforeId) });
+  const second = await (await handleRequest(request(`/status/history?${params}`), f.env)).json() as any;
+  assert.equal(second.observations.length, 5); assert.equal(second.next, null);
+  assert.equal(new Set([...first.observations, ...second.observations].map(o => o.id)).size, 105);
+});
+
+test('an older active incident remains visible when recent resolved incidents fill the page', async t => {
+  const f = fixture(t);
+  await recordObservations(f.env, STATUS_COMPONENTS.map(component => ({ component, state: 'operational', scope: 'synthetic' })));
+  const insert = f.sqlite.prepare('INSERT INTO status_incidents (id, component, title, state, message, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const activeId = crypto.randomUUID(), older = new Date(Date.now() - 60_000).toISOString(), now = new Date().toISOString();
+  insert.run(activeId, 'api', 'Ongoing disruption', 'investigating', 'Still investigating.', older, older);
+  for (let n = 0; n < 50; n++) insert.run(crypto.randomUUID(), 'api', 'Past incident', 'resolved', 'Resolved.', now, now);
+  const result = await (await handleRequest(request(), f.env)).json() as any;
+  assert.equal(result.state, 'degraded'); assert.equal(result.incidents.length, 50);
+  assert.equal(result.incidents[0].id, activeId);
+});

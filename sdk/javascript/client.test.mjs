@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Mainbrella, MainbrellaError } from './index.js';
+import { Mainbrella, MainbrellaError, Execution } from './index.js';
 
 const apiKey = `mb_${'a'.repeat(64)}`;
 const createdAt = '2026-10-05T12:00:00.000Z';
@@ -61,4 +61,38 @@ test('unsafe origins, paths and ambiguous creation are bounded', async () => {
   await assert.rejects(client.request('//evil.example/file'), { code: 'invalid_api_path' });
   await assert.rejects(client.create({ idempotencyKey: 'recover-me', waitTimeoutMs: 10, pollIntervalMs: 1 }),
     { code: 'creation_ambiguous', idempotencyKey: 'recover-me' });
+});
+
+test('managed streaming decodes fragmented Unicode, rotates with cursor and preserves explicit cancellation', async () => {
+  const id = crypto.randomUUID();
+  let streams = 0, canceled = false;
+  const client = new Mainbrella({ apiKey, fetch: async (url, options) => {
+    assert.equal(url.searchParams.get('createdAt'), createdAt);
+    if (options.method === 'POST') { assert.equal(options.headers['Idempotency-Key'], 'managed-key'); return Response.json({ id }); }
+    if (options.method === 'DELETE') { canceled = true; return Response.json({ id, status: 'canceled' }); }
+    assert.equal(url.searchParams.get('cursor'), String(streams));
+    const text = streams++ === 0
+      ? 'id: 1\nevent: stdout\ndata: {"sequence":1,"type":"stdout","data":"héllo 界"}\n\nevent: status\ndata: {"status":"running"}\n\n'
+      : 'id: 1\nevent: stdout\ndata: {"sequence":1,"type":"stdout","data":"duplicate"}\n\nid: 2\nevent: stderr\ndata: {"sequence":2,"type":"stderr","data":"problem"}\n\nevent: status\ndata: {"status":"succeeded"}\n\n';
+    const bytes = new TextEncoder().encode(text);
+    return new Response(new ReadableStream({ start(controller) { for (let n = 0; n < bytes.length; n += 7) controller.enqueue(bytes.slice(n, n + 7)); controller.close(); } }));
+  } });
+  const execution = await client.connect({ id: 'small', createdAt }).commands.start('echo hi', { idempotencyKey: 'managed-key' });
+  const events = [];
+  for await (const event of execution.events()) events.push(event);
+  assert.deepEqual(events.filter(e => e.type !== 'status').map(e => e.data), ['héllo 界', 'problem']);
+  assert.equal(execution.cursor, 2); assert.equal(streams, 2);
+  await execution.cancel(); assert.equal(canceled, true);
+});
+
+test('streaming accepts many bounded events in one transport chunk and rejects incomplete frames', async () => {
+  const id = crypto.randomUUID();
+  const frames = Array.from({ length: 200 }, (_, n) => `id: ${n + 1}\nevent: stdout\ndata: ${JSON.stringify({ type: 'stdout', sequence: n + 1, data: 'x'.repeat(1000) })}\n\n`).join('');
+  const client = new Mainbrella({ apiKey, fetch: async () => new Response(frames + 'event: status\ndata: {"status":"succeeded"}\n\n') });
+  let outputs = 0;
+  for await (const event of new Execution(client.connect({ id: 'small', createdAt }), id).events()) if (event.type === 'stdout') outputs++;
+  assert.equal(outputs, 200);
+  const bad = new Mainbrella({ apiKey, fetch: async () => new Response('event: stdout\ndata: {') });
+  await assert.rejects(async () => { for await (const event of new Execution(bad.connect({ id: 'small', createdAt }), id).events()) {} },
+    { code: 'execution_stream_unavailable', cursor: 0 });
 });

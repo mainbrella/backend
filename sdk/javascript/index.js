@@ -158,7 +158,7 @@ export class Execution {
       const reader = response.body?.getReader();
       if (!reader) throw new MainbrellaError('invalid_stream_response');
       const decoder = new TextDecoder();
-      let buffer = '', completed = false;
+      let buffer = '', completed = false, sawStatus = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -172,6 +172,7 @@ export class Execution {
             if (!data) continue;
             const item = JSON.parse(data);
             if (type === 'status') {
+              sawStatus = true;
               completed = terminal.has(item.status);
               yield { type: 'status', execution: item };
             } else if (['stdout', 'stderr'].includes(type)) {
@@ -180,6 +181,7 @@ export class Execution {
             }
           }
           if (buffer.length > 64 * 1024) throw new Error();
+          if (done && (buffer.trim() || !sawStatus)) throw new Error();
           if (done || completed) break;
         }
       } catch { throw new MainbrellaError('execution_stream_unavailable', 0, { cursor }); }

@@ -52,11 +52,12 @@ npm run test:plans  # Paid billing, account quotas, lifecycle, SSH and terminals
 npm test           # Full suite, including legacy fixtures noted below
 ```
 
-The full suite currently includes three legacy admin/Apple-auth tests referencing
-migrations absent from this checkout (`003_iop_program_tracking.sql`,
-`011_native_app_auth.sql`, and related legacy migrations). Those fixtures need
-their original migrations restored to run. Terminal/container/SSH tests are
-independent of those files.
+Retained admin/Apple-auth tests use an explicit test-only compatibility schema
+in `worker/app/fixtures/legacy-compatibility.sql`. It is not a production migration
+and does not enable native/community features on a fresh Mainbrella database.
+CI runs the full runtime, API and SDK suites, OpenAPI checks, type checking,
+JavaScript syntax checks and schema generation. Linux CI exercises file writes
+with GNU coreutils; those write tests skip explicitly when it is unavailable locally.
 
 ## Production deployment
 
@@ -224,7 +225,9 @@ live billing state, so a saved plan name cannot bypass payment checks.
 
 See [API.md](API.md) for authentication, endpoints, curl examples, limits and retry
 behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both files
-are mirrored in `../web`; update both copies when the API changes.
+are also published by `../web`. Backend changes update the copies here; coordinate
+publication through [the backend handoff](docs/backend-handoff.md) when the web
+repository is being edited independently.
 
 Lifecycle, execution, images, and SSH issuance accept `Authorization: Bearer mb_<key-value>`
 without Origin. Create named keys at `https://mainbrella.com/api-keys/`.
@@ -277,8 +280,7 @@ reservation atomically. Ambiguous network/server failures keep the reservation.
 container controller, deployment failure handling, quota refunds, and workflow
 syntax. It uses simulated GitHub/Cloudflare boundaries; a production build and
 launch still need a smoke test after rollout. The broader `npm test` currently
-also includes legacy admin/Apple tests referencing removed Groupicorn migrations;
-those unrelated fixtures need separate repair.
+also includes retained legacy admin/Apple tests with isolated compatibility fixtures.
 
 ## OpenAPI documentation
 
@@ -361,3 +363,45 @@ Write tests require GNU coreutils on PATH, as provided by the Linux catalog imag
 on macOS, prepend an available coreutils `libexec/gnubin` directory to PATH. Without
 it those tests explicitly skip. `npx tsx --test worker/app/files.test.ts` verifies
 public authentication, account ownership, error handling and binary forwarding.
+
+## Agent API and local SDKs
+
+`GET /capabilities` publishes deployment features and shared runtime limits without
+authentication or provisioning. Account allowances and deployed catalog IDs remain
+in authenticated `GET /containers`.
+
+Managed execution uses `POST /containers/executions` with a generation and required
+`Idempotency-Key`, followed by GET for retained results, DELETE for cancellation,
+and GET `/containers/executions/:executionId/events` for SSE output and cursor replay.
+It permits up to 15 minutes within the hard lease, shares the four-operation pool,
+and retains up to 32 execution records per container for one hour. Disconnect only
+detaches. A runtime restart interrupts unfinished jobs and stops their matching
+generation; it never replays a command. See [API.md](API.md) for the full contract.
+
+The dependency-free packages in [sdk/javascript](sdk/javascript/README.md) and
+[sdk/python](sdk/python/README.md) install locally. They are not published to npm
+or PyPI. Both support creation, generation-specific cleanup, binary files,
+foreground commands, managed execution, cancellation and streamed output.
+
+`npm run verify:agent` exercises create, execution, files, streaming and cleanup,
+consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs
+bounded foreground samples and saves raw results with their methodology. Both
+require a provisioned `MAINBRELLA_API_KEY` and pass account/capability checks before
+launching. They preserve all pre-existing containers.
+
+## Operational status
+
+Apply `011_operational_status.sql` before deploying the updated API. The five-minute
+scheduled handler records website/API reachability and authentication-database
+availability. These scopes do not establish successful login, provisioning, SSH,
+image-build or billing workflows. `/status` reports unobserved or stale components
+as unknown; `/status/history` exposes 31 days of observations with cursor pagination.
+
+Configure a separate `MONITORING_SECRET` to authorize internal observation and
+incident submissions. API keys cannot report public status. Operator-authored
+incident text is public. `npm run status:canary` uses a dedicated provisioned
+account and this secret to report a one-start create/execute/files/stream/cleanup
+probe. It has no recurring schedule, preserving control over its start budget.
+
+See [the backend handoff](docs/backend-handoff.md), [security evidence](docs/security-evidence.md)
+and [runtime feasibility](docs/runtime-feasibility.md) for web integration and release gates.

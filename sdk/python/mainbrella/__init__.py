@@ -191,6 +191,7 @@ class Execution:
         client = self.sandbox.client
         while True:
             completed = False
+            saw_status = False
             try:
                 response = build_opener(_NoRedirect()).open(Request(client.base_url + self._path("/events", cursor=cursor),
                     headers={"Authorization": "Bearer " + client._api_key}), timeout=client.timeout)
@@ -214,6 +215,7 @@ class Execution:
                             continue
                         item = json.loads(data)
                         if kind == "status":
+                            saw_status = True
                             completed = item["status"] not in ("starting", "running")
                             yield {"type": "status", "execution": item}
                             if completed:
@@ -224,10 +226,12 @@ class Execution:
                             if item["sequence"] > cursor:
                                 self.cursor = cursor = item["sequence"]
                                 yield item
+                    if not saw_status:
+                        raise ValueError("incomplete_stream")
             except HTTPError as error:
                 error.close()
                 raise MainbrellaError("execution_stream_unavailable", error.code) from None
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 raise MainbrellaError("execution_stream_unavailable") from None
             if completed:
                 return

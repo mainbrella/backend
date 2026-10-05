@@ -60,8 +60,9 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
         || component !== null && !STATUS_COMPONENTS.includes(component as typeof STATUS_COMPONENTS[number])) return authJson({ error: 'invalid_request' }, 400, cors);
       const upper = before ?? new Date(now.getTime() + 1).toISOString();
       const rows = await env.DB.prepare(`SELECT * FROM status_observations WHERE
-        (checked_at < ? OR (checked_at = ? AND id < ?)) ${component ? 'AND component = ?' : ''}
-        ORDER BY checked_at DESC, id DESC LIMIT 100`).bind(upper, upper, beforeId ? Number(beforeId) : 0, ...(component ? [component] : [])).all<ObservationRow>();
+        (checked_at < ? OR (checked_at = ? AND id < ?)) AND checked_at >= ? ${component ? 'AND component = ?' : ''}
+        ORDER BY checked_at DESC, id DESC LIMIT 100`).bind(upper, upper, beforeId ? Number(beforeId) : 0,
+          new Date(now.getTime() - 31 * 86_400_000).toISOString(), ...(component ? [component] : [])).all<ObservationRow>();
       const last = rows.results.at(-1);
       return authJson({ observations: rows.results.map(publicObservation), retentionDays: 31,
         next: rows.results.length === 100 && last ? { before: last.checked_at, beforeId: last.id } : null }, 200, cors);
@@ -69,7 +70,7 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
     if (url.pathname !== '/status') return authJson({ error: 'not_found' }, 404, cors);
     const rows = await env.DB.prepare(`SELECT * FROM status_observations WHERE id IN
       (SELECT MAX(id) FROM status_observations GROUP BY component)`).all<ObservationRow>();
-    const incidents = await env.DB.prepare('SELECT * FROM status_incidents ORDER BY updated_at DESC LIMIT 50').all();
+    const incidents = await env.DB.prepare("SELECT * FROM status_incidents ORDER BY (state = 'resolved') ASC, updated_at DESC LIMIT 50").all();
     const components = STATUS_COMPONENTS.map(component => {
       const row = rows.results.find(item => item.component === component);
       const stale = !row || now.getTime() - Date.parse(row.checked_at) >= STATUS_STALE_MS;

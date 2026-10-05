@@ -32,7 +32,7 @@ export class UserContainer extends DurableObject {
     if (["/ssh", "/terminal"].includes(new URL(request.url).pathname)) {
       return upgradeTerminal(this.controller, request, this.terminals);
     }
-    return this.controller.fetch(request);
+    return this.executions.lifecycleFetch(request);
   }
 
   async alarm() {

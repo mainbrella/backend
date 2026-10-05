@@ -48,6 +48,15 @@ export class ManagedExecutions {
       if (times.length) await this.ctx.storage.setAlarm(Math.min(...times));
     });
   }
+  async lifecycleFetch(request) {
+    try { return await this.controller.fetch(request); }
+    finally {
+      // Lifecycle stop/revocation clears the VM alarm. Retained output still
+      // needs maintenance even when no command or container remains active.
+      await this.prune();
+      await this.scheduleCleanup();
+    }
+  }
   async recover() {
     const records = await this.records();
     const metadata = await this.ctx.storage.get('builderMachine');
@@ -62,6 +71,8 @@ export class ManagedExecutions {
       }
     }
     if (interrupt && this.controller.container.running) await this.controller.destroy('Managed execution interrupted by runtime restart');
+    await this.prune();
+    await this.scheduleCleanup();
   }
   wake() { for (const listener of this.listeners) listener(); }
   async save(record, event) {

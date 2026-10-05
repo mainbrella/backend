@@ -1,0 +1,13 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-runtime-probe",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "main": "runtime-probe-worker.js",
+  "compatibility_date": "2026-10-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": { "bindings": [{ "name": "RUNTIME_PROBE", "class_name": "RuntimeProbe" }] },
+  "exports": { "RuntimeProbe": { "type": "durable-object", "storage": "sqlite" } },
+  "containers": [{ "class_name": "RuntimeProbe", "scheduling_policy": "durable_object",
+    "images": { "terminal": { "dockerfile": "../containers/Dockerfile" } } }]
+}

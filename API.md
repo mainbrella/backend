@@ -63,6 +63,9 @@ integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
 No Mainbrella SDK is published yet. Use native HTTP requests for lifecycle,
 command execution, and file transfer; local SSH tools are optional for interactive access.
+Local dependency-free SDK packages are available in this backend repository at
+`sdk/javascript` and `sdk/python`; their READMEs describe local installation. Do
+not assume these names can be installed from public npm/PyPI registries.
 
 Download and inspect the dependency-free Node 22+ tools:
 
@@ -346,3 +349,81 @@ npm run coupon:create -- --local builder 14 100 2026-12-31T23:59:59Z
 Use `--remote` to issue a production code after migrating production. The command generates a random code and stores only its SHA-256 hash. Select plan, trial length (1–90 days), maximum redemptions, and redemption deadline explicitly. No codes are enabled by default. Disable future redemptions with `UPDATE trial_coupons SET enabled = 0 WHERE code_hash = '<hash>';` using your database tooling. Disabling a code does not revoke already granted trials.
 
 Each account may redeem one trial ever. Retrying the same valid redemption returns the original deadline, without extending access or consuming another use. The redemption cap and account uniqueness are enforced atomically. An existing live Stripe subscription blocks redemption. Invalid, expired, disabled, exhausted, or wrong-plan codes return 400 `invalid_promo_code`; an account that used a trial returns 409 `trial_already_used`. Trials share the plan's normal account quotas, and containers/SSH/terminals remain capped to trial expiry.
+
+## Capability discovery
+
+`GET /capabilities` is public and accepts no query parameters. Its `apiVersion`
+identifies the contract. Execution/file limits come from the runtime's shared
+constants. Unsupported persistence, preview, filesystem-directory and network
+policy features are explicit. `images.customBuilds` reflects configured build
+credentials; it does not establish build-service health. Resources currently
+advertise only `lite`. Regions are not selectable.
+
+Use authenticated `GET /containers` for account allowances, usage, running
+generations and the deployed `imageCatalog`. New generations include
+`imageDigest`, the server-resolved image reference; older generations may omit it.
+Capability discovery does not contact Stripe or reserve a start.
+
+## Managed execution and streaming
+
+Use `POST /containers/executions?id=<id>&createdAt=<generation>` with a required
+`Idempotency-Key` and `{"command":"<shell command>","timeoutMs":30000}`. It returns
+202 with an execution record containing `id`, `createdAt`, timestamps, `status`,
+`retainUntil` (Unix milliseconds), `cursor`, `outputBytes`, `exitCode`, `timedOut`
+and `outputTruncated`. The command and creation key are not returned.
+
+Matching key/command/timeout retries within the same generation return the retained
+execution. Changed options return 409 `idempotency_key_conflict`. Retention lasts
+one hour from admission, with 32 records per container; when full, a new job returns
+429 `execution_history_limit`. After retention expires, a key can launch new work.
+Preserve the key and never retry an old operation beyond its retention window.
+
+Managed commands run `/bin/sh -lc`, default to 30 seconds, allow up to 15 minutes,
+and remain bounded by the hard container deadline. They share four active
+operations with foreground commands and files. Active jobs renew idle activity.
+Output stops at 1 MiB combined stdout/stderr or the bounded output-event count.
+Client disconnect does not cancel the job.
+
+- `GET /containers/executions/<execution-id>?id=<id>&createdAt=<generation>` returns
+  current state plus retained `stdout` and `stderr`.
+- `DELETE` at the same URL requests cancellation and returns 202. Poll until a
+  terminal state; cancellation of a completed job has no effect.
+- `GET /containers/executions/<execution-id>/events?id=<id>&createdAt=<generation>&cursor=0`
+  streams SSE output. stdout/stderr events carry `{type,sequence,data}` and an SSE
+  `id` equal to `sequence`. Resume with the last received sequence as `cursor`.
+  A cursor ahead of retained output returns 400 `invalid_cursor`.
+
+SSE connections emit heartbeat comments, rotate after 30 seconds, and end with a
+`status` event containing execution metadata. Reconnect after a nonterminal status;
+stop after `succeeded`, `failed`, `canceled`, `timed_out`, `output_limit` or
+`interrupted`. At most eight streams attach to a container. Closing a stream only
+detaches. Results and cancellation remain available to the authenticated owner
+after the container stops and during billing outages, until retention expires.
+Expired, foreign-generation or missing records return 404 `execution_not_found`.
+
+New execution admission requires paid access and a running generation. On a
+runtime restart, unfinished jobs become `interrupted` and their matching container
+generation stops to revoke orphan processes. This can terminate other work on that
+generation. Jobs are never replayed automatically. Filesystem/process persistence
+across stop or restart is not supported.
+
+## Public operational status
+
+`GET /status` returns overall `state`, `generatedAt`, `staleAfterMs`, seven component
+observations and up to 50 incidents, with active incidents first. Components are website, API, authentication,
+provisioning, SSH, images and billing. Observations include `scope` (reachability,
+control plane or synthetic workflow), latency and timestamp. Missing evidence or
+evidence older than 15 minutes becomes unknown. Active incidents prevent an overall
+operational state. No credentials or account information appear in public status.
+
+`GET /status/history` returns up to 100 observations with 31-day retention. Filter
+by `component`; paginate using returned `next.before` and `next.beforeId` together.
+No availability percentage is inferred from missing samples.
+
+`POST /internal/status/observations` and `/internal/status/incidents` require the
+dedicated `MONITORING_SECRET` Bearer credential. Account API keys are not accepted.
+The first accepts `{observations:[{component,state,scope,latencyMs?}]}` with at most
+seven distinct components and a server-assigned timestamp. The second accepts
+`{id,component,title,state,message}`; id is a UUID and state is investigating,
+identified, monitoring or resolved. An incident cannot change component or reopen
+after resolution. Incident text is public.

@@ -26,3 +26,11 @@ writes are never retried automatically. API errors expose sanitized `code` and
 
 Credentials belong in your environment or secret manager. HTTPS is required
 except loopback development URLs. HTTP redirects are refused.
+
+`sandbox.commands.start(command, timeout_ms=300000)` returns a managed job with
+`get()`, `wait()`, `cancel()` and `events()`. `events()` yields stdout/stderr chunks
+and status updates, reconnects on normal stream rotation and tracks `job.cursor`.
+Closing the iterator detaches; cancellation is explicit. `Execution(sandbox, id)`
+reconnects to a retained job. Preserve `idempotency_key` on start errors and retry
+the same options within one hour. Runtime restart interrupts unfinished managed
+jobs and stops their matching container generation.
