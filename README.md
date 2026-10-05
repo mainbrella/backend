@@ -31,8 +31,8 @@ Disconnect terminates only the attached tmux client. The existing idle/hard
 expiration alarm still destroys the container and closes terminal sockets.
 
 Run `npm run deploy` here to deploy the container Worker and its bash/tmux image
-first, then the API. Deploy `../web` afterward. Docker must be running for the
-container image build.
+first, then the API. Deploy `../web` afterward. The image is built in GitHub
+Actions; local deployments require GitHub CLI authentication, not Docker.
 Existing old-image containers need to be stopped and recreated. This path does
 not need SSH tokens or any additional secrets. `/containers/ssh`, its token
 migration/table, and the existing SSH gateway remain unchanged.
@@ -65,7 +65,7 @@ benchmark and historical material only; production builds do not read it.
 
 ```sh
 npm run deploy             # Containers and image first, then API; stops on failure
-npm run deploy:containers  # Container Worker and image only (requires Docker)
+npm run deploy:containers  # Container Worker with the CI-published image
 npm run deploy:api         # API only
 ```
 
@@ -79,3 +79,38 @@ Developer SSH keys are configured in `wrangler.containers.jsonc`. Connect with
 `npx wrangler containers ssh <INSTANCE_ID> --config wrangler.containers.jsonc`.
 Private keys stay local. Status polling and SSH attachment do not renew the idle
 lease; terminal input/output does.
+
+## Terminal image publishing
+
+The **Build terminal image** GitHub Actions workflow builds a Linux amd64 image,
+checks Node/bash/tmux, and pushes it to the Cloudflare managed registry. It runs
+on main when the Dockerfile, workflow, or dependency lockfile changes, and can
+also be run manually. CI publishes `terminal-image.json` on the `terminal-image`
+GitHub release, containing the immutable registry digest and Dockerfile hash.
+It does not deploy production Workers.
+
+One-time setup:
+
+1. Create a Cloudflare custom API token with **Account → Containers → Edit**,
+   limited to account `2b7a9be82bb64187230703b024e25157`. No zone permissions are
+   required for this image-only workflow. Leave IP filtering unset for GitHub
+   runners. Add it as the repository Actions secret `CLOUDFLARE_API_TOKEN`.
+2. Push the workflow and Dockerfile to main, then run **Build terminal image**
+   under the repository Actions tab if it has not already run.
+3. Install GitHub CLI and authenticate with `gh auth login` for this private
+   repository. Keep your existing Wrangler login for production deployment.
+4. Run `npm run deploy` locally after the image workflow succeeds.
+
+The deploy script downloads the release manifest, verifies the registry account,
+repository, digest, and Dockerfile hash, and supplies Wrangler a temporary config
+with a digest-pinned `image` instead of `dockerfile`. The tracked config remains
+the build blueprint. Use the npm deploy commands rather than invoking
+`wrangler deploy --config wrangler.containers.jsonc` directly, which would still
+attempt a local Docker build. `npm run deploy:containers -- --dry-run` exercises
+the same image selection without publishing the Worker.
+
+If the local Dockerfile differs from the published one, deployment stops before
+uploading. Push that Dockerfile to main and wait for CI to publish its image.
+Registry references and hashes are public metadata; API tokens stay in Actions
+secrets and are never put in the deployment manifest. The GitHub release and
+repository must remain accessible to the authenticated deployment user.

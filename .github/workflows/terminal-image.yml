@@ -1,0 +1,65 @@
+name: Build terminal image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - containers/Dockerfile
+      - .github/workflows/terminal-image.yml
+      - package-lock.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: terminal-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Check credentials
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo 'Add the CLOUDFLARE_API_TOKEN Actions secret with permission to push Cloudflare container images.' >&2
+            exit 1
+          fi
+      - name: Build and verify image
+        run: |
+          docker build --platform linux/amd64 --provenance=false -t "mainbrella-terminal:$GITHUB_SHA" containers
+          docker run --rm "mainbrella-terminal:$GITHUB_SHA" sh -ec 'node --version; bash --version; tmux -V; test -f /etc/tmux.conf; tmux new-session -d -s smoke; tmux has-session -t smoke'
+      - name: Push to Cloudflare registry
+        run: npx wrangler containers push "mainbrella-terminal:$GITHUB_SHA" --config wrangler.containers.jsonc
+      - name: Record immutable image reference
+        run: |
+          docker manifest inspect --verbose "registry.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/mainbrella-terminal:$GITHUB_SHA" > image-manifest.json
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const digest = JSON.parse(readFileSync('image-manifest.json', 'utf8')).Descriptor?.digest;
+          if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error('Missing registry image digest');
+          const image = `registry.cloudflare.com/${process.env.CLOUDFLARE_ACCOUNT_ID}/mainbrella-terminal@${digest}`;
+          const dockerfileHash = createHash('sha256').update(readFileSync('containers/Dockerfile')).digest('hex');
+          writeFileSync('terminal-image.json', JSON.stringify({ image, dockerfileHash, commit: process.env.GITHUB_SHA }, null, 2));
+          JS
+      - name: Publish deployment manifest
+        run: |
+          if ! gh release view terminal-image >/dev/null 2>&1; then
+            gh release create terminal-image --target "$GITHUB_SHA" --title 'Terminal container image' --notes 'Deployment manifest for the terminal image in Cloudflare Registry.' --latest=false
+          fi
+          gh release upload terminal-image terminal-image.json --clobber
+          echo 'Terminal image published. Run npm run deploy locally; Docker is not required.' >> "$GITHUB_STEP_SUMMARY"
