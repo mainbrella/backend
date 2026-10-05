@@ -17,9 +17,10 @@ export function registerContainerRoutes(api: OpenAPIApi, handler: LegacyHandler)
   }, handler);
   register(api, "post", "/containers", {
     operationId: "startContainer", tags: ["Containers"], summary: "Reserve a start and boot a container", security: containerSecurity,
-    description: "Requires paid access. Body is optional; imageId and catalogId are mutually exclusive. Creation is not idempotent: reconcile with GET after a timeout before retrying. Cookie requests require a trusted Origin.",
-    request: { headers: browserOrigin, ...requestBody(z.object({ imageId: z.string().optional(), catalogId: z.string().optional() }), false) },
-    responses: { 200: jsonResponse(status), ...errors(400, 401, 402, 403, 404, 409, 429, 503) },
+    description: "Requires paid access. Body is optional; imageId and catalogId are mutually exclusive. Optional Idempotency-Key (1–128 letters, digits, underscores or hyphens) resolves retries to one account-scoped reservation for 24 hours. Keyed responses include creation identity and current starting/running status. Changed image selection returns 409 idempotency_key_conflict; stopped/replaced reservations return 409 creation_no_longer_running. Unkeyed requests reserve a new start. Cookie requests require a trusted Origin.",
+    request: { headers: browserOrigin.extend({ "Idempotency-Key": z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional() }), ...requestBody(z.object({ imageId: z.string().optional(), catalogId: z.string().optional() }), false) },
+    responses: { 200: jsonResponse(status.extend({ creation: z.object({ id: z.string(), containerId: z.string(), createdAt: z.string(), status: z.enum(["starting", "running"]) }).optional() })), ...errors(400, 401, 402, 403, 404, 429, 503),
+      409: jsonResponse(z.object({ error: z.string(), creation: z.object({ id: z.string(), containerId: z.string(), status: z.literal("stopped") }).optional() }), "Capacity, image selection, idempotency conflict, or original creation no longer running.") },
   }, handler);
   register(api, "delete", "/containers", {
     operationId: "stopContainer", tags: ["Containers"], summary: "Stop a selected account container", security: containerSecurity,

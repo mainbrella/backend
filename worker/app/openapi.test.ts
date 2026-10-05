@@ -58,6 +58,12 @@ test("OpenAPI 3.1 documents every current endpoint with unique operation IDs and
 test("schema describes optional container bodies, multipart image source, and WebSocket upgrades", async () => {
   const { paths } = await document();
   assert.equal(paths["/containers"].post.requestBody.required, false);
+  const key = paths["/containers"].post.parameters.find((parameter: any) => parameter.name === "Idempotency-Key");
+  assert.equal(key.in, "header");
+  assert.equal(key.required, false);
+  assert.ok(key.schema.pattern);
+  assert.match(paths["/containers"].post.description, /24 hours/);
+  assert.ok(paths["/containers"].post.responses[200].content["application/json"].schema.allOf[1].properties.creation);
   assert.equal(paths["/images"].post.requestBody.required, true);
   const multipart = paths["/images"].post.requestBody.content["multipart/form-data"].schema;
   assert.equal(multipart.properties.context.format, "binary");

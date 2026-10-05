@@ -2,6 +2,9 @@ import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, va
 import { IMAGE_CATALOG } from './image-catalog.js';
 
 const KEY = 'containerAccount';
+const CREATION_PREFIX = 'creation:';
+const CREATION_RETENTION_MS = 24 * 60 * 60_000;
+export const validIdempotencyKey = key => typeof key === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(key);
 export const validContainerId = (id) => id === 'small' || /^c(?:[1-9]\d{0,2})$/.test(id) && Number(id.slice(1)) < 500;
 export const machineName = (userId, id) => id === 'small' ? `user:${userId}` : `user:${userId}:slot:${id.slice(1)}`;
 
@@ -61,15 +64,41 @@ export class ContainerAccountController {
     }
     return failed;
   }
+  async pruneCreations(state) {
+    if (!state.nextCreationExpiry || state.nextCreationExpiry > this.now()) return;
+    let startAfter;
+    let nextExpiry;
+    do {
+      const records = await this.ctx.storage.list({ prefix: CREATION_PREFIX, limit: 1000, ...(startAfter ? { startAfter } : {}) });
+      const expired = [];
+      for (const [key, record] of records) {
+        if (record.expiresAt <= this.now()) expired.push(key);
+        else nextExpiry = Math.min(nextExpiry ?? Infinity, record.expiresAt);
+        startAfter = key;
+      }
+      if (expired.length) await this.ctx.storage.delete(expired);
+      if (records.size < 1000) break;
+    } while (true);
+    state.nextCreationExpiry = nextExpiry;
+  }
+  creationResponse(state, containers, record) {
+    const container = state.reservations[record.slot] === record.reservationId && containers.find(c => c.id === record.slot);
+    if (!container) return this.respond({ error: 'creation_no_longer_running', creation: { id: record.id, containerId: record.slot, status: 'stopped' } }, 409);
+    return this.respond({ ...this.status(state, containers), creation: { id: record.id, containerId: record.slot, createdAt: container.createdAt, status: container.status } });
+  }
   async saveState(state, retry = false) {
     const month = new Date(this.now()).toISOString().slice(0, 7);
     state.usage = { [month]: state.usage[month] ?? 0 };
     state.pending = Object.fromEntries(Object.entries(state.pending).filter(([id]) => state.slots.includes(id)));
     await this.ctx.storage.put(KEY, state);
-    if (retry && state.slots.length) await this.ctx.storage.setAlarm(this.now() + 30_000);
+    let alarmAt;
+    if (retry && state.slots.length) alarmAt = this.now() + 30_000;
     else if (state.entitlement.active && state.slots.length) {
-      await this.ctx.storage.setAlarm(Math.min(state.entitlement.validUntil, ...Object.values(state.pending).map(at => at + 90_000)));
-    } else await this.ctx.storage.deleteAlarm();
+      alarmAt = Math.min(state.entitlement.validUntil, ...Object.values(state.pending).map(at => at + 90_000));
+    }
+    if (state.nextCreationExpiry) alarmAt = Math.min(alarmAt ?? Infinity, state.nextCreationExpiry);
+    if (alarmAt) await this.ctx.storage.setAlarm(alarmAt);
+    else await this.ctx.storage.deleteAlarm();
   }
   async reconcile(state, entitlement) {
     if ((state.entitlement?.checkedAt ?? 0) > (entitlement.checkedAt ?? 0)
@@ -155,11 +184,15 @@ export class ContainerAccountController {
     if (id !== null && (!validContainerId(id) || url.searchParams.getAll('id').length !== 1)) return this.respond({ error: 'invalid_container_id' }, 400);
     const suppliedEntitlement = requestEntitlement(request, this.now());
     const cleanupOnly = request.method === 'DELETE' && request.headers.get('x-mainbrella-cleanup') === '1';
+    const idempotencyKey = request.method === 'POST' ? request.headers.get('Idempotency-Key') : null;
+    if (idempotencyKey !== null && !validIdempotencyKey(idempotencyKey)) return this.respond({ error: 'invalid_idempotency_key' }, 400);
     let reservation;
     try {
       const selection = request.method === 'POST' && request.body ? await request.json() : undefined;
+      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]);
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
+        await this.pruneCreations(state);
         let entitlement = cleanupOnly && validEntitlement(state.entitlement, this.now()) ? state.entitlement : suppliedEntitlement;
         let containers = await this.reconcile(state, entitlement);
         entitlement = state.entitlement;
@@ -167,6 +200,13 @@ export class ContainerAccountController {
           if (!validEntitlement(entitlement, this.now())) {
             await this.reconcile(state, { active: false, plan: null, validUntil: null, checkedAt: entitlement.checkedAt });
             return this.respond({ error: 'subscription_required' }, 402);
+          }
+          if (idempotencyKey) {
+            const record = await this.ctx.storage.get(CREATION_PREFIX + idempotencyKey);
+            if (record && record.expiresAt > this.now()) {
+              if (record.fingerprint !== fingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
+              return this.creationResponse(state, containers, record);
+            }
           }
           const catalogImage = IMAGE_CATALOG.find(image => image.key === selection?.imageKey);
           if (catalogImage && !(state.imageCatalog ?? []).some(image => image.id === catalogImage.id)) {
@@ -182,9 +222,14 @@ export class ContainerAccountController {
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
-          await this.ctx.storage.put(KEY, state);
-          await this.ctx.storage.setAlarm(Math.min(entitlement.validUntil, this.now() + 90_000));
-          reservation = { state, slot, entitlement, reservationId };
+          const creation = idempotencyKey ? { id: crypto.randomUUID(), slot, reservationId, fingerprint, expiresAt: this.now() + CREATION_RETENTION_MS } : undefined;
+          if (creation) {
+            state.nextCreationExpiry = Math.min(state.nextCreationExpiry ?? Infinity, creation.expiresAt);
+            // Multi-key puts are atomic: the key and charged reservation survive together.
+            await this.ctx.storage.put({ [KEY]: state, [CREATION_PREFIX + idempotencyKey]: creation });
+          } else await this.ctx.storage.put(KEY, state);
+          await this.ctx.storage.setAlarm(Math.min(entitlement.validUntil, this.now() + 90_000, state.nextCreationExpiry ?? Infinity));
+          reservation = { state, slot, entitlement, reservationId, creation };
           return null;
         }
         if (request.method === 'DELETE') {
@@ -204,7 +249,7 @@ export class ContainerAccountController {
       if (result) return result;
       // Boot outside the reservation lock so a Scale account can launch many
       // containers together. Pending slots count toward capacity throughout.
-      const { state, slot, entitlement, reservationId } = reservation;
+      const { state, slot, entitlement, reservationId, creation } = reservation;
       await this.machine(state, slot, 'POST', entitlement, reservationId, selection);
       return await this.serialized(async () => {
         const current = await this.ctx.storage.get(KEY);
@@ -214,7 +259,7 @@ export class ContainerAccountController {
         delete current.pending[slot];
         const currentEntitlement = validEntitlement(current.entitlement, this.now()) ? current.entitlement : { active: false, plan: null, validUntil: null, checkedAt: current.entitlement.checkedAt };
         const containers = await this.reconcile(current, currentEntitlement);
-        return this.respond(this.status(current, containers));
+        return creation ? this.creationResponse(current, containers, creation) : this.respond(this.status(current, containers));
       });
     } catch (error) {
       // Keep reserved quota and pending slots on every ambiguous failure.
@@ -228,6 +273,7 @@ export class ContainerAccountController {
     return this.serialized(async () => {
       const state = await this.ctx.storage.get(KEY);
       if (!state) return;
+      await this.pruneCreations(state);
       const entitlement = validEntitlement(state.entitlement, this.now()) ? state.entitlement : { active: false, plan: null, validUntil: null, checkedAt: state.entitlement.checkedAt };
       await this.reconcile(state, entitlement);
     });

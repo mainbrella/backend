@@ -48,11 +48,13 @@ create, status, HTTP execution, and deletion. Keep credentials server-side.
 If agent/tool-calling code already exists, add Mainbrella where execution occurs;
 otherwise add a small example matching the detected language.
 
+Create with a unique `Idempotency-Key` header (UUID recommended). Retry the same
+key and image selection within 24 hours after an ambiguous result. Use the
+returned `creation.containerId` and `creation.createdAt` once its status is
+`running`; account status may also include other tasks' containers.
+
 Capture each container's `id` **and** `createdAt`, and pass both to HTTP execution
-and cleanup. The API returns account-wide status, not a unique creation operation;
-compare the successful creation response with pre-launch status to identify the new
-generation. Do not launch concurrently during initial setup. If multiple new
-containers appear, ownership is ambiguous: report it and preserve them.
+and cleanup. Preserve the idempotency key until startup and cleanup are resolved.
 Use `POST /containers/exec?id=<id>&createdAt=<generation>` with
 `{"command":"<shell command>","timeoutMs":30000}`. Collect stdout, stderr and
 exitCode. Check timedOut and outputTruncated; either means incomplete execution
@@ -92,7 +94,9 @@ renew idle time, and SSH issuance does not extend the hard deadline.
 | 429 `ssh_token_limit` / `terminal_limit` | Reuse authorized access, close an authorized connection, or wait for expiry. |
 | `execution_failed` / `timedOut` / `outputTruncated` | Inspect exit status and execution flags. Reduce the job or use authorized SSH access for longer tasks. |
 | 429 `execution_limit` | Wait for an active HTTP command to finish; do not stop unrelated work. |
-| `creation_ambiguous` / launch timeout / 503 | GET status once and report uncertain ownership or a failed start. Creation is not idempotent; failed starts may consume quota. |
+| `idempotency_key_conflict` | The key belongs to a different image selection. Use the original request to reconcile it; use a new key only for an intentional new launch. |
+| `creation_no_longer_running` | The original operation stopped or failed. Do not touch a replacement in its slot. |
+| `creation_ambiguous` / launch timeout / 503 | Retry the same creation key and image selection within 24 hours; `starting` means wait and retry. Preserve `creationKey` if verification remains unresolved. Failed starts may consume quota. |
 | `cleanup: "failed"` | Retry generation-qualified DELETE for the reported container; cleanup remains available during billing outages. Confirm absence with GET. |
 | 409 `container_not_running` | Refresh status; a stopped or replaced generation must not be targeted. |
 

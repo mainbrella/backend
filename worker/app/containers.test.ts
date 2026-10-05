@@ -175,3 +175,21 @@ test('automation accepts Bearer sessions without Origin and never forwards crede
   });
   assert.equal((await handleRequest(untrusted, f.env)).status, 403);
 });
+
+
+test('creation validates and forwards only POST idempotency keys, with browser CORS support', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const keyed = (method: string, key: string) => new Request('https://api.mainbrella.com/containers', {
+    method, headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}`, 'Idempotency-Key': key },
+  });
+  for (const key of ['', 'invalid key', 'a'.repeat(129), 'one,two']) {
+    assert.equal((await handleRequest(keyed('POST', key), f.env)).status, 400);
+  }
+  assert.equal(f.accountCalls.length, 0);
+  assert.equal((await handleRequest(keyed('POST', 'safe-retry_1'), f.env)).status, 200);
+  assert.equal(f.accountCalls.at(-1)!.request.headers.get('Idempotency-Key'), 'safe-retry_1');
+  await handleRequest(keyed('GET', 'ignored'), f.env);
+  assert.equal(f.accountCalls.at(-1)!.request.headers.get('Idempotency-Key'), null);
+  const preflight = await handleRequest(keyed('OPTIONS', 'safe-retry_1'), f.env);
+  assert.match(preflight.headers.get('access-control-allow-headers')!, /idempotency-key/);
+});

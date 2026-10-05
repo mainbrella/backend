@@ -7,7 +7,17 @@ import { entitlementHeaders, PLAN_LIMITS } from './plan-policy.js';
 class Storage {
   values = new Map(); alarmAt = null;
   async get(key) { return structuredClone(this.values.get(key)); }
-  async put(key, value) { this.values.set(key, structuredClone(value)); }
+  async put(key, value) {
+    if (typeof key === 'object') for (const [name, entry] of Object.entries(key)) this.values.set(name, structuredClone(entry));
+    else this.values.set(key, structuredClone(value));
+  }
+  async delete(key) {
+    if (Array.isArray(key)) return key.reduce((count, name) => count + Number(this.values.delete(name)), 0);
+    return this.values.delete(key);
+  }
+  async list({ prefix, limit, startAfter }) {
+    return new Map([...this.values].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter)).slice(0, limit));
+  }
   async setAlarm(at) { this.alarmAt = at; }
   async deleteAlarm() { this.alarmAt = null; }
 }
@@ -34,11 +44,11 @@ function fixture() {
     return machines.get(key);
   };
   let account = new ContainerAccountController(ctx, machineFor, () => now);
-  const request = (method = 'GET', id, overrides = {}) => {
+  const request = (method = 'GET', id, overrides = {}, body) => {
     const url = new URL('https://internal/containers');
     if (id) url.searchParams.set('id', id);
     return account.fetch(new Request(url, { method, headers: { 'x-mainbrella-user': 'owner',
-      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now }), ...overrides } }));
+      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now }), ...overrides }, ...(body ? { body: JSON.stringify(body) } : {}) }));
   };
   const read = async (...args) => { const response = await request(...args); return { status: response.status, data: await response.json() }; };
   return { ctx, machines, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
@@ -348,4 +358,140 @@ test('timed recovery fences a delayed dispatch before releasing an empty pending
   release(); assert.equal((await pending).status, 409);
   assert.equal(machine.ctx.container.starts, 0);
   assert.equal((await f.read()).data.usage.starts, 1);
+});
+
+
+test('keyed concurrent starts and restart retries share a durable operation and one charge', async () => {
+  const f = fixture(); let release;
+  f.machineFor('owner', 'small').ctx.container.gate = new Promise(resolve => { release = resolve; });
+  const headers = { 'Idempotency-Key': 'one-operation' };
+  const first = f.request('POST', null, headers);
+  await new Promise(resolve => setImmediate(resolve));
+  const pending = await f.read('POST', null, headers);
+  assert.equal(pending.status, 200);
+  assert.equal(pending.data.creation.status, 'starting');
+  assert.equal(pending.data.usage.starts, 1);
+  release(); const completed = await (await first).json();
+  assert.equal(completed.creation.id, pending.data.creation.id);
+  assert.equal(completed.creation.status, 'running');
+  f.restart();
+  const retry = await f.read('POST', null, headers);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(retry.data.creation, completed.creation);
+  assert.equal(retry.data.usage.starts, 1);
+  assert.equal(f.machineFor('owner', 'small').ctx.container.starts, 1);
+});
+
+test('keyed retries recover lost responses and never dispatch an ambiguous reservation twice', async () => {
+  const f = fixture(); const machine = f.machineFor('owner', 'small'); const original = machine.fetch;
+  machine.fetch = async request => {
+    const result = await original(request);
+    if (request.method === 'POST') throw new Error('response lost');
+    return result;
+  };
+  const headers = { 'Idempotency-Key': 'lost-response' };
+  assert.equal((await f.read('POST', null, headers)).status, 503);
+  f.restart(); machine.fetch = original;
+  assert.equal((await f.read('POST', null, headers)).data.creation.status, 'starting');
+  f.setTime(f.now() + 90001);
+  const retry = await f.read('POST', null, headers);
+  assert.equal(retry.data.creation.status, 'running');
+  assert.equal(retry.data.usage.starts, 1);
+  assert.equal(machine.ctx.container.starts, 1);
+});
+
+test('key conflicts, invalid keys, and retries after slot reuse cannot consume another start', async () => {
+  const f = fixture(); const headers = { 'Idempotency-Key': '__proto__' };
+  const first = await f.read('POST', null, headers);
+  assert.equal(first.status, 200);
+  const conflict = await f.read('POST', null, headers, { imageKey: 'other' });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.data.error, 'idempotency_key_conflict');
+  for (const key of ['', 'bad key', 'x'.repeat(129), 'a,b']) assert.equal((await f.read('POST', null, { 'Idempotency-Key': key })).status, 400);
+  await f.read('DELETE', 'small');
+  await f.read('POST');
+  const retry = await f.read('POST', null, headers);
+  assert.equal(retry.status, 409);
+  assert.equal(retry.data.error, 'creation_no_longer_running');
+  assert.equal(retry.data.creation.id, first.data.creation.id);
+  assert.equal((await f.read()).data.usage.starts, 2);
+});
+
+test('failed boot retries remain charged once and become stopped after recovery fences the slot', async () => {
+  const f = fixture(); f.machineFor('owner', 'small').ctx.container.exitCode = 7;
+  const headers = { 'Idempotency-Key': 'failed-boot' };
+  assert.equal((await f.read('POST', null, headers)).status, 503);
+  assert.equal((await f.read('POST', null, headers)).data.creation.status, 'starting');
+  f.setTime(f.now() + 90001); await f.alarm();
+  assert.equal((await f.read('POST', null, headers)).data.error, 'creation_no_longer_running');
+  assert.equal((await f.read()).data.usage.starts, 1);
+});
+
+test('keys expire after 24 hours and are garbage collected even with no containers', async () => {
+  const f = fixture(); const headers = { 'Idempotency-Key': 'reusable' };
+  const first = await f.read('POST', null, headers);
+  const expiresAt = f.now() + 24 * 60 * 60_000;
+  await f.read('DELETE');
+  assert.equal(f.ctx.storage.alarmAt, expiresAt);
+  f.setTime(expiresAt); await f.alarm();
+  assert.equal(await f.ctx.storage.get('creation:reusable'), undefined);
+  assert.equal(f.ctx.storage.alarmAt, null);
+  const next = await f.read('POST', null, headers);
+  assert.equal(next.status, 200);
+  assert.notEqual(next.data.creation.id, first.data.creation.id);
+  assert.equal(next.data.usage.starts, 2);
+});
+
+test('keys belong to the account and retries bypass occupied capacity but retain billing enforcement', async () => {
+  const headers = { 'Idempotency-Key': 'same-key' };
+  const f = fixture(); const other = fixture();
+  const first = await f.read('POST', null, headers);
+  const second = await other.read('POST', null, headers);
+  assert.notEqual(first.data.creation.id, second.data.creation.id);
+  for (let i = 0; i < 4; i++) await f.read('POST');
+  assert.equal((await f.read('POST')).status, 409);
+  assert.equal((await f.read('POST', null, headers)).status, 200);
+  assert.equal((await f.read()).data.usage.starts, 5);
+  f.setTime(f.now() + 1); f.setPaid(false);
+  assert.equal((await f.read('POST', null, headers)).status, 402);
+});
+
+
+test('retention cleanup pages through expired keys and preserves the next live expiry', async () => {
+  const f = fixture(); await f.read();
+  const now = f.now();
+  const state = await f.ctx.storage.get('containerAccount');
+  state.nextCreationExpiry = now;
+  await f.ctx.storage.put('containerAccount', state);
+  for (let i = 0; i < 1001; i++) await f.ctx.storage.put(`creation:${String(i).padStart(4, '0')}`, { expiresAt: now });
+  await f.ctx.storage.put('creation:live', { expiresAt: now + 60000 });
+  await f.alarm();
+  assert.equal([...f.ctx.storage.values.keys()].filter(key => key.startsWith('creation:')).length, 1);
+  assert.equal(f.ctx.storage.alarmAt, now + 60000);
+  f.setTime(now + 60000); await f.alarm();
+  assert.equal(await f.ctx.storage.get('creation:live'), undefined);
+  assert.equal(f.ctx.storage.alarmAt, null);
+});
+
+test('same-image retries succeed at monthly quota and failed atomic reservation saves do not boot', async () => {
+  const f = fixture(); const headers = { 'Idempotency-Key': 'one-start' };
+  assert.equal((await f.read('POST', null, headers)).status, 200);
+  const state = await f.ctx.storage.get('containerAccount');
+  state.usage['2026-10'] = PLAN_LIMITS.builder.maxStartsPerMonth;
+  await f.ctx.storage.put('containerAccount', state);
+  assert.equal((await f.read('POST', null, headers, { imageKey: 'terminal', imageName: 'Node' })).status, 200);
+  assert.equal((await f.read('POST')).status, 429);
+
+  const fresh = fixture(); const original = fresh.ctx.storage.put.bind(fresh.ctx.storage);
+  fresh.ctx.storage.put = async (key, value) => {
+    if (typeof key === 'object') throw new Error('storage unavailable');
+    return original(key, value);
+  };
+  assert.equal((await fresh.read('POST', null, headers)).status, 503);
+  assert.equal((await fresh.read()).data.usage.starts, 0);
+  assert.equal(fresh.machineFor('owner', 'small').ctx.container.starts, 0);
+  assert.equal(await fresh.ctx.storage.get('creation:one-start'), undefined);
+  fresh.ctx.storage.put = original;
+  assert.equal((await fresh.read('POST', null, headers)).status, 200);
+  assert.equal((await fresh.read()).data.usage.starts, 1);
 });

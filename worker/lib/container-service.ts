@@ -4,14 +4,14 @@ import { resolveEntitlement } from './entitlements';
 
 export type ContainerState = { plan: string | null; active: boolean; containers: { id: string; createdAt: string; expiresAt: string; status: string }[] };
 export type ContainerImageSelection = { imageKey: string; imageId?: string; imageName: string };
-export async function accountResponse(env: Env, userId: string, entitlement: Entitlement, method = 'GET', id?: string | null, createdAt?: string | null, selection?: ContainerImageSelection): Promise<Response> {
+export async function accountResponse(env: Env, userId: string, entitlement: Entitlement, method = 'GET', id?: string | null, createdAt?: string | null, selection?: ContainerImageSelection, idempotencyKey?: string | null): Promise<Response> {
   if (!env.CONTAINER_ACCOUNT || !env.USER_CONTAINER) throw new Error('containers_unavailable');
   const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${userId}`));
   const url = new URL('https://internal/containers');
   if (id) url.searchParams.set('id', id);
   if (createdAt) url.searchParams.set('createdAt', createdAt);
   return account.fetch(new Request(url, { method,
-    headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': userId, ...(method === 'DELETE' ? { 'x-mainbrella-cleanup': '1' } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': userId, ...(method === 'POST' && idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}), ...(method === 'DELETE' ? { 'x-mainbrella-cleanup': '1' } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
     ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
   }));
 }

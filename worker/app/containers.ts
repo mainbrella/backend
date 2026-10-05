@@ -3,7 +3,7 @@ import { ownedImage } from './images';
 import { containerUser } from './container-auth';
 import { resolveBillingState } from '../lib/entitlements';
 import { accountResponse, containerError, syncAccountEntitlement, type ContainerImageSelection } from '../lib/container-service';
-import { validContainerId } from '../../containers/container-account-core.js';
+import { validContainerId, validIdempotencyKey } from '../../containers/container-account-core.js';
 import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -19,6 +19,8 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
   if (request.method !== 'DELETE' && url.searchParams.has('createdAt')) return authJson({ error: 'invalid_request' }, 400, cors);
   if (url.searchParams.getAll('createdAt').length > 1) return authJson({ error: 'invalid_request' }, 400, cors);
   if (request.method === 'POST' && id !== null) return authJson({ error: 'invalid_request' }, 400, cors);
+  const idempotencyKey = request.method === 'POST' ? request.headers.get('Idempotency-Key') : null;
+  if (idempotencyKey !== null && !validIdempotencyKey(idempotencyKey)) return authJson({ error: 'invalid_idempotency_key' }, 400, cors);
   try {
     const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
@@ -56,7 +58,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
       }
     }
     // Forward only the server-resolved image, never browser image keys or resources.
-    const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection);
+    const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection, idempotencyKey);
     const data = await response.json() as { error?: string };
     if ([400, 402, 409, 429].includes(response.status)) return authJson(data, response.status, cors);
     if (!response.ok) throw new Error('machine_request_failed');

@@ -39,7 +39,9 @@ curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" "$API_URL/con
 
 # Start one small container. No body selects the default Node image.
 # Optionally send {"catalogId":"python"} using a deployed imageCatalog ID.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X POST "$API_URL/containers"
+CREATE_KEY=$(node -e 'console.log(require("node:crypto").randomUUID())')
+# Preserve CREATE_KEY and repeat the same POST to recover an ambiguous result.
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H "Idempotency-Key: $CREATE_KEY" -X POST "$API_URL/containers"
 
 # Replace ID and generation below with values from the successful launch response.
 # Run a command over HTTP; no local SSH tools are needed.
@@ -82,11 +84,12 @@ verification; it defaults to `node`.
 Verification runs `echo "hello from mainbrella"`, checks stdout and exit code 0,
 and deletes the newly created generation in `finally`. Pass requires
 `ok: true` and `cleanup: "completed"`. It preserves pre-existing containers.
-Do not launch other containers concurrently during setup: creation returns
-account-wide status without an operation identity. Ambiguous ownership or a
-startup timeout produces `creation_ambiguous` and `cleanup: "reconcile_manually"`;
-it never retries creation or deletes a machine by guesswork. Cleanup failures
-include the created ID and generation for targeted reconciliation.
+It uses a unique idempotency key and the returned `creation` identity, so concurrent
+launches cannot confuse ownership. It retries the same operation up to three times
+on a lost response or a `starting` result. Unresolved startup produces
+`creation_ambiguous` and `cleanup: "reconcile_manually"`, with `creationKey` for
+recovery: repeat the same POST body and key within 24 hours. It never deletes a
+machine by guesswork. Cleanup failures include the created ID and generation.
 
 ## Images
 
@@ -116,7 +119,7 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | Method and path | Result |
 | --- | --- |
 | `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
-| `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
+| `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; optional `Idempotency-Key` resolves retries to one reservation for 24 hours and adds `creation` identity/status; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
@@ -258,10 +261,27 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 | 429 | `ssh_token_limit` | Ten live SSH access tokens for this account. Reuse existing access or wait for expiration. |
 | 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` / `execution_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
 
-POST creation is not idempotent. If a request times out or returns 503, GET status
-before doing anything else: startup may have succeeded, or a failed startup may
-have consumed quota. Do not blindly retry POST. Set a startup client timeout long
-enough for the server's 60-second readiness check. SSH tokens stop working when
+Use `Idempotency-Key` on `POST /containers` for safe creation retries. Keys accept
+1–128 letters, digits, underscores or hyphens, are scoped to the authenticated
+account, and are retained for 24 hours from reservation. Repeat the same key and
+image selection after a timeout or 503; this resolves to the original operation
+without another charge or boot. A keyed 200 response adds
+`creation: {id, containerId, createdAt, status}`. `id` identifies the operation;
+`status` is `starting` or `running`. Wait for `running` before using the returned
+container ID and exact generation for execution or cleanup. Other entries in
+`containers` may belong to concurrent work.
+
+A changed image selection returns 409 `idempotency_key_conflict`. If the original
+reservation failed, stopped, expired, or its slot was reused, retries return 409
+`creation_no_longer_running` with `creation: {id, containerId, status: "stopped"}`;
+they never launch a replacement. Failed starts still consume quota. After 24 hours,
+a key may create a new operation; use a new key for each intentional launch and
+never retry an old operation beyond that window. Billing and authorization checks
+still apply. Without a key, each POST may reserve a new start: reconcile with GET
+after an ambiguous result and do not blindly retry. Allow at least 60 seconds for
+the readiness check.
+
+SSH tokens stop working when
 the container stops or is recreated; do not print the returned token-bearing
 command in shared logs. Use HTTP execution for bounded foreground jobs. Use the returned SSH command
 with trusted `ssh` and `cloudflared` tools for interactive or longer jobs.
