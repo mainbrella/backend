@@ -1,5 +1,6 @@
 import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
+import { handleSubscriptionRequest } from "./subscription";
 import { handleAdminRequest } from "./admin";
 
 export async function handleRequest(
@@ -7,6 +8,10 @@ export async function handleRequest(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/subscription" || url.pathname.startsWith("/subscription/")) {
+    return handleSubscriptionRequest(request, env);
+  }
 
   if (url.pathname.startsWith("/auth/")) {
     return handleAuthRequest(request, env);

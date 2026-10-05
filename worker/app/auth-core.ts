@@ -1,6 +1,6 @@
 import { jsonResponse } from "../shared/http";
 
-const AUTH_COOKIE_NAME = "groupicorn_session";
+const AUTH_COOKIE_NAME = "mainbrella_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISSUERS = new Set([
@@ -8,8 +8,8 @@ const GOOGLE_ISSUERS = new Set([
   "accounts.google.com",
 ]);
 const AUTH_ORIGINS = new Set([
-  "https://groupicorn.com",
-  "https://www.groupicorn.com",
+  "https://mainbrella.com",
+  "https://www.mainbrella.com",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
 ]);
