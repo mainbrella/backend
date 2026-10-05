@@ -8,6 +8,11 @@ use `user:<userId>:slot:<number>`. Container creation and quota reservation rema
 exclusive to `POST /containers`; client ownership, plan, resource and lease
 headers are never forwarded.
 
+The [preview ingress design and private runtime contract](docs/preview-ingress.md)
+cover the local port-bound grant/HTTP/WebSocket foundation. Public preview URLs,
+account endpoints and SDK/dashboard integration remain unfinished; deployment
+capabilities continue to report previews as unsupported.
+
 ## Browser terminal
 
 `GET /containers/terminal?id=<container id>&createdAt=<ISO generation>&cols=80&rows=24` requires

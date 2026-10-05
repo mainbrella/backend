@@ -4,6 +4,7 @@ import { upgradeTerminal } from "./terminal.js";
 import { executeCommand } from "./commands.js";
 import { accessFile } from "./files.js";
 import { ManagedExecutions } from './executions.js';
+import { ContainerPreviews } from './previews.js';
 
 export class UserContainer extends DurableObject {
   constructor(ctx, env) {
@@ -12,7 +13,9 @@ export class UserContainer extends DurableObject {
     this.terminals = new Set();
     this.commands = new Set();
     this.executions = new ManagedExecutions(this.controller, this.commands, ctx);
+    this.previews = new ContainerPreviews(this.controller);
     this.controller.onStopped = () => {
+      this.previews.close();
       for (const session of this.terminals) session.close(1000, 'Container stopped');
       for (const session of this.commands) session.close();
     };
@@ -26,6 +29,9 @@ export class UserContainer extends DurableObject {
   }
 
   fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === '/previews') return this.previews.manage(request);
+    if (path === '/preview' || path.startsWith('/preview/')) return this.previews.forward(request);
     if (new URL(request.url).pathname === '/executions' || new URL(request.url).pathname.startsWith('/executions/')) return this.executions.fetch(request);
     if (new URL(request.url).pathname === '/files') return accessFile(this.controller, request, this.commands);
     if (new URL(request.url).pathname === '/exec') return executeCommand(this.controller, request, this.commands);
