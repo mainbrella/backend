@@ -1,5 +1,16 @@
 export const PRO_PRICE_ID = "price_1UNAWSGSUs8K8zgHXfnoTiJE";
-export type BillingEnv = Env & { STRIPE_SECRET_KEY?: string };
+export const PLAN_PRICES = {
+  builder: "price_1UNAovGSUs8K8zgHwUCsCX16",
+  pro: PRO_PRICE_ID,
+  scale: "price_1UNAq1GSUs8K8zgHnt8PplRQ",
+} as const;
+export type Plan = keyof typeof PLAN_PRICES;
+export function subscriptionPlan(subscription: StripeSubscription | null): Plan | null {
+  return (Object.keys(PLAN_PRICES) as Plan[]).find((plan) =>
+    subscription?.items.data.some((item) => item.price.id === PLAN_PRICES[plan]),
+  ) || null;
+}
+export type BillingEnv = Env & { STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string };
 export interface StripeSubscription {
   id: string;
   status: string;
@@ -10,6 +21,9 @@ export interface CheckoutSession {
   id: string;
   url: string | null;
   status: string;
+  client_secret?: string;
+  ui_mode?: string;
+  metadata?: Record<string, string>;
   client_reference_id: string;
   customer: string;
   subscription?: StripeSubscription | null;
@@ -36,7 +50,7 @@ export async function stripeRequest<T>(
   return response.json() as Promise<T>;
 }
 
-export async function proSubscription(env: BillingEnv, customer: string): Promise<StripeSubscription | null> {
+export async function billingSubscription(env: BillingEnv, customer: string): Promise<StripeSubscription | null> {
   const params = new URLSearchParams({ customer, status: "all", limit: "100" });
   const subscriptions: StripeSubscription[] = [];
   // Include every page so old canceled subscriptions cannot hide a current plan.
@@ -47,7 +61,7 @@ export async function proSubscription(env: BillingEnv, customer: string): Promis
     params.set("starting_after", page.data[page.data.length - 1].id);
   }
   return subscriptions.find((subscription) =>
-    subscription.items.data.some((item) => item.price.id === PRO_PRICE_ID)
+    subscriptionPlan(subscription) !== null
     && !["canceled", "incomplete_expired"].includes(subscription.status),
   ) || null;
 }
