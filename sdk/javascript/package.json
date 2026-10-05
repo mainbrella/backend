@@ -1,0 +1,10 @@
+{
+  "name": "@mainbrella/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Mainbrella container automation client",
+  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } },
+  "files": ["index.js", "index.d.ts", "README.md"],
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test *.test.mjs" }
+}

@@ -1,4 +1,4 @@
-name: Image checks
+name: Backend checks
 
 on:
   pull_request:
@@ -20,10 +20,15 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: npm ci
-      - run: npm run test:images
+      - run: npm test
+      - run: npm run test:openapi
       - run: npm run type-check
       - run: npm run check:containers
+      - run: npm run docs:generate
       - name: Validate workflows
         env:
           GH_TOKEN: ${{ github.token }}

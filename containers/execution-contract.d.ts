@@ -1,0 +1,9 @@
+export const MAX_MANAGED_TIMEOUT_MS: number;
+export const EXECUTION_RETENTION_MS: number;
+export const MAX_RETAINED_EXECUTIONS: number;
+export const MAX_EXECUTION_EVENTS: number;
+export const MAX_EXECUTION_STREAMS: number;
+export const EXECUTION_STREAM_MS: number;
+export function validExecutionId(value: unknown): value is string;
+export function validExecution(value: unknown): boolean;
+export function terminalExecution(record: { status: string }): boolean;

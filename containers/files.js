@@ -39,6 +39,7 @@ export async function accessFile(controller, request, active, timers = globalThi
 
   const abort = new AbortController();
   let process;
+  let exited = false;
   let reason;
   let rejectStopped;
   const stopped = new Promise((_, reject) => { rejectStopped = reject; });
@@ -46,8 +47,10 @@ export async function accessFile(controller, request, active, timers = globalThi
   const stop = value => {
     if (reason) return;
     reason = value;
-    abort.abort();
-    try { process?.kill(9); } catch { /* already exited */ }
+    if (!exited) {
+      abort.abort();
+      try { process?.kill(9); } catch { /* already exited */ }
+    }
     rejectStopped(new Error(value));
   };
   const session = { close: () => stop('container_not_running') };
@@ -64,6 +67,7 @@ export async function accessFile(controller, request, active, timers = globalThi
       { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
+    const exit = process.exitCode.then(code => { exited = true; return code; });
     if (!await controller.touchTerminalActivity(createdAt)) throw new Error('Machine unavailable');
     if (!process.stdin || !process.stdout || !process.stderr) throw new Error('missing_stream');
     writer = process.stdin.getWriter();
@@ -74,7 +78,7 @@ export async function accessFile(controller, request, active, timers = globalThi
     // Consume both output streams during the write so no pipe can deadlock.
     let inputFailed = false;
     const [exitCode, bytes] = await Promise.race([Promise.all([
-      process.exitCode, readFileBytes(process.stdout, MAX_FILE_BYTES + 1, abort.signal),
+      exit, readFileBytes(process.stdout, MAX_FILE_BYTES + 1, abort.signal),
       readFileBytes(process.stderr, 8192, abort.signal), send().catch(() => { inputFailed = true; }),
     ]), stopped]);
     const failures = { 44: ['file_not_found', 404], 45: ['not_regular_file', 409], 46: ['file_access_denied', 403] };
@@ -93,8 +97,10 @@ export async function accessFile(controller, request, active, timers = globalThi
     timers.clearTimeout(timer);
     request.signal.removeEventListener('abort', disconnected);
     active.delete(session);
-    abort.abort();
-    try { process?.kill(9); } catch { /* already exited */ }
+    if (!exited) {
+      abort.abort();
+      try { process?.kill(9); } catch { /* already exited */ }
+    }
     if (writer) void writer.abort().catch(() => {});
   }
 }

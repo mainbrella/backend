@@ -11,6 +11,8 @@ import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
 import { handleCommandRequest } from "./commands";
 import { handleFileRequest } from "./files";
+import { handleCapabilitiesRequest } from './capabilities';
+import { handleExecutionRequest } from './executions';
 
 async function handleLegacyRequest(
   request: Request,
@@ -18,6 +20,9 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
+  if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
 
   if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);
 

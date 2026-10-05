@@ -17,6 +17,7 @@ export async function executeCommand(controller, request, active, timers = globa
 
   const abort = new AbortController();
   let process;
+  let exited = false;
   let reason;
   let rejectStopped;
   const stopped = new Promise((_, reject) => { rejectStopped = reject; });
@@ -25,8 +26,10 @@ export async function executeCommand(controller, request, active, timers = globa
   const stop = (value) => {
     if (reason) return;
     reason = value;
-    abort.abort();
-    try { process?.kill(9); } catch { /* already exited */ }
+    if (!exited) {
+      abort.abort();
+      try { process?.kill(9); } catch { /* already exited */ }
+    }
     rejectStopped(new Error(value));
   };
   const session = { close: () => stop('container_not_running') };
@@ -65,10 +68,11 @@ export async function executeCommand(controller, request, active, timers = globa
     // A process returned after timeout must also be terminated.
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
+    const exit = process.exitCode.then(code => { exited = true; return code; });
     if (!await controller.touchTerminalActivity(createdAt)) return controller.respond({ error: 'container_not_running' }, 409);
     await Promise.race([process.stdin?.close(), stopped]);
     const [exitCode] = await Promise.race([
-      Promise.all([process.exitCode, pump(process.stdout, 'stdout'), pump(process.stderr, 'stderr')]), stopped,
+      Promise.all([exit, pump(process.stdout, 'stdout'), pump(process.stderr, 'stderr')]), stopped,
     ]);
     result.exitCode = exitCode;
     return controller.respond(result);
@@ -84,8 +88,10 @@ export async function executeCommand(controller, request, active, timers = globa
     timers.clearTimeout(timer);
     request.signal.removeEventListener('abort', disconnected);
     active.delete(session);
-    abort.abort();
-    try { process?.kill(9); } catch { /* already exited */ }
+    if (!exited) {
+      abort.abort();
+      try { process?.kill(9); } catch { /* already exited */ }
+    }
     for (const reader of readers) void reader.cancel().catch(() => {});
   }
 }

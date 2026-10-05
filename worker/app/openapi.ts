@@ -5,6 +5,8 @@ import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
 import { registerCommandRoutes } from "./openapi-commands";
 import { registerFileRoutes } from "./openapi-files";
+import { registerCapabilityRoutes } from './openapi-capabilities';
+import { registerExecutionRoutes } from './openapi-executions';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerOperationsRoutes } from "./openapi-operations";
@@ -34,6 +36,8 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     api.registry.registerComponent("securitySchemes", name, scheme);
   }
   registerOperationsRoutes(api, handler);
+  registerCapabilityRoutes(api, handler);
+  registerExecutionRoutes(api, handler);
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);

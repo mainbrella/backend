@@ -55,9 +55,10 @@ test("Apple identity tokens require a valid signature, app audience, and nonce",
 
     const sqlite = new DatabaseSync(":memory:");
     sqlite.exec("PRAGMA foreign_keys = ON");
-    for (const file of ["001_initial.sql", "002_auth_sessions.sql", "011_native_app_auth.sql", "014_import_cast_herd.sql"]) {
+    for (const file of ["001_initial.sql", "002_auth_sessions.sql"]) {
       sqlite.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), "utf8"));
     }
+    sqlite.exec(readFileSync(new URL('./fixtures/legacy-compatibility.sql', import.meta.url), 'utf8'));
     const db = {
       async batch(statements: { run(): unknown }[]) { return Promise.all(statements.map((statement) => statement.run())); },
       prepare(sql: string) {

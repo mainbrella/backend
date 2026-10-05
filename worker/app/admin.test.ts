@@ -9,14 +9,10 @@ const LEGACY_ADMIN_ID = "4109eeda-46e0-4ffa-ac57-f1ff81902116";
 
 async function fixture() {
   const sqlite = new DatabaseSync(":memory:");
-  for (const file of ["001_initial.sql", "002_auth_sessions.sql", "003_iop_program_tracking.sql",
-    "004_iop_directory.sql", "005_iop_map_index.sql", "006_staff_reviews.sql",
-    "007_location_reviews.sql", "008_review_moderation.sql", "009_general_location_reviews.sql",
-    "010_tour_requests.sql", "011_native_app_auth.sql", "012_tour_agreed_time.sql",
-    "013_backfill_location_main_phone.sql", "014_import_cast_herd.sql",
-    "015_herd_recognition_and_push.sql", "016_herd_invariants.sql", "018_program_client_claims.sql"]) {
+  for (const file of ["001_initial.sql", "002_auth_sessions.sql"]) {
     sqlite.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), "utf8"));
   }
+  sqlite.exec(readFileSync(new URL('./fixtures/legacy-compatibility.sql', import.meta.url), 'utf8'));
   const adminID = crypto.randomUUID();
   const memberID = crypto.randomUUID();
   sqlite.prepare("INSERT INTO users (id, name, email) VALUES (?, 'Admin', 'OneOne@Gmail.com')").run(adminID);
@@ -44,7 +40,7 @@ async function fixture() {
   async function call(path: string, token?: string, method = "GET") {
     return handleRequest(new Request(`https://api.groupicorn.com${path}`, {
       method,
-      headers: { Origin: "http://localhost:5173", ...(token ? { Cookie: `groupicorn_session=${token}` } : {}) },
+      headers: { Origin: "http://localhost:5173", ...(token ? { Cookie: `mainbrella_session=${token}` } : {}) },
     }), env);
   }
   return { call, sqlite, adminID, adminToken, memberToken };

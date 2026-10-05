@@ -4,6 +4,10 @@ import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
+  '/capabilities': ['get'],
+  '/containers/executions': ['post'],
+  '/containers/executions/{executionId}': ['get', 'delete'],
+  '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
   "/health": ["get"], "/state": ["get"],
   "/auth/google": ["post"], "/auth/email": ["post"], "/auth/me": ["get"], "/auth/logout": ["post"],
