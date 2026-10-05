@@ -4,6 +4,7 @@ import { FILE_TIMEOUT_MS, MAX_FILE_BYTES, MAX_FILE_PATH_BYTES } from '../../cont
 import { MACHINE_SIZES, ACCESS_LIMITS } from '../../containers/plan-policy.js';
 import { IMAGE_LIMITS } from './images';
 import { MAX_MANAGED_TIMEOUT_MS, EXECUTION_RETENTION_MS, MAX_RETAINED_EXECUTIONS } from '../../containers/execution-contract.js';
+import { previewsConfigured } from '../lib/preview-routing';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
@@ -21,7 +22,7 @@ export function capabilities(env: Env) {
       mkdir: false, delete: false, watch: false, maxFileBytes: MAX_FILE_BYTES,
       maxPathBytes: MAX_FILE_PATH_BYTES, timeoutMs: FILE_TIMEOUT_MS, sharedExecutionPool: true },
     persistence: { filesystemAfterStop: false, snapshots: false, memory: false, volumes: false },
-    previews: { supported: false, signedUrls: false },
+    previews: { supported: previewsConfigured(env), signedUrls: false },
     images: { catalog: true, availableCatalogPath: '/containers',
       customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,

@@ -1,6 +1,9 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  PREVIEWS_ENABLED?: string;
+  PREVIEW_DOMAIN?: string;
+  PREVIEW_ROUTES?: D1Database;
   MONITORING_SECRET?: string;
   IMAGE_BUILD_GITHUB_TOKEN?: string;
   IMAGE_BUILD_SECRET?: string;

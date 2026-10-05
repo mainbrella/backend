@@ -8,6 +8,7 @@ const endpointMethods: Record<string, string[]> = {
   '/status': ['get'], '/status/history': ['get'],
   '/internal/status/observations': ['post'], '/internal/status/incidents': ['post'],
   '/containers/executions': ['post'],
+  '/containers/previews': ['get', 'post', 'delete'],
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
@@ -88,6 +89,28 @@ test("Swagger and ReDoc are available without service bindings", async () => {
     assert.match(response.headers.get("content-type") || "", /text\/html/);
     assert.match(await response.text(), /openapi\.json/);
   }
+});
+
+test('preview schemas specify generation, authentication, shared limits and retryable reconciliation', async () => {
+  const { paths } = await document();
+  const previews = paths['/containers/previews'];
+  const body = previews.post.requestBody.content['application/json'].schema;
+  assert.equal(body.properties.port.minimum, 1024);
+  assert.equal(body.properties.port.maximum, 65535);
+  assert.equal(body.properties.ttlSeconds.minimum, 60);
+  assert.equal(body.properties.ttlSeconds.maximum, 3600);
+  assert.deepEqual(body.required, ['port']);
+  assert.equal(body.additionalProperties, false);
+  assert.ok(previews.post.responses[201]);
+  assert.ok(previews.post.responses[503].content['application/json'].schema.properties.previewId);
+  assert.ok(previews.delete.responses[503].content['application/json'].schema.properties.previewId);
+  for (const method of ['get', 'post', 'delete']) {
+    assert.deepEqual(previews[method].security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+    for (const name of ['id', 'createdAt']) assert.ok(previews[method].parameters.some((p: any) => p.name === name && p.required));
+  }
+  assert.ok(previews.delete.parameters.some((p: any) => p.name === 'previewId' && p.required));
+  assert.match(previews.post.description, /bearer capabilities/);
+  assert.match(previews.post.description, /Cookies are stripped/);
 });
 
 test('file schemas describe raw binary transport, generation identity and bounded writes', async () => {

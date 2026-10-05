@@ -1,0 +1,12 @@
+export const MIN_PREVIEW_PORT: number;
+export const MAX_PREVIEW_PORT: number;
+export const MAX_PREVIEW_GRANTS: number;
+export const MAX_PREVIEW_CONNECTIONS: number;
+export const DEFAULT_PREVIEW_TTL_SECONDS: number;
+export const MAX_PREVIEW_TTL_SECONDS: number;
+export const PREVIEW_CONNECT_TIMEOUT_MS: number;
+export const MAX_PREVIEW_FRAME_BYTES: number;
+export function validPreviewPort(port: unknown): port is number;
+export function validPreviewToken(token: unknown): token is string;
+export function validPreviewId(id: unknown): id is string;
+export function validPreviewOptions(body: unknown): body is { port: number; ttlSeconds?: number };

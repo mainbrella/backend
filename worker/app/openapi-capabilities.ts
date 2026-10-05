@@ -26,7 +26,7 @@ export const capabilitiesSchema = z.object({
 export function registerCapabilityRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/capabilities', {
     operationId: 'getCapabilities', tags: ['Operations'], summary: 'Discover API features and runtime limits', security: [],
-    description: 'Public, read-only deployment contract. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration.',
+    description: 'Public, read-only deployment contract. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration. previews.supported requires explicit enablement, an isolated preview domain, routing database and runtime binding. Preview URLs use opaque bearer tokens rather than signatures, so signedUrls remains false.',
     responses: { 200: jsonResponse(capabilitiesSchema), ...errors(400, 403, 405) },
   }, handler);
 }

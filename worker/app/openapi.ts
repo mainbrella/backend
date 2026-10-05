@@ -7,6 +7,7 @@ import { registerCommandRoutes } from "./openapi-commands";
 import { registerFileRoutes } from "./openapi-files";
 import { registerCapabilityRoutes } from './openapi-capabilities';
 import { registerExecutionRoutes } from './openapi-executions';
+import { registerPreviewRoutes } from './openapi-previews';
 import { registerStatusRoutes } from './openapi-status';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
@@ -40,6 +41,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerOperationsRoutes(api, handler);
   registerCapabilityRoutes(api, handler);
   registerExecutionRoutes(api, handler);
+  registerPreviewRoutes(api, handler);
   registerStatusRoutes(api, handler);
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);

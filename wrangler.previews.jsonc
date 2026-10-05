@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-previews",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "main": "worker/preview-gateway.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["enable_request_signal"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "PREVIEWS_ENABLED": "false", "PREVIEW_DOMAIN": "" },
+  "durable_objects": { "bindings": [
+    { "name": "USER_CONTAINER", "class_name": "UserContainer", "script_name": "mainbrella-containers" }
+  ] },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "observability": { "enabled": false },
+  "routes": []
+}

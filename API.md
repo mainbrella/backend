@@ -358,8 +358,11 @@ Each account may redeem one trial ever. Retrying the same valid redemption retur
 
 `GET /capabilities` is public and accepts no query parameters. Its `apiVersion`
 identifies the contract. Execution/file limits come from the runtime's shared
-constants. Unsupported persistence, preview, filesystem-directory and network
-policy features are explicit. `images.customBuilds` reflects configured build
+constants. Unsupported persistence, filesystem-directory and network
+policy features are explicit. `previews.supported` requires explicit enablement,
+an isolated preview domain, a routing database and the runtime binding. It remains
+false in the checked-in configuration. Preview links use opaque bearer tokens,
+so `previews.signedUrls` remains false. `images.customBuilds` reflects configured build
 credentials; it does not establish build-service health. Resources currently
 advertise all five machine sizes. Regions are not selectable.
 
@@ -367,6 +370,60 @@ Use authenticated `GET /containers` for account allowances, usage, running
 generations and the deployed `imageCatalog`. New generations include
 `imageDigest`, the server-resolved image reference; older generations may omit it.
 Capability discovery does not contact Stripe or reserve a start.
+
+## Protected application previews
+
+These endpoints are implemented locally; public previews remain disabled until
+the isolated gateway/domain is configured and qualified. Check
+`/capabilities` and use previews only when `previews.supported` is true.
+
+Start the application's HTTP server in an owned container first. Then use
+`POST /containers/previews?id=<id>&createdAt=<generation>` with
+`{"port":3000,"ttlSeconds":900}`. API keys and login sessions are accepted;
+cookie writes require trusted Origin. Requests are bounded to 1024 bytes.
+The response is 201 with `{id, port, createdAt, expiresAt, url}`. `expiresAt`
+is Unix milliseconds; `createdAt` identifies the container generation.
+The HTTPS URL carries a bearer token in its hostname and is returned once.
+Anyone possessing it can access that port. Treat it as a credential: share
+deliberately and keep it out of logs, analytics and public artifacts.
+
+Ports 1024–65535 are eligible; SSH and other privileged ports are excluded.
+TTL is 60–3600 seconds, defaulting to 900, clipped to the hard container deadline.
+At most eight grants and sixteen simultaneous HTTP requests/WebSockets are
+allowed per container. Successful response headers and active WebSocket traffic
+renew idle activity; quiet sockets do not. Issuance never extends the hard lease.
+Requests preserve application paths, queries, methods and bodies, including
+root-relative assets and WebSocket paths. Connection headers must arrive within
+15 seconds; each WebSocket frame is limited to 1 MiB. A stopped/replaced
+generation, expired lease/grant or revoked grant cannot accept new traffic.
+Expiry and revocation close active runtime transports. Requests never start or
+restart a machine. Worker restarts require reconnecting active transports.
+
+- `GET /containers/previews?id=<id>&createdAt=<generation>` returns
+  `{previews: [{id, port, createdAt, expiresAt}]}` with active metadata only.
+  URLs, raw tokens and hashes are never returned by listing.
+- `DELETE /containers/previews?id=<id>&createdAt=<generation>&previewId=<preview-id>`
+  returns `{revoked:true}` with status 200 and is idempotent within that running
+  generation. Only the owner can list, issue or revoke. All three endpoints
+  currently require paid access and the exact running generation.
+  Listing and revocation remain available when preview issuance is disabled,
+  allowing owners to close existing transports during gateway shutdown.
+
+Creation is not idempotent. If its response is lost, list and revoke the new
+grant before issuing another link. A routing-index failure triggers grant
+revocation. Partial issuance/revocation cleanup returns 503
+`preview_reconciliation_required` with `previewId`; retry DELETE using that ID
+and the same container generation. Until runtime revocation succeeds, existing
+connections may remain active until their lease/grant expires. Other failures
+return `previews_unavailable`; excess grants return 429 `preview_limit`.
+
+The gateway runs on a separate registrable domain and has no account database
+or login/billing routes. Cookies, Authorization, platform/forwarding headers
+and Referer are stripped; response cookies are stripped too. Application
+responses disable caching and set a no-referrer policy. Cookie sessions,
+external Host semantics and absolute redirect rewriting are not supported.
+Framework compatibility, CSP and service workers still require live
+qualification. Operators can read `docs/preview-ingress.md` in the backend checkout.
 
 ## Managed execution and streaming
 

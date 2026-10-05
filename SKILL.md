@@ -84,6 +84,18 @@ symlinks/directories. New files use mode 0600. File operations share the command
 concurrency pool and have a 30-second runtime limit. Reconcile an uncertain write
 by reading before retrying. Use execution for directory creation and listing.
 
+For an application preview, first check `previews.supported` in `/capabilities`.
+Public previews are disabled in the checked-in configuration. When enabled,
+start the server on an eligible application port, then POST
+`/containers/previews?id=<id>&createdAt=<generation>` with `{"port":3000}`.
+The returned URL is a bearer credential: share only as requested and keep it out
+of logs/public artifacts. It expires within the hard lease. GET the same endpoint
+for metadata and DELETE with `previewId` to revoke. A lost creation response
+requires listing/revoking before issuing another link; a 503
+`preview_reconciliation_required` includes the ID to retry revocation.
+Cookies and account credentials are stripped from app traffic. See API.md for
+limits and framework restrictions. Existing local SDKs do not yet have helpers.
+
 ## Verify
 
 Run `node mainbrella-verify.mjs` with the provisioned key in the environment.

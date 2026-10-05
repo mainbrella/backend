@@ -394,6 +394,14 @@ The dependency-free packages in [sdk/javascript](sdk/javascript/README.md) and
 or PyPI. Both support creation, generation-specific cleanup, binary files,
 foreground commands, managed execution, cancellation and streamed output.
 
+Protected application previews now have a private runtime, isolated gateway and
+authenticated `/containers/previews` API, with hash-only routing in a separate
+database. They remain disabled until an isolated domain/database is configured
+and qualified. `npm run check:previews` bundles the disabled gateway without
+deployment. The default deploy command does not publish it. See
+[the ingress handoff](docs/preview-ingress.md) for configuration, sharing semantics,
+failure reconciliation and live release gates. SDK/dashboard helpers remain next.
+
 `npm run verify:agent` exercises create, execution, files, streaming and cleanup,
 consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs
 bounded foreground samples and saves raw results with their methodology. Both

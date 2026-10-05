@@ -1,9 +1,12 @@
 # Protected preview ingress
 
-The local implementation currently supplies a private container runtime primitive.
-It does not supply public preview URLs, authenticated account API endpoints, SDK
-helpers or dashboard controls. `/capabilities` continues to report previews as
-unsupported. No deployment, provider experiment or paid start was performed.
+The local implementation supplies the private runtime, an isolated gateway,
+a separate routing-index schema and authenticated account API endpoints.
+Public previews remain disabled in the checked-in configuration; no preview
+domain or routing database has been selected/configured. SDK helpers and dashboard
+controls remain unfinished. `/capabilities` reports support only when explicitly
+enabled with a valid domain and both bindings. No deployment, provider experiment
+or paid start was performed.
 
 ## Provider boundary
 
@@ -24,7 +27,7 @@ Local tests use fake Fetchers and sockets; they do not establish provider behavi
 The container Worker's top-level `fetch()` still returns 404, and its configuration
 has no public routes or workers.dev endpoint. Only trusted bindings may reach
 these routes. Caller-supplied generation headers are not account authentication;
-the future account API must resolve ownership before calling them.
+the account API resolves ownership before calling them.
 
 Every route requires `x-preview-created-at` matching the exact running generation,
 an unexpired idle/hard lease and current stored paid entitlement.
@@ -66,58 +69,125 @@ disables caching and sets a no-referrer policy. It preserves redirects without
 following them. Cookie-based application sessions, external Host semantics and
 redirect rewriting remain gateway work. Do not promise them from this primitive.
 
-## Next implementation: isolated gateway and account API
+## Implemented gateway and account API
 
-Use a separate registrable domain for preview apps, with wildcard DNS and TLS.
-Avoid any hostname under `mainbrella.com`: untrusted apps must not share the
-account site's cookie scope or origin. Route each grant as one label, for example
-`<48-character-token>.<preview-domain>`, so root-relative assets, application paths
-and WebSocket URLs remain on one origin. The preview domain has not been chosen
-or configured. Do not add public routes until that choice is established.
+`worker/preview-gateway.ts` serves only preview application traffic. It has no
+login, billing or account database bindings. A separate D1 routing database maps
+SHA-256(token) to the owner-resolved private DO address, grant ID, generation and
+expiry. There are no raw tokens in storage and no cached routing reads. The runtime
+remains authoritative for port, token validity, generation and active transport
+revocation. A stale route can never revive a revoked runtime grant.
 
-Keep the gateway separate from account/login/billing routing. It should have only
-the container binding and access to a bounded routing index. A proposed index
-maps SHA-256(token) to the private DO address, grant ID, generation and expiry;
-never store raw tokens. Missing/expired/revoked routes fail closed and are not
-cached. The DO remains authoritative for port, token validity, generation and
-active transport revocation. Gateway input must never control internal preview
-headers, DO addresses or ports. Scrub token-bearing hostnames from logs.
+The gateway requires HTTPS and exactly one 48-character lowercase hexadecimal
+label under `PREVIEW_DOMAIN`, for example `<token>.<preview-domain>`. Root-relative
+assets and WebSocket paths remain on that origin. Invalid/missing/expired routes
+return a generic 404; index/binding failures return a generic 503. The request
+cannot select an internal address or port. The gateway overwrites internal
+preview headers and strips account credentials, cookies, platform/forwarding
+headers and Referer. It preserves method, body, path, query, Origin and Upgrade,
+uses manual redirects and propagates the request AbortSignal. Responses pass
+through unchanged to retain streaming and Worker WebSocket upgrades; the runtime
+owns response-cookie stripping, no-store/no-referrer and active revocation.
 
-Add authenticated `GET`, `POST` and `DELETE /containers/previews` using existing
-API-key/session authentication, trusted-origin write policy and
-`runningContainer()` ownership resolution. Require `id` and `createdAt`.
-Register matching Chanfana/Zod schemas and OpenAPI tests in the same change.
-Issuance must reconcile DO grant creation with routing-index creation; a failed
-index write revokes the grant. Revocation must disable the route and close the
-DO transport; partial failures must be visible and retryable. Lost issuance
-responses can leave a grant: list/revoke its metadata and issue a new one rather
-than recovering a raw token from storage.
+The account API registers authenticated GET, POST and DELETE
+`/containers/previews`, with matching Chanfana/Zod schemas. All require `id` and
+`createdAt`, resolve ownership with `runningContainer()`, require paid access and
+accept API keys or browser sessions. Cookie writes require trusted Origin.
+POST accepts `{port, ttlSeconds?}` and returns `{id, port, createdAt, expiresAt,
+url}` once. GET returns active metadata only. DELETE additionally requires
+`previewId` and returns `{revoked:true}`, idempotently within that running generation.
+These management operations do not renew the lease or start/restart a machine.
+Listing/revocation remain available when issuance is disabled, so the owner can
+close existing transports during gateway shutdown.
 
-Links are bearer capabilities: possession permits access to that grant's app.
-The account owner alone issues/lists/revokes them. Document this sharing rule,
-expiration and inability to extend the container lease. A compact dashboard row
-should let the owner choose a port, create/open a link, read its expiration and
-revoke it; a JS/Python helper should return the URL and grant metadata. Show these
-only when configured deployment capabilities report support. Do not publish
-registry installation commands for the still-unpublished SDKs.
+Issuance creates the runtime grant first, then inserts its hash in the routing
+index. Failed or ambiguous index writes attempt both route deletion and runtime
+revocation. Revocation removes the owner/generation-scoped route first, then
+closes runtime transports. Both cleanup operations are attempted even if one
+fails. A partial failure returns 503 `preview_reconciliation_required` with
+`previewId` so the owner can retry DELETE. Other unavailable failures return
+`previews_unavailable`. Existing connections can remain active if runtime
+revocation failed, until retry succeeds or the lease/grant expires. Lost issuance
+responses can leave a grant: list/revoke metadata and issue a new URL rather than
+recovering a raw token. If the generation has stopped, runtime access already
+fails closed and leftover routing records age out.
 
-Before enabling application cookies, define host-only cookie handling and reject
-parent-domain cookies that could cross preview origins. Validate HTTP Host,
-Origin and forwarded-header behavior with a real framework. Cover root-relative
-assets, redirects, WebSocket Origin checks, CSP and service workers without
-weakening the account site's origin policy.
+Runtime admission caps each generation at eight active grants with TTL at most
+one hour. The routing schema indexes expiry; a five-minute gateway cron deletes
+up to 1,000 expired rows per run. Delayed cleanup never extends routing validity.
+Monitor cleanup backlog and increase the explicit cleanup budget if issuance
+volume requires it. The query cap bounds work, not total historical database size.
+
+Gateway observability is disabled to avoid automatic token-host logging, and
+errors never log request URLs, token values or routing exceptions. Do not add
+analytics, request logging or third-party assets that expose bearer hostnames.
+Operator/CDN logging policy is a deployment qualification item. Listing never
+returns tokens or hashes. Sharing a URL deliberately grants access to its app;
+only the account owner can issue/list/revoke it.
+
+## Configuration and rollout
+
+`wrangler.previews.jsonc` is deliberately disabled, with no public routes,
+workers.dev or preview URL and no routing database binding. The API's optional
+preview bindings/variables are absent by default. `npm run check:previews` bundles
+this disabled gateway without deploying it. `npm run deploy` does not publish
+or enable the preview gateway.
+
+Before enabling:
+
+1. Choose and establish ownership of a **separate registrable domain**, with
+   wildcard DNS, Worker routing and wildcard TLS. Never use a hostname under
+   `mainbrella.com`. The code rejects that account domain, malformed DNS names,
+   URLs, wildcards and ports; it does not implement a public-suffix registry.
+   The operator must verify the selected name is a privately owned registrable
+   domain, rather than a public suffix or a shared tenant suffix.
+2. Create a dedicated routing D1 database. Add the same database to both the
+   API and gateway configurations with binding `PREVIEW_ROUTES`, its real
+   `database_name`/`database_id`, and `migrations_dir: "preview-migrations"`.
+   Apply `001_preview_routes.sql` there using Wrangler D1 migrations. Do not add
+   the account database to the gateway or apply this schema to `delta`.
+3. Set matching `PREVIEW_DOMAIN` values in the two configs. Keep
+   `PREVIEWS_ENABLED: "false"` until migration, private runtime and isolated
+   gateway configuration are ready. Bind only `USER_CONTAINER` and
+   `PREVIEW_ROUTES` on the gateway. Configure its wildcard route on the isolated
+   domain. Enable `PREVIEWS_ENABLED: "true"` on both for the agreed qualification
+   run, with the runtime and gateway available before the API advertises support.
+   `/capabilities` describes configured support, not live health or qualification.
+4. Follow the existing compatibility preflight/containers/API release runbook.
+   Run the bounded qualification below before publishing feature claims. To
+   disable new preview traffic, disable the gateway and API flags; this alone
+   does not terminate existing runtime transports. Explicitly revoke active
+   grants, or wait for their bounded expiry. Retain the routing database for
+   cleanup/reconciliation. Never mass-stop pre-existing customer containers.
+
+Application cookies remain disabled. Do not enable them without defining
+host-only handling and rejecting parent-domain cookies that could cross preview
+origins. The app currently sees the private upstream Host; external Host semantics
+and absolute redirect rewriting are unsupported. Relative redirects are passed
+through without following them. Preserve and qualify WebSocket Origin behavior
+with a real framework; do not bypass its checks or weaken the account site's
+origin policy. CSP and service workers remain live qualification items.
+
+## Next integration
+
+Add JS/Python helpers returning the URL and grant metadata. A compact dashboard
+row should choose a port, create/open a link, show expiration and revoke it.
+Display controls only when configured deployment capabilities report support.
+Do not publish registry installation commands for the unpublished SDKs.
 
 ## Qualification gates
 
 `node --test containers/previews.test.mjs` exercises the runtime guard with no
-starts. The public feature still requires account ownership/API-key tests,
-routing-index failure/reconciliation tests and an agreed bounded deployed run.
+starts. `worker/app/previews.test.ts` covers account ownership, API keys, generations,
+input limits and routing failure/reconciliation. `worker/preview-gateway.test.ts`
+covers exact hosts, expiry, hash routing, path/query/binary forwarding, aborts,
+WebSocket/stream passthrough and bounded cleanup. These checks use mocks, not
+provider transports. The public feature still requires an agreed bounded deployed run.
 Use a dedicated account and a real Next.js or similar app listening on port 3000.
 Verify HTTP/assets, WebSockets, expiry, revocation of active transports, wrong
 tokens, port restrictions, cross-account isolation and generation replacement.
 Confirm the preview worker cannot route into the account API, and preserve all
 pre-existing containers during generation-specific cleanup. The container Worker
 enables `enable_request_signal` so binding-request disconnects can abort runtime
-transports; the future gateway must propagate signals and qualify this behavior.
-Deployment
+transports; the gateway propagates signals and must qualify this behavior. Deployment
 compatibility and the existing release preflight remain separate prerequisites.
