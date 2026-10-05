@@ -134,7 +134,7 @@ test('generation is checked again between inspection and process launch', async 
     return metadata;
   };
   const response = await f.run(request());
-  assert.notEqual(response.status, 200);
+  assert.equal(response.status, 409);
   assert.equal(f.calls.length, 0);
 });
 

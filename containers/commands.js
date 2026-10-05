@@ -72,13 +72,14 @@ export async function executeCommand(controller, request, active, timers = globa
     ]);
     result.exitCode = exitCode;
     return controller.respond(result);
-  } catch {
+  } catch (error) {
     if (reason === 'timed_out' || reason === 'output_limit') {
       result.timedOut = reason === 'timed_out';
       result.outputTruncated = reason === 'output_limit';
       return controller.respond(result);
     }
-    return controller.respond({ error: reason === 'container_not_running' ? reason : 'execution_unavailable' }, reason === 'container_not_running' ? 409 : 503);
+    const unavailable = reason === 'container_not_running' || error.message === 'Machine unavailable';
+    return controller.respond({ error: unavailable ? 'container_not_running' : 'execution_unavailable' }, unavailable ? 409 : 503);
   } finally {
     timers.clearTimeout(timer);
     request.signal.removeEventListener('abort', disconnected);
