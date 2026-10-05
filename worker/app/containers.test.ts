@@ -17,7 +17,7 @@ function environment() {
   const calls: Request[] = [];
   const env = {
     DB: { prepare() { return { bind() { return { async first() { return { id: userId }; } }; } }; } },
-    BUILDER_MACHINE: {
+    USER_CONTAINER: {
       idFromName(name: string) { names.push(name); return name; },
       get() { return { async fetch(req: Request) {
         calls.push(req);
@@ -76,6 +76,6 @@ test('quota errors are preserved and service failures are sanitized', async (t) 
   response = await handleRequest(request('GET'), state.env);
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {error:'containers_unavailable'});
-  response = await handleRequest(request('GET'), {...state.env, BUILDER_MACHINE: undefined} as unknown as Env);
+  response = await handleRequest(request('GET'), {...state.env, USER_CONTAINER: undefined} as unknown as Env);
   assert.equal(response.status, 503);
 });

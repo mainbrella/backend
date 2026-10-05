@@ -1,7 +1,7 @@
 import { authCorsHeaders, authJson, currentUser } from "./auth-core";
 
 // During development every authenticated user receives the fixed small-container
-// limits enforced by BuilderMachine, independently of their billing tier.
+// limits enforced by UserContainer, independently of their billing tier.
 export async function handleContainersRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
@@ -18,10 +18,10 @@ export async function handleContainersRequest(request: Request, env: Env): Promi
   try {
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
-    if (!env.BUILDER_MACHINE) return authJson({ error: "containers_unavailable" }, 503, cors);
+    if (!env.USER_CONTAINER) return authJson({ error: "containers_unavailable" }, 503, cors);
     // A single slot per account. Never accept a machine ID, size, lease, or image
     // from the browser, and never pass session cookies to the container service.
-    const machine = env.BUILDER_MACHINE.get(env.BUILDER_MACHINE.idFromName(`user:${user.id}`));
+    const machine = env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(`user:${user.id}`));
     const response = await machine.fetch(new Request("https://internal/container", { method: request.method }));
     const data = await response.json();
     if (response.status === 429) return authJson({ error: "container_quota_exceeded" }, 429, cors);

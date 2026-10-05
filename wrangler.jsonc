@@ -22,9 +22,9 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "BUILDER_MACHINE",
-        "class_name": "BuilderMachine",
-        "script_name": "mainbrella-machine-test"
+        "name": "USER_CONTAINER",
+        "class_name": "UserContainer",
+        "script_name": "mainbrella-containers"
       }
     ]
   },
