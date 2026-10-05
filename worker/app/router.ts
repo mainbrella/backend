@@ -2,12 +2,17 @@ import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
 import { handleAdminRequest } from "./admin";
+import { handleContainersRequest } from "./containers";
 
 export async function handleRequest(
   request: Request,
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/containers" || url.pathname.startsWith("/containers/")) {
+    return handleContainersRequest(request, env);
+  }
 
   if (url.pathname === "/subscription" || url.pathname.startsWith("/subscription/")) {
     return handleSubscriptionRequest(request, env);

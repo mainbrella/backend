@@ -19,6 +19,15 @@
       "migrations_table": "schema_migrations"
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BUILDER_MACHINE",
+        "class_name": "BuilderMachine",
+        "script_name": "mainbrella-machine-test"
+      }
+    ]
+  },
   "observability": {
     "logs": {
       "enabled": true,
