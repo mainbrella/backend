@@ -15,3 +15,16 @@ export function validateCustomImages(manifest, accountId) {
   }
   return Object.fromEntries(entries.map(([key, value]) => [key, { image: value.image }]));
 }
+
+export function assembleImageMap(terminal, manifest, accountId) {
+  return { terminal: { image: terminal }, ...validateCustomImages(manifest, accountId) };
+}
+
+export async function imageBuildApi(path, method = 'GET', body) {
+  const secret = process.env.IMAGE_BUILD_SECRET;
+  if (!secret || secret.length < 32) throw new Error('Set IMAGE_BUILD_SECRET to read the live deployment manifest');
+  return fetch(`https://api.mainbrella.com/internal/image-builds${path}`, {
+    method, headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+    ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20_000),
+  });
+}

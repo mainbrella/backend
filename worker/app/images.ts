@@ -57,6 +57,14 @@ async function boundedBody(request: Request, maxBytes: number): Promise<ArrayBuf
   return result.buffer;
 }
 
+async function dispatchImageWorkflow(env: Env, inputs: Record<string, string>) {
+  return fetch('https://api.github.com/repos/mainbrella/backend/actions/workflows/custom-image.yml/dispatches', {
+    method: 'POST', headers: { Authorization: `Bearer ${env.IMAGE_BUILD_GITHUB_TOKEN}`, 'Content-Type': 'application/json',
+      Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella', 'X-GitHub-Api-Version': '2022-11-28' },
+    body: JSON.stringify({ ref: 'main', inputs }), signal: AbortSignal.timeout(10_000),
+  });
+}
+
 async function createImage(request: Request, env: Env, userId: string, cors: Record<string, string>) {
   if (!env.IMAGE_BUILD_GITHUB_TOKEN || !env.IMAGE_BUILD_SECRET) return authJson({ error: 'image_builds_unavailable' }, 503, cors);
   const body = await boundedBody(request, MAX_REQUEST_BYTES);
@@ -100,19 +108,22 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
     }
     throw error;
   }
-  // Fixed repository, workflow and ref. No account credentials enter build inputs.
+  // Explicit client rejections cannot have scheduled a build. Network failures
+  // and server errors remain charged because dispatch delivery is ambiguous.
+  let rejected = false;
   try {
-    const response = await fetch('https://api.github.com/repos/mainbrella/backend/actions/workflows/custom-image.yml/dispatches', {
-      method: 'POST', headers: { Authorization: `Bearer ${env.IMAGE_BUILD_GITHUB_TOKEN}`, 'Content-Type': 'application/json',
-        Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella', 'X-GitHub-Api-Version': '2022-11-28' },
-      body: JSON.stringify({ ref: 'main', inputs: { build_id: id } }), signal: AbortSignal.timeout(10_000),
-    });
+    const response = await dispatchImageWorkflow(env, { build_id: id });
+    rejected = [400, 401, 403, 404, 422].includes(response.status);
     if (!response.ok) throw new Error('dispatch_failed');
   } catch {
-    // Dispatch delivery can be ambiguous on network failure. Fail closed; a late
-    // job cannot claim this build, and the reservation stays charged.
-    await env.DB.prepare("UPDATE container_images SET status = 'failed', logs = 'Could not schedule the build. Submit a new build to try again.', context_base64 = NULL WHERE id = ? AND status = 'queued'")
-      .bind(id).run();
+    const failed = env.DB.prepare("UPDATE container_images SET status = 'failed', logs = 'Could not schedule the build. Submit a new build to try again.', context_base64 = NULL WHERE id = ? AND status = 'queued'").bind(id);
+    if (rejected) {
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE container_image_usage SET builds = MAX(0, builds - 1) WHERE user_id = ? AND month = ?
+          AND EXISTS (SELECT 1 FROM container_images WHERE id = ? AND status = 'queued')`)
+          .bind(userId, now.toISOString().slice(0, 7), id), failed,
+      ]);
+    } else { await failed.run(); }
     return authJson({ error: 'image_builds_unavailable' }, 503, cors);
   }
   return authJson({ image: { id, name: name.trim(), status: 'queued', createdAt: now.toISOString(), updatedAt: now.toISOString() } }, 202, cors);
@@ -149,6 +160,11 @@ export async function handleImagesRequest(request: Request, env: Env) {
       if (['queued', 'building', 'publishing'].includes(image.status)) return authJson({ error: 'image_build_in_progress' }, 409, cors);
       await env.DB.prepare("UPDATE container_images SET status = 'deleted', context_base64 = NULL, dockerfile = '', logs = '', updated_at = ? WHERE id = ? AND user_id = ?")
         .bind(new Date().toISOString(), image.id, user.id).run();
+      // A scheduled reconciliation also repairs dispatch/deployment failures.
+      // D1 is authoritative; a later deployment excludes the tombstoned image.
+      try {
+        await dispatchImageWorkflow(env, { operation: 'reconcile' });
+      } catch { /* The hourly reconciliation retries removal. */ }
       return authJson({ deleted: true }, 200, cors);
     }
     return authJson(match![2] ? { logs: image.logs, status: image.status } : { image: publicImage(image) }, 200, cors);
@@ -172,7 +188,26 @@ export async function handleImageBuildRequest(request: Request, env: Env) {
   try {
     if (!await buildAuthenticated(request, env)) return authJson({ error: 'not_authenticated' }, 401, {});
     const path = new URL(request.url).pathname;
+    if (path === '/internal/image-builds/deployment-lock') {
+      if (!['POST', 'DELETE'].includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, {});
+      const bytes = await boundedBody(request, 1024);
+      if (!bytes) return authJson({ error: 'invalid_request' }, 400, {});
+      let token: unknown;
+      try { token = JSON.parse(new TextDecoder().decode(bytes)).token; } catch {}
+      if (typeof token !== 'string' || !UUID.test(token)) return authJson({ error: 'invalid_request' }, 400, {});
+      if (request.method === 'DELETE') {
+        await env.DB.prepare('DELETE FROM container_image_deployment_lock WHERE id = 1 AND token = ?').bind(token).run();
+        return authJson({ released: true }, 200, {});
+      }
+      const now = new Date();
+      const saved = await env.DB.prepare(`INSERT INTO container_image_deployment_lock (id, token, expires_at) VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
+        WHERE container_image_deployment_lock.expires_at <= ?`)
+        .bind(token, new Date(now.getTime() + 12 * 60_000).toISOString(), now.toISOString()).run();
+      return authJson(saved.meta.changes ? { acquired: true } : { error: 'image_deployment_busy' }, saved.meta.changes ? 200 : 409, {});
+    }
     if (path === '/internal/image-builds/manifest' && request.method === 'GET') {
+      await expireImageBuilds(env);
       const rows = await env.DB.prepare("SELECT image_key, image_ref FROM container_images WHERE status IN ('ready', 'publishing') AND image_ref IS NOT NULL ORDER BY image_key")
         .all<{ image_key: string; image_ref: string }>();
       return authJson({ images: Object.fromEntries(rows.results.map(row => [row.image_key, { image: row.image_ref }])) }, 200, {});

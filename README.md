@@ -101,9 +101,12 @@ One-time setup:
    repository. Keep your existing Wrangler login for production deployment.
 4. Run `npm run deploy` locally after the image workflow succeeds.
 
-The deploy script downloads the release manifest, verifies the registry account,
+The deploy script downloads the terminal release manifest and live custom-image
+manifest, verifies the registry account,
 repository, digest, and Dockerfile hash, and supplies Wrangler a temporary config
-with a digest-pinned `image` instead of `dockerfile`. The tracked config remains
+with digest-pinned entries for `terminal` and all ready/publishing custom images.
+Set `IMAGE_BUILD_SECRET` in the local deployment environment; a missing secret or
+unavailable custom manifest stops deployment rather than removing user images. The tracked config remains
 the build blueprint. Use the npm deploy commands rather than invoking
 `wrangler deploy --config wrangler.containers.jsonc` directly, which would still
 attempt a local Docker build. `npm run deploy:containers -- --dry-run` exercises
@@ -139,3 +142,43 @@ To install the skill in Codex, copy `SKILL.md` and `API.md` into
 `~/.codex/skills/mainbrella-containers/` (or the equivalent skills directory for
 your agent), then invoke `$mainbrella-containers`. Provision the session credential
 separately using the instructions in `API.md`.
+
+## Custom image build and deployment
+
+The **Build custom image** workflow must be on `main` before enabling builds.
+Set `IMAGE_BUILD_SECRET` (at least 32 characters) in both the API Worker and
+GitHub Actions, and set `IMAGE_BUILD_GITHUB_TOKEN` in the API Worker to a token
+with Actions write access to this repository. `CLOUDFLARE_API_TOKEN` in Actions
+must permit both registry access and deployment of the container Worker.
+
+For the first rollout of the live manifest/deployment lease, apply remote D1
+migrations (including `007_image_deployment_lock.sql`) and deploy the API first:
+`npm run db:migrate:remote`, then `npm run deploy:api`. Merge the custom-image
+workflow to `main` and configure its secrets before accepting builds. Subsequent
+releases can use the normal `npm run deploy` command with `IMAGE_BUILD_SECRET` set.
+
+Preparation downloads the recipe and pinned base image on a trusted runner.
+The user Dockerfile builds and runs its compatibility check on a separate,
+disposable runner with no registry, deployment, or API callback secrets.
+Publication loads the resulting archive without executing it, pushes it, reports
+`publishing` with its immutable digest, deploys the assembled image map, then
+reports `ready`. The terminal release and live API manifest feed the same deploy
+script; the old `custom-images.json` release snapshot is no longer consumed.
+
+All production image-map deployments acquire an API lease. The lease lasts 12
+minutes; the Wrangler subprocess is bounded to 10 minutes, and deployments wait
+up to 8 minutes for a competing lease. This serializes local deployments, builds,
+and deletion reconciliation. Deleted images disappear from the live manifest
+and trigger the workflow's `reconcile` operation. An hourly reconciliation retries
+failed removals; deleting an image does not stop an already-running container.
+If Actions is unavailable, attached image slots can remain until reconciliation
+succeeds. Dry runs validate the live manifest without acquiring a deployment lease.
+
+Explicit GitHub dispatch rejections (400/401/403/404/422) refund the monthly build
+reservation atomically. Ambiguous network/server failures keep the reservation.
+`npm run test:images` and CI exercise the SQL state machine through generated image selection and the
+container controller, deployment failure handling, quota refunds, and workflow
+syntax. It uses simulated GitHub/Cloudflare boundaries; a production build and
+launch still need a smoke test after rollout. The broader `npm test` currently
+also includes legacy admin/Apple tests referencing removed Groupicorn migrations;
+those unrelated fixtures need separate repair.

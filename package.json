@@ -15,7 +15,8 @@
     "deploy:api": "wrangler deploy --config wrangler.jsonc",
     "test:containers": "node --test containers/*.test.mjs scripts/*.test.mjs",
     "test:api": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts",
-    "check:containers": "node --check containers/user-container.js && node --check containers/user-container-core.js && node --check containers/terminal.js"
+    "check:containers": "node --check containers/user-container.js && node --check containers/user-container-core.js && node --check containers/terminal.js",
+    "test:images": "npm run test:containers && tsx --test worker/app/images.test.ts worker/app/containers.test.ts worker/app/ssh.test.ts worker/app/terminal.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",

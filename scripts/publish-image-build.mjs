@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { validateCustomImages } from './custom-images.mjs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const id = process.env.BUILD_ID;
 if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id || '')) throw new Error('Invalid build ID');
@@ -39,11 +38,6 @@ try {
         await new Promise(resolve => setTimeout(resolve, 10_000));
       }
     }
-    const images = await api('https://api.mainbrella.com/internal/image-builds/manifest');
-    validateCustomImages(images, accountId);
-    writeFileSync('custom-images.json', JSON.stringify(images));
-    // Publish the image map first so normal deployments cannot discard it.
-    execFileSync('gh', ['release', 'upload', 'terminal-image', 'custom-images.json', '--repo', 'mainbrella/backend', '--clobber']);
     execFileSync(process.execPath, ['scripts/deploy-containers.mjs'], { stdio: ['ignore', 'inherit', 'pipe'] });
     await api(url, { status: 'ready', logs });
   }

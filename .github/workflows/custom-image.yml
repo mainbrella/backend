@@ -5,8 +5,17 @@ on:
     inputs:
       build_id:
         description: Mainbrella build ID
-        required: true
+        required: false
         type: string
+
+      operation:
+        description: Build an image or reconcile the deployed image map
+        required: false
+        default: build
+        type: choice
+        options: [build, reconcile]
+  schedule:
+    - cron: '17 * * * *'
 
 permissions:
   contents: read
@@ -16,7 +25,7 @@ env:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -85,12 +94,10 @@ jobs:
           retention-days: 1
 
   publish:
-    if: always() && github.ref == 'refs/heads/main'
+    if: always() && github.ref == 'refs/heads/main' && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    permissions:
-      contents: write
+    timeout-minutes: 30
     # Publication admission is serialized by the API; GitHub concurrency groups
     # cancel older pending jobs rather than providing a reliable build queue.
     steps:
@@ -116,3 +123,24 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
           GH_TOKEN: ${{ github.token }}
         run: node scripts/publish-image-build.mjs
+
+  reconcile:
+    if: github.ref == 'refs/heads/main' && (inputs.operation == 'reconcile' || github.event_name == 'schedule')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Deploy the authoritative image map
+        env:
+          IMAGE_BUILD_SECRET: ${{ secrets.IMAGE_BUILD_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
+          GH_TOKEN: ${{ github.token }}
+        run: npm run deploy:containers

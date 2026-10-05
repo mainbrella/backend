@@ -1,0 +1,33 @@
+name: Custom image checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:images
+      - run: npm run type-check
+      - run: npm run check:containers
+      - name: Validate workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.7.12 --repo rhysd/actionlint --pattern '*linux_amd64.tar.gz' --dir "$RUNNER_TEMP/actionlint"
+          tar -xzf "$RUNNER_TEMP"/actionlint/*linux_amd64.tar.gz -C "$RUNNER_TEMP/actionlint"
+          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes=

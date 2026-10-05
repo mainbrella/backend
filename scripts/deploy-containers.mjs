@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { validateCustomImages } from './custom-images.mjs';
+import { assembleImageMap, imageBuildApi } from './custom-images.mjs';
 import { validateImage } from './terminal-image.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -24,26 +24,45 @@ try {
   if (!asset) throw new Error('missing image manifest');
   const manifest = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${asset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
   image = validateImage(manifest, config.account_id, dockerfileHash);
-  const customAsset = release.assets.find(asset => asset.name === 'custom-images.json');
-  if (customAsset) {
-    const custom = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${customAsset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
-    Object.assign(config.containers[0].images, validateCustomImages(custom, config.account_id));
-  }
 } catch (error) {
   console.error(error.code === 'ENOENT' ? 'Install GitHub CLI (gh) and run gh auth login.' :
     `Cannot use the published terminal image: ${error.message.startsWith('Image ') ? error.message : 'release unavailable; check gh auth status and the Build terminal image workflow.'}`);
   console.error(`Run the Build terminal image workflow at https://github.com/${repository}/actions, then retry.`);
   process.exit(1);
 }
-config.containers[0].images.terminal = { image };
-// Keep relative Worker/Dockerfile paths rooted in backend, and avoid modifying tracked config.
+// Read the authoritative map under a deployment lease. Never silently deploy an
+// empty or stale release snapshot when the API is unavailable.
+const lease = randomUUID();
+let locked = false;
 const temporaryConfig = join(root, `.wrangler-containers-${randomUUID()}.json`);
 try {
+  if (!args.includes('--dry-run')) {
+    const deadline = Date.now() + 8 * 60_000;
+    while (true) {
+      const result = await imageBuildApi('/deployment-lock', 'POST', { token: lease });
+      if (result.ok) { locked = true; break; }
+      if (result.status !== 409 || Date.now() >= deadline) throw new Error('Image deployment is busy or unavailable');
+      await new Promise(resolve => setTimeout(resolve, 10_000));
+    }
+  }
+  const response = await imageBuildApi('/manifest');
+  if (!response.ok) throw new Error('Custom image manifest unavailable');
+  config.containers[0].images = assembleImageMap(image, await response.json(), config.account_id);
+  // Keep relative Worker paths rooted in backend, without modifying tracked config.
   writeFileSync(temporaryConfig, JSON.stringify(config, null, 2));
   console.log(`Deploying terminal image ${image}`);
-  const result = spawnSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy', '--config', temporaryConfig, ...args], { cwd: root, stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy', '--config', temporaryConfig, ...args], { cwd: root, stdio: 'inherit', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
 } finally {
-  unlinkSync(temporaryConfig);
+  try { unlinkSync(temporaryConfig); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (locked) {
+    try {
+      const response = await imageBuildApi('/deployment-lock', 'DELETE', { token: lease });
+      if (!response.ok) throw new Error('Could not release image deployment lease');
+    } catch (error) { console.error(error.message); process.exitCode = 1; }
+  }
 }
