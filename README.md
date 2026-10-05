@@ -226,7 +226,7 @@ See [API.md](API.md) for authentication, endpoints, curl examples, limits and re
 behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both files
 are mirrored in `../web`; update both copies when the API changes.
 
-Lifecycle, images, and SSH issuance accept `Authorization: Bearer mb_<key-value>`
+Lifecycle, execution, images, and SSH issuance accept `Authorization: Bearer mb_<key-value>`
 without Origin. Create named keys at `https://mainbrella.com/api-keys/`.
 Login-session Bearer credentials remain supported for compatibility.
 Cookie mutations still require a trusted Origin. Browser terminals remain
@@ -323,3 +323,20 @@ Before deploying API key support, apply D1 migration `010_api_keys.sql` using
 `npm run db:migrate:remote`, then deploy the API and web builds. Only token hashes
 are stored; the secret is returned once. Keys authorize the existing container,
 image, and SSH issuance routes, with the same account entitlements and quotas.
+
+## HTTP execution
+
+`POST /containers/exec?id=<id>&createdAt=<ISO generation>` runs a foreground shell
+command using API keys or browser authentication. It returns separate stdout,
+stderr, exitCode, timedOut and outputTruncated. See API.md for limits and retry
+semantics. Generation and paid lease checks run again inside the private DO;
+execution never starts a machine or reserves quota. The runtime caps commands at
+four concurrent requests, 60 seconds and 1 MiB combined output. Stop and deadline
+revocation cancel active work. No image rebuild or database migration is needed.
+
+Deploy the container Worker before the API for this additive endpoint, then deploy
+web so the published docs and verification tool match. An API deployed before its
+private runtime will return execution_unavailable. Run the web `verify:agent`
+command with the provisioned API key after rollout; it consumes one start and
+cleans up only its own generation. Until rollout, local process tests and API
+fixtures verify the contract but do not satisfy the production release gate.

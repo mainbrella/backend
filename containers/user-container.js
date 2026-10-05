@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { UserContainerController } from "./user-container-core.js";
 import { upgradeTerminal } from "./terminal.js";
+import { executeCommand } from "./commands.js";
 
 export class UserContainer extends DurableObject {
   constructor(ctx, env) {
@@ -13,12 +14,15 @@ export class UserContainer extends DurableObject {
     }
     this.controller = new UserContainerController(ctx);
     this.terminals = new Set();
+    this.commands = new Set();
     this.controller.onStopped = () => {
       for (const session of this.terminals) session.close(1000, 'Container stopped');
+      for (const session of this.commands) session.close();
     };
   }
 
   fetch(request) {
+    if (new URL(request.url).pathname === '/exec') return executeCommand(this.controller, request, this.commands);
     if (["/ssh", "/terminal"].includes(new URL(request.url).pathname)) {
       return upgradeTerminal(this.controller, request, this.terminals);
     }

@@ -9,6 +9,7 @@ import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
+import { handleCommandRequest } from "./commands";
 
 async function handleLegacyRequest(
   request: Request,
@@ -23,6 +24,7 @@ async function handleLegacyRequest(
   if (url.pathname.startsWith("/internal/image-builds/")) return handleImageBuildRequest(request, env);
 
   if (url.pathname === "/containers/terminal") return handleTerminalRequest(request, env);
+  if (url.pathname === "/containers/exec") return handleCommandRequest(request, env);
 
   if (url.pathname === "/containers/ssh" || url.pathname.startsWith("/ssh/")) {
     return handleSSHRequest(request, env);

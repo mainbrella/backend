@@ -15,6 +15,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
   "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
+  "/containers/exec": ["post"],
   "/ssh/validate": ["post"], "/ssh/connect": ["get"],
   "/images": ["get", "post"], "/images/{id}": ["get", "delete"], "/images/{id}/logs": ["get"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],

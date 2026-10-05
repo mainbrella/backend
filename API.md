@@ -5,7 +5,7 @@ The dashboard and automation share the same account-owned containers and allowan
 
 ## Authentication
 
-Sign in at `https://mainbrella.com/login/`, open **Account → API Keys (`/api-keys/`)**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
+Sign in at `https://mainbrella.com/login/`, open **Account → API Keys (`/api-keys/`)**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, execution, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
 
 Manage keys using a browser session cookie:
 
@@ -17,7 +17,7 @@ Key creation and revocation require a trusted Origin. API keys cannot manage key
 
 Bearer requests can omit Origin. If Origin is supplied, it must be allowlisted.
 Browser clients continue using the session cookie and must send a trusted Origin
-for mutations. Bearer authentication is limited to lifecycle, images, and SSH issuance;
+for mutations. Bearer authentication is limited to lifecycle, execution, images, and SSH issuance;
 the browser WebSocket terminal remains cookie-authenticated with a trusted Origin.
 
 Keep credentials in a secret store or protected local file, never in a repository,
@@ -42,9 +42,8 @@ curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" "$API_URL/con
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X POST "$API_URL/containers"
 
 # Replace ID and generation below with values from the successful launch response.
-# Obtain SSH access (requires local ssh and cloudflared).
-# This response contains a secret-bearing command; store it privately.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H 'Content-Type: application/json' -d '{"id":"<returned-id>","createdAt":"<returned-createdAt>"}' -X POST "$API_URL/containers/ssh"
+# Run a command over HTTP; no local SSH tools are needed.
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H 'Content-Type: application/json' -d '{"command":"echo hello from mainbrella","timeoutMs":30000}' -X POST "$API_URL/containers/exec?id=<returned-id>&createdAt=<returned-createdAt>"
 
 # Stop only the selected container when finished.
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X DELETE "$API_URL/containers?id=<returned-id>&createdAt=<returned-createdAt>"
@@ -60,8 +59,8 @@ for the authorized job's duration.
 The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
 integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
-No Mainbrella SDK is published yet. Use native REST requests and local `ssh` plus
-`cloudflared` for execution; there is no HTTP exec endpoint.
+No Mainbrella SDK is published yet. Use native HTTP requests for lifecycle and
+command execution; local SSH tools are optional for interactive access.
 
 Download and inspect the dependency-free Node 22+ tools:
 
@@ -74,7 +73,7 @@ node mainbrella-verify.mjs
 ```
 
 Keep both scripts in the same directory. The doctor performs only GET requests,
-checks access, quotas, image availability, local tools, and project markers, and
+checks access, quotas, image availability, Node version, and project markers, and
 never prints credentials. Both commands print JSON and exit 0 for a pass or 1
 for a failure. `MAINBRELLA_API_URL` can select another HTTPS API origin, or HTTP
 localhost for development. `MAINBRELLA_CATALOG_ID` selects an advertised image for
@@ -119,6 +118,7 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
 | `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
+| `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
 
 Lifecycle response example (UTC timestamps and usage month):
@@ -188,6 +188,32 @@ downgrade, excess machines stop (oldest unexpired machines within the cap remain
 are clamped; loss of paid access stops all machines. Polling/token issuance do not
 renew idle time; terminal activity renews only the idle deadline.
 
+## HTTP command execution
+
+`POST /containers/exec` requires an owned, running `id` and its exact `createdAt`
+in the query. Cookie mutations require a trusted Origin; API keys work without
+Origin. The JSON body accepts only `command` and optional `timeoutMs`.
+A command must be nonblank, contain no NUL, and fit in 16 KiB of UTF-8; the whole
+request is limited to 32 KiB. No user, image, resource, or lease overrides are accepted.
+
+The timeout defaults to 30 seconds, accepts integers from 1 to 60,000 ms, includes
+process startup, and never exceeds the container's hard deadline. The command
+gets closed stdin and separate UTF-8 stdout/stderr, with a combined limit of 1 MiB.
+Normal completion returns an integer `exitCode`, including nonzero command exits.
+Timeout and excess output terminate the process and return partial output with
+`exitCode: null` and `timedOut: true` or `outputTruncated: true`, respectively.
+Both flags are false on normal completion. Output ordering between streams is
+not preserved; invalid UTF-8 is replaced when decoded.
+
+Four HTTP commands can run concurrently per container, separately from terminal
+connections. Starting a command counts as idle activity without extending the
+hard deadline or consuming a start. Stopping/replacing a machine revokes commands.
+A disconnect requests cancellation when observable; the timeout still applies
+when the platform does not propagate a disconnect. Background jobs and reconnect
+are not supported. Results are not retained. An HTTP failure can hide a completed
+command: do not blindly retry commands with side effects. SSH remains available
+for longer-running and interactive workflows.
+
 ## Browser billing endpoints
 
 Billing mutations require the login cookie and a trusted browser Origin.
@@ -220,23 +246,25 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 | 402 | `subscription_required` | No paid container access. Use the web billing controls to subscribe or resolve payment; do not retry creation. |
 | 403 | `origin_required` / `origin_not_allowed` | Cookie mutations need a trusted Origin; Bearer requests may omit it. Supplied Origins must be trusted. |
 | 404 | `not_found` | Use the exact documented route; no arbitrary container IDs. |
+| 413 | `request_too_large` | HTTP execution body exceeds 32 KiB. |
 | 405 | `method_not_allowed` | Use the documented HTTP method. |
 | 409 | `container_limit_exceeded` | The plan's concurrency cap is occupied. GET status and reuse it, or stop it only if the task authorizes replacement. |
 | 404 | `image_not_found` | Choose an advertised catalog ID or an owned custom image. |
 | 409 | `image_not_ready` / `image_not_available` | Wait for custom-image readiness or choose a currently published catalog image. |
-| 409 | `container_not_running` | SSH needs a live container; GET status before deciding whether to start. |
+| 409 | `container_not_running` | Execution and SSH need the exact live generation; GET status before deciding whether to start. |
 | 429 | `container_quota_exceeded` | The plan's starts are exhausted this UTC month. Wait for next month; do not retry or create another account to evade the limit. |
 | 429 | `terminal_limit` | Four terminal connections are attached to this container. Close or reuse an existing connection. |
+| 429 | `execution_limit` | Four HTTP commands are already active on this container. Wait for completion. |
 | 429 | `ssh_token_limit` | Ten live SSH access tokens for this account. Reuse existing access or wait for expiration. |
-| 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
+| 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` / `execution_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
 
 POST creation is not idempotent. If a request times out or returns 503, GET status
 before doing anything else: startup may have succeeded, or a failed startup may
 have consumed quota. Do not blindly retry POST. Set a startup client timeout long
 enough for the server's 60-second readiness check. SSH tokens stop working when
 the container stops or is recreated; do not print the returned token-bearing
-command in shared logs. Use the returned SSH command with trusted `ssh` and
-`cloudflared` tools to run the requested job; there is no HTTP exec endpoint.
+command in shared logs. Use HTTP execution for bounded foreground jobs. Use the returned SSH command
+with trusted `ssh` and `cloudflared` tools for interactive or longer jobs.
 
 ## Card-free trial coupons
 
