@@ -37,7 +37,7 @@ export async function handleContainersRequest(request: Request, env: Env): Promi
     // from the browser, and never pass session cookies to the container service.
     const machine = env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(`user:${user.id}`));
     const response = await machine.fetch(new Request("https://internal/container", { method: request.method, ...(selection ? { body: JSON.stringify(selection), headers: { "Content-Type": "application/json" } } : {}) }));
-    const data = await response.json();
+    const data = await response.json() as { error?: string };
     if (response.status === 409) return authJson({ error: data.error === "image_not_available" ? "image_not_available" : "container_limit_exceeded" }, 409, cors);
     if (response.status === 429) return authJson({ error: "container_quota_exceeded" }, 429, cors);
     if (!response.ok) throw new Error("machine_request_failed");
