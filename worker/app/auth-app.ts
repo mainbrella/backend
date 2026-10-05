@@ -128,8 +128,9 @@ export async function handleAppDelete(request: Request, env: Env, headers: Strin
       .bind(user.id),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id),
   ]);
-  if (env.BUCKET) {
-    await Promise.all(photos.results.map((row) => env.BUCKET.delete(`herd_media/${row.image_path}`)));
+  const bucket = env.BUCKET;
+  if (bucket) {
+    await Promise.all(photos.results.map((row) => bucket.delete(`herd_media/${row.image_path}`)));
   }
   return authJson({ deleted: true }, 200, headers);
 }
