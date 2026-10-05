@@ -4,12 +4,15 @@ import { handleSubscriptionRequest } from "./subscription";
 import { handleAdminRequest } from "./admin";
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
+import { handleTerminalRequest } from "./terminal";
 
 export async function handleRequest(
   request: Request,
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/containers/terminal") return handleTerminalRequest(request, env);
 
   if (url.pathname === "/containers/ssh" || url.pathname.startsWith("/ssh/")) {
     return handleSSHRequest(request, env);
