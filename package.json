@@ -9,7 +9,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply delta --remote",
     "generate-types": "wrangler types",
     "type-check": "npm run generate-types && tsc --noEmit",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",
