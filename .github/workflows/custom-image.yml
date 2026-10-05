@@ -1,0 +1,118 @@
+name: Build custom image
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: Mainbrella build ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BUILD_ID: ${{ inputs.build_id }}
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Fetch source and pinned base image
+        env:
+          IMAGE_BUILD_SECRET: ${{ secrets.IMAGE_BUILD_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/prepare-image-build.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepared
+          path: prepared/
+          retention-days: 1
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # User code runs only inside Docker on this disposable runner. No publishing,
+    # API callback, or registry secrets are available in this job.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepared
+          path: prepared/
+      - name: Build and check workspace compatibility
+        shell: bash
+        run: |
+          mkdir result
+          {
+            docker load -i prepared/base.tar
+            python3 scripts/prepare-build-context.py prepared/source.json context
+            timeout --kill-after=10s 300s docker build --platform linux/amd64 --pull=false --provenance=false --progress=plain -t mainbrella-custom:build context
+            size=$(docker image inspect --format '{{.Size}}' mainbrella-custom:build)
+            test "$size" -le 536870912 || { echo 'Image exceeds the 512 MiB limit.'; exit 1; }
+            timeout --kill-after=5s 20s docker run --rm --network none --entrypoint /bin/sh mainbrella-custom:build -ec 'command -v sleep; bash --version; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke'
+            docker save -o result/image.tar mainbrella-custom:build
+          } >result/build.log 2>&1
+      - name: Keep bounded build output
+        if: always()
+        run: |
+          mkdir -p result
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('result/build.log')
+          path.write_bytes(path.read_bytes()[-60000:] if path.exists() else b'Build runner unavailable.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: result/
+          retention-days: 1
+
+  publish:
+    if: always() && github.ref == 'refs/heads/main'
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    # Publication admission is serialized by the API; GitHub concurrency groups
+    # cancel older pending jobs rather than providing a reliable build queue.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.result == 'success'
+        continue-on-error: true
+        with:
+          name: result
+          path: result/
+      - name: Publish, register, and report result
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          IMAGE_BUILD_SECRET: ${{ secrets.IMAGE_BUILD_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-image-build.mjs

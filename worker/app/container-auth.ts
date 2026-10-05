@@ -1,6 +1,6 @@
 import { currentUser, sessionUser } from "./auth-core";
 
-// Automation reuses a login session, scoped to the lifecycle and SSH routes.
+// Automation reuses a login session, scoped to the lifecycle, image and SSH routes.
 // An explicit invalid Bearer credential must never fall back to a browser cookie.
 export async function containerUser(env: Env, request: Request) {
   const authorization = request.headers.get("Authorization");

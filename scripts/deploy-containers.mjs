@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { validateCustomImages } from './custom-images.mjs';
 import { validateImage } from './terminal-image.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -23,6 +24,11 @@ try {
   if (!asset) throw new Error('missing image manifest');
   const manifest = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${asset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
   image = validateImage(manifest, config.account_id, dockerfileHash);
+  const customAsset = release.assets.find(asset => asset.name === 'custom-images.json');
+  if (customAsset) {
+    const custom = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${customAsset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
+    Object.assign(config.containers[0].images, validateCustomImages(custom, config.account_id));
+  }
 } catch (error) {
   console.error(error.code === 'ENOENT' ? 'Install GitHub CLI (gh) and run gh auth login.' :
     `Cannot use the published terminal image: ${error.message.startsWith('Image ') ? error.message : 'release unavailable; check gh auth status and the Build terminal image workflow.'}`);

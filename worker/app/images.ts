@@ -208,8 +208,9 @@ export async function handleImageBuildRequest(request: Request, env: Env) {
     if (!previous.includes(image.status)) return authJson({ error: 'invalid_build_transition' }, 409, {});
     const logs = (body.logs ?? image.logs).slice(-64 * 1024);
     const saved = await env.DB.prepare(`UPDATE container_images SET status = ?, image_ref = ?, logs = ?, updated_at = ?, context_base64 = NULL
-      WHERE id = ? AND status = ? AND deadline > ?`).bind(body.status, body.status === 'publishing' ? body.image : image.image_ref,
+      WHERE id = ? AND status = ? AND deadline > ?
+      ${body.status === 'publishing' ? "AND NOT EXISTS (SELECT 1 FROM container_images WHERE status = 'publishing')" : ''}`).bind(body.status, body.status === 'publishing' ? body.image : image.image_ref,
       logs, now, id, image.status, now).run();
-    return authJson(saved.meta.changes ? { updated: true } : { error: 'invalid_build_transition' }, saved.meta.changes ? 200 : 409, {});
+    return authJson(saved.meta.changes ? { updated: true } : { error: body.status === 'publishing' ? 'image_publication_busy' : 'invalid_build_transition' }, saved.meta.changes ? 200 : 409, {});
   } catch { return authJson({ error: 'image_builds_unavailable' }, 503, {}); }
 }

@@ -10,7 +10,7 @@ function fixture(t, { outdated = false, exitCode = 0 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'terminal-deploy-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
-  for (const file of ['deploy-containers.mjs', 'terminal-image.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  for (const file of ['deploy-containers.mjs', 'terminal-image.mjs', 'custom-images.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
   const dockerfile = 'FROM test\n';
   writeFileSync(join(root, 'containers/Dockerfile'), dockerfile);
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ account_id: 'account', main: 'containers/user-container.js', containers: [{ images: { terminal: { dockerfile: './containers/Dockerfile' } } }] }));
