@@ -1,6 +1,6 @@
 export interface ContainerIdentity { id: string; createdAt: string }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; outputTruncated: boolean }
-export interface Container extends ContainerIdentity { status: 'starting' | 'running'; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string }
+export interface Container extends ContainerIdentity { status: 'starting' | 'running'; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | null; active: boolean; containers: Container[];
   imageCatalog: { id: string; name: string }[]; limits: { maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
   usage: { month: string; starts: number } }
@@ -27,7 +27,7 @@ export class Mainbrella {
 }
 export class Sandbox implements ContainerIdentity {
   constructor(client: Mainbrella, value: ContainerIdentity);
-  client: Mainbrella; id: string; createdAt: string; creationId?: string;
+  client: Mainbrella; id: string; createdAt: string; creationId?: string; imageDigest?: string; instance?: string;
   files: { read(path: string): Promise<Uint8Array>; write(path: string, bytes: Uint8Array): Promise<{ path: string; size: number }> };
   commands: { run(command: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<CommandResult>;
     start(command: string, options?: { timeoutMs?: number; idempotencyKey?: string }): Promise<Execution> };

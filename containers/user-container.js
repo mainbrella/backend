@@ -35,8 +35,10 @@ export class UserContainer extends DurableObject {
     return this.controller.fetch(request);
   }
 
-  alarm() {
-    return this.controller.alarm();
+  async alarm() {
+    await this.controller.alarm();
+    await this.executions.prune();
+    await this.executions.scheduleCleanup();
   }
 }
 

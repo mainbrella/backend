@@ -34,6 +34,20 @@ export class ManagedExecutions {
     const events = await this.ctx.storage.list({ prefix: eventPrefix(record.id), limit: MAX_EXECUTION_EVENTS + 2 });
     await this.ctx.storage.delete([...events.keys(), RECORD + record.id]);
   }
+  async prune() {
+    for (const record of (await this.records()).values()) {
+      if (terminalExecution(record) && record.retainUntil <= this.controller.now()) await this.erase(record);
+    }
+  }
+  async scheduleCleanup() {
+    await this.controller.serialized(async () => {
+      const records = [...(await this.records()).values()];
+      const times = records.map(record => record.retainUntil).filter(at => at > this.controller.now());
+      const metadata = await this.ctx.storage.get('builderMachine');
+      if (metadata && this.controller.container.running) times.push(Math.max(this.controller.now() + 1, this.controller.deadline(metadata)));
+      if (times.length) await this.ctx.storage.setAlarm(Math.min(...times));
+    });
+  }
   async recover() {
     const records = await this.records();
     const metadata = await this.ctx.storage.get('builderMachine');
@@ -69,7 +83,8 @@ export class ManagedExecutions {
     if (!validExecution(body)) return this.controller.respond({ error: 'invalid_request' }, 400);
     const key = request.headers.get('Idempotency-Key');
     if (!validIdempotencyKey(key)) return this.controller.respond({ error: 'invalid_idempotency_key' }, 400);
-    const fingerprint = JSON.stringify([body.command, body.timeoutMs ?? 30_000]);
+    const fingerprint = [...new Uint8Array(await crypto.subtle.digest('SHA-256',
+      encoder.encode(JSON.stringify([body.command, body.timeoutMs ?? 30_000]))))].map(byte => byte.toString(16).padStart(2, '0')).join('');
     return this.serialized(async () => {
       const records = await this.records();
       for (const [id, record] of records) {
@@ -173,6 +188,7 @@ export class ManagedExecutions {
       });
       this.active.delete(session);
       this.sessions.delete(record.id);
+      await this.scheduleCleanup();
     }
   }
   async events(record, cursor = 0) {

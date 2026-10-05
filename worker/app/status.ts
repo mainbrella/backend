@@ -28,7 +28,7 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
   if (internal && (!env.MONITORING_SECRET || await hashToken(request.headers.get('Authorization') ?? '') !== await hashToken(`Bearer ${env.MONITORING_SECRET}`))) {
     return authJson({ error: 'not_authenticated' }, 401, cors);
   }
-  const allowed = url.pathname === '/status/history' ? ['before', 'component'] : [];
+  const allowed = url.pathname === '/status/history' ? ['before', 'beforeId', 'component'] : [];
   if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) return authJson({ error: 'invalid_request' }, 400, cors);
   try {
     if (!env.DB) throw new Error('database_unavailable');
@@ -54,12 +54,17 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
       return authJson({ ok: true, id: incident.id }, 200, cors);
     }
     if (url.pathname === '/status/history') {
-      const before = url.searchParams.get('before'), component = url.searchParams.get('component');
+      const before = url.searchParams.get('before'), component = url.searchParams.get('component'), beforeId = url.searchParams.get('beforeId');
       if (before !== null && (!Number.isFinite(Date.parse(before)) || new Date(before).toISOString() !== before)
+        || beforeId !== null && (!before || !/^[1-9]\d*$/.test(beforeId) || !Number.isSafeInteger(Number(beforeId)))
         || component !== null && !STATUS_COMPONENTS.includes(component as typeof STATUS_COMPONENTS[number])) return authJson({ error: 'invalid_request' }, 400, cors);
-      const rows = await env.DB.prepare(`SELECT * FROM status_observations WHERE checked_at < ? ${component ? 'AND component = ?' : ''}
-        ORDER BY checked_at DESC, id DESC LIMIT 100`).bind(before ?? now.toISOString(), ...(component ? [component] : [])).all<ObservationRow>();
-      return authJson({ observations: rows.results.map(publicObservation), retentionDays: 31 }, 200, cors);
+      const upper = before ?? new Date(now.getTime() + 1).toISOString();
+      const rows = await env.DB.prepare(`SELECT * FROM status_observations WHERE
+        (checked_at < ? OR (checked_at = ? AND id < ?)) ${component ? 'AND component = ?' : ''}
+        ORDER BY checked_at DESC, id DESC LIMIT 100`).bind(upper, upper, beforeId ? Number(beforeId) : 0, ...(component ? [component] : [])).all<ObservationRow>();
+      const last = rows.results.at(-1);
+      return authJson({ observations: rows.results.map(publicObservation), retentionDays: 31,
+        next: rows.results.length === 100 && last ? { before: last.checked_at, beforeId: last.id } : null }, 200, cors);
     }
     if (url.pathname !== '/status') return authJson({ error: 'not_found' }, 404, cors);
     const rows = await env.DB.prepare(`SELECT * FROM status_observations WHERE id IN

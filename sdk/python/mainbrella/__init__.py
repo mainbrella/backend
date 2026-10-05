@@ -108,6 +108,8 @@ class Mainbrella:
                         raise MainbrellaError("invalid_creation_response")
                     sandbox = self.connect(selected["id"], selected["createdAt"])
                     sandbox.creation_id = creation["id"]
+                    sandbox.image_digest = selected.get("imageDigest")
+                    sandbox.instance = selected.get("instance")
                     return sandbox
             except MainbrellaError as error:
                 if error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":

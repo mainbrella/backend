@@ -63,7 +63,7 @@ export class Mainbrella {
   }
   capabilities() { return this.request('/capabilities'); }
   list() { return this.request('/containers'); }
-  connect(value) { return new Sandbox(this, identity(value)); }
+  connect(value) { return new Sandbox(this, value); }
   async create({ catalogId, imageId, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
     if (catalogId && imageId || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
       || !Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
@@ -101,6 +101,7 @@ export class Sandbox {
   constructor(client, value) {
     this.client = client;
     Object.assign(this, identity(value));
+    for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
       read: path => this.client.request(this.path('/containers/files', { path }), { binary: true }),
       write: (path, bytes) => {

@@ -11,7 +11,7 @@ export async function verifyAgent(client, { catalogId = 'node', managed = true }
     const start = performance.now();
     sandbox = await client.create({ catalogId, idempotencyKey: creationKey });
     report.timings.createMs = performance.now() - start;
-    report.container = { id: sandbox.id, createdAt: sandbox.createdAt };
+    report.container = { id: sandbox.id, createdAt: sandbox.createdAt, imageDigest: sandbox.imageDigest ?? null, instance: sandbox.instance ?? null };
     const beforeExec = performance.now();
     const result = await sandbox.commands.run('printf mainbrella-probe', { timeoutMs: 30_000 });
     if (result.stdout !== 'mainbrella-probe' || result.exitCode !== 0 || result.timedOut || result.outputTruncated) throw new Error('execution_failed');

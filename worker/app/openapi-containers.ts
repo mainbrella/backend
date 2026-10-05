@@ -5,6 +5,7 @@ export const limitsSchema = z.object({ maxContainers: z.number(), maxStartsPerMo
 const status = z.object({ plan: planSchema.nullable(), active: z.boolean(), containers: z.array(z.object({
   id: z.string(), name: z.string(), instance: z.literal("lite"), status: z.enum(["starting", "running"]),
   createdAt: z.string(), expiresAt: z.string(), imageId: z.string().optional(), imageName: z.string().optional(), catalogId: z.string().optional(),
+  imageDigest: z.string().optional().describe('Deployment-resolved immutable image reference for this generation; absent on older generations.'),
 })), limits: limitsSchema, usage: z.object({ month: z.string(), starts: z.number() }), imageCatalog: z.array(z.object({ id: z.string(), name: z.string() })) }).openapi("ContainerStatus");
 const selection = z.object({ id: z.string().optional(), createdAt: z.string().optional() });
 const browserOrigin = z.object({ Origin: z.string().describe("Trusted browser origin; required for cookie mutations.").optional() });

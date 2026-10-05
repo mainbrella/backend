@@ -131,6 +131,7 @@ export class UserContainerController {
           ...(metadata.imageName ? { imageName: metadata.imageName } : {}),
           ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
           ...(metadata.catalogId ? { catalogId: metadata.catalogId } : {}),
+          ...(metadata.imageDigest ? { imageDigest: metadata.imageDigest } : {}),
           createdAt: new Date(metadata.createdAt).toISOString(),
           expiresAt: new Date(metadata.expiresAt).toISOString(),
         }]
@@ -229,6 +230,7 @@ export class UserContainerController {
     const createdAt = Math.max(now, (previousMetadata?.createdAt ?? -1) + 1);
     const metadata = {
       createdAt,
+      imageDigest: image,
       ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,

@@ -17,9 +17,9 @@ export function registerStatusRoutes(api: OpenAPIApi, handler: LegacyHandler): v
   }, handler);
   register(api, 'get', '/status/history', {
     operationId: 'getStatusHistory', tags: ['Operations'], summary: 'Read recent component observations', security: [],
-    description: 'Returns up to 100 observations before the optional exclusive ISO timestamp, optionally for one component. Observation history is retained for 31 days; incidents are retained separately. Does not estimate availability from missing samples.',
-    request: { query: z.object({ before: z.iso.datetime().optional(), component: component.optional() }) },
-    responses: { 200: jsonResponse(z.object({ observations: z.array(observation), retentionDays: z.number().int() })), ...errors(400, 403, 503) },
+    description: 'Returns up to 100 observations, optionally for one component. Follow next.before and next.beforeId together to paginate without skipping samples with equal timestamps; beforeId requires before. Observation history is retained for 31 days; incidents are retained separately. Does not estimate availability from missing samples.',
+    request: { query: z.object({ before: z.iso.datetime().optional(), beforeId: z.number().int().positive().optional(), component: component.optional() }) },
+    responses: { 200: jsonResponse(z.object({ observations: z.array(observation), retentionDays: z.number().int(), next: z.object({ before: z.iso.datetime(), beforeId: z.number().int() }).nullable() })), ...errors(400, 403, 503) },
   }, handler);
   register(api, 'post', '/internal/status/observations', {
     operationId: 'recordStatusObservations', tags: ['Internal'], summary: 'Record bounded operational observations', security: [{ monitoring: [] }],
