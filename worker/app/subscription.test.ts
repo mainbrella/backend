@@ -115,15 +115,16 @@ test("guest completion verifies ownership and actual subscription status", async
   assert.deepEqual(await result.json(), { plan: "builder", active: true });
 });
 
-function accountEnv(checkout = "cs_old") {
+function accountEnv(checkout = "cs_old", writes: { sql: string; values: unknown[] }[] = []) {
   return {
     ...env,
     DB: {
       prepare(sql: string) {
+        let values: unknown[] = [];
         return {
-          bind() { return this; },
+          bind(...args: unknown[]) { values = args; return this; },
           async first() { return sql.includes("FROM sessions") ? { id: "user_test", email: "user@example.com", name: "Test" } : { stripe_customer_id: "cus_test", checkout_session_id: checkout }; },
-          async run() { return {}; },
+          async run() { writes.push({ sql, values }); return {}; },
         };
       },
     },
@@ -149,6 +150,77 @@ test("changing plans expires the prior session and creates checkout for the sele
   assert.equal(result.status, 200);
   assert.deepEqual(await result.json(), { client_secret: "cs_new_secret", publishable_key: "pk_test_example" });
   assert.equal(calls.length, 4);
+});
+
+for (const [plan, price] of Object.entries(PLAN_PRICES)) {
+  test(`account completion persists verified ${plan} subscription without a second Stripe lookup`, async (t) => {
+    const writes: { sql: string; values: unknown[] }[] = [];
+    const subscription = { id: "sub_paid", status: "active", cancel_at_period_end: false,
+      items: { data: [{ price: { id: price }, current_period_end: 1800000000 }] } };
+    const stripe = t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      assert.ok(String(input).includes("/checkout/sessions/cs_paid?"));
+      return Response.json({ id: "cs_paid", status: "complete", customer: "cus_test",
+        client_reference_id: "user_test", subscription });
+    });
+    const result = await handleSubscriptionRequest(request("/subscription/complete", undefined, "POST",
+      { session_id: "cs_paid" }, true), accountEnv("cs_paid", writes));
+    assert.equal(result.status, 200);
+    const payload = await result.json() as { plan: string; active: boolean };
+    assert.equal(payload.plan, plan);
+    assert.equal(payload.active, true);
+    assert.equal(stripe.mock.callCount(), 1);
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].sql, /UPDATE pro_billing SET plan/);
+    assert.deepEqual(writes[0].values, [plan, "sub_paid", "active", 0, 1800000000, "user_test"]);
+  });
+}
+
+test("account completion rejects unowned and incomplete sessions without writing billing details", async (t) => {
+  const writes: { sql: string; values: unknown[] }[] = [];
+  let owner = "another_user";
+  let status = "complete";
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    id: "cs_paid", status, customer: "cus_test", client_reference_id: owner,
+    subscription: { id: "sub_paid", status: "active", items: { data: [{ price: { id: PRO_PRICE_ID } }] } },
+  }));
+  const complete = () => handleSubscriptionRequest(request("/subscription/complete", undefined, "POST",
+    { session_id: "cs_paid" }, true), accountEnv("cs_paid", writes));
+  assert.equal((await complete()).status, 403);
+  owner = "user_test";
+  status = "open";
+  assert.equal((await complete()).status, 409);
+  assert.equal(writes.length, 0);
+});
+
+test("status refresh backfills plans, records payment problems and cancellation, and clears ended subscriptions", async (t) => {
+  const writes: { sql: string; values: unknown[] }[] = [];
+  let price: string = PLAN_PRICES.builder;
+  let status = "active";
+  let cancel = false;
+  t.mock.method(globalThis, "fetch", async () => Response.json({ data: [
+    { id: "sub_test", status, cancel_at_period_end: cancel,
+      items: { data: [{ price: { id: price }, current_period_end: 1800000000 }] } },
+  ], has_more: false }));
+  const refresh = () => handleSubscriptionRequest(request("/subscription", undefined, "GET", undefined, true), accountEnv("cs_old", writes));
+  assert.equal((await refresh()).status, 200);
+  assert.deepEqual(writes.at(-1)?.values, ["builder", "sub_test", "active", 0, 1800000000, "user_test"]);
+  price = PLAN_PRICES.scale;
+  status = "past_due";
+  cancel = true;
+  const changed = await refresh();
+  assert.equal((await changed.json() as { active: boolean }).active, false);
+  assert.deepEqual(writes.at(-1)?.values, ["scale", "sub_test", "past_due", 1, 1800000000, "user_test"]);
+  status = "canceled";
+  assert.equal((await refresh()).status, 200);
+  assert.deepEqual(writes.at(-1)?.values, [null, null, null, 0, null, "user_test"]);
+});
+
+test("Stripe failures preserve the last saved subscription", async (t) => {
+  const writes: { sql: string; values: unknown[] }[] = [];
+  t.mock.method(console, "error", () => {});
+  t.mock.method(globalThis, "fetch", async () => new Response("unavailable", { status: 503 }));
+  assert.equal((await handleSubscriptionRequest(request("/subscription", undefined, "GET", undefined, true), accountEnv("cs_old", writes))).status, 503);
+  assert.equal(writes.length, 0);
 });
 
 test("existing Builder or Scale subscriptions block duplicate purchases", async (t) => {

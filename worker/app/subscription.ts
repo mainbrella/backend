@@ -1,7 +1,17 @@
 import { authCorsHeaders, authJson, currentUser, readJSON } from "./auth-core";
-import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
+import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession, type StripeSubscription } from "../lib/stripe";
 
 interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
+
+async function syncSubscriptionRecord(env: BillingEnv, userId: string, subscription: StripeSubscription | null): Promise<void> {
+  const plan = subscriptionPlan(subscription);
+  const item = subscription?.items.data.find((item) => plan && item.price.id === PLAN_PRICES[plan]);
+  await env.DB.prepare(`UPDATE pro_billing SET plan = ?, stripe_subscription_id = ?,
+    subscription_status = ?, cancel_at_period_end = ?, current_period_end = ?,
+    synced_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`)
+    .bind(plan, subscription?.id || null, subscription?.status || null,
+      subscription?.cancel_at_period_end ? 1 : 0, item?.current_period_end ?? null, userId).run();
+}
 
 export async function handleSubscriptionRequest(request: Request, env: BillingEnv): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -68,6 +78,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       .bind(user.id).first<BillingRecord>();
     const origin = request.headers.get("Origin") || "https://mainbrella.com";
     const returnUrl = `${origin}/#pricing`;
+    let completedSubscription: StripeSubscription | null = null;
     if (path === "/subscription/complete") {
       const body = await readJSON(request, 2000);
       const id = body?.session_id;
@@ -81,9 +92,11 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       if (session.status !== "complete" || !subscriptionPlan(session.subscription || null)) {
         return authJson({ error: "checkout_not_complete" }, 409, cors);
       }
+      completedSubscription = session.subscription!;
     }
     if (path === "/subscription" || path === "/subscription/complete") {
-      const subscription = record ? await billingSubscription(env, record.stripe_customer_id) : null;
+      const subscription = completedSubscription || (record ? await billingSubscription(env, record.stripe_customer_id) : null);
+      if (record) await syncSubscriptionRecord(env, user.id, subscription);
       const active = ["active", "trialing"].includes(subscription?.status || "");
       const plan = subscriptionPlan(subscription);
       return authJson({ subscription, plan, active, pro: active && plan === "pro", configured: true }, 200, cors);
@@ -106,7 +119,9 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
         .bind(user.id).first<BillingRecord>();
       if (!record) throw new Error("billing_unavailable");
     }
-    if (await billingSubscription(env, record.stripe_customer_id)) {
+    const existingSubscription = await billingSubscription(env, record.stripe_customer_id);
+    await syncSubscriptionRecord(env, user.id, existingSubscription);
+    if (existingSubscription) {
       return authJson({ error: "subscription_exists" }, 409, cors);
     }
     if (record.checkout_session_id) {
