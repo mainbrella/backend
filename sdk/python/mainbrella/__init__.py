@@ -88,11 +88,15 @@ class Mainbrella:
     def connect(self, container_id, created_at):
         return Sandbox(self, container_id, created_at)
 
-    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1):
+    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None):
         key = idempotency_key or str(uuid.uuid4())
         if catalog_id and image_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or wait_timeout <= 0 or poll_interval <= 0:
             raise MainbrellaError("invalid_creation_options")
         body = {"imageId": image_id} if image_id else {"catalogId": catalog_id} if catalog_id else {}
+        if size is not None:
+            if size not in ('lite', 'small', 'medium', 'large', 'xl'):
+                raise MainbrellaError('invalid_creation_options')
+            body['size'] = size
         deadline = time.monotonic() + wait_timeout
         while time.monotonic() < deadline:
             try:

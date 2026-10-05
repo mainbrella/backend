@@ -74,8 +74,10 @@ test("concurrent POSTs reject a second container and reserve only one monthly st
   ]);
   assert.equal(result.usage.starts, 1);
   assert.deepEqual(result.limits, {
+    maxComputeUnitHours: 250,
+    maxConcurrentComputeUnits: 28,
     maxContainers: 5,
-    maxStartsPerMonth: 10,
+    maxStartsPerMonth: 1000,
     maxSessionMs: 3_600_000,
     idleTimeoutMs: 600_000,
   });
@@ -135,7 +137,7 @@ test("alarm destroys at the earliest idle deadline and keeps persisted metadata"
   f.setTime(metadata.idleExpiresAt);
   await f.controller.alarm();
   assert.equal(f.ctx.container.running, false);
-  assert.deepEqual(await f.ctx.storage.get("builderMachine"), metadata);
+  assert.deepEqual(await f.ctx.storage.get("builderMachine"), { ...metadata, computeStoppedAt: f.now() });
 });
 
 test("restart and GET preserve the absolute idle deadline without renewing it", async () => {

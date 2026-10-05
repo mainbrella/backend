@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { limitsSchema } from "./openapi-containers";
+import { limitsSchema, machineSizeSchema } from "./openapi-containers";
 import { cookieSecurity, errors, jsonResponse, planSchema, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
 const subscriptionState = z.object({
@@ -16,6 +16,7 @@ export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandl
     responses: { 200: jsonResponse(z.object({ google_client_id: z.string().optional(), configured: z.boolean(),
       plans: z.record(planSchema, z.object({ name: z.string(), price: z.number(), limits: limitsSchema,
         machine: z.object({ instance: z.string(), cpuVcpu: z.number(), memoryMiB: z.number(), diskGB: z.number() }),
+        sizes: z.array(machineSizeSchema),
         access: z.object({ maxTerminalConnections: z.number(), maxSSHAccessTokens: z.number(), sshTokenLifetimeMs: z.number() }),
         features: z.record(z.string(), z.boolean()),
       })) })), ...errors(403) },

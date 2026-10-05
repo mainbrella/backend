@@ -1,7 +1,7 @@
 import { authCorsHeaders, authJson } from './auth-core';
 import { MAX_COMMAND_BYTES, MAX_EXECUTIONS, MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS } from '../../containers/command-contract.js';
 import { FILE_TIMEOUT_MS, MAX_FILE_BYTES, MAX_FILE_PATH_BYTES } from '../../containers/file-contract.js';
-import { PLAN_DETAILS, ACCESS_LIMITS } from '../../containers/plan-policy.js';
+import { MACHINE_SIZES, ACCESS_LIMITS } from '../../containers/plan-policy.js';
 import { IMAGE_LIMITS } from './images';
 import { MAX_MANAGED_TIMEOUT_MS, EXECUTION_RETENTION_MS, MAX_RETAINED_EXECUTIONS } from '../../containers/execution-contract.js';
 
@@ -24,7 +24,7 @@ export function capabilities(env: Env) {
     previews: { supported: false, signedUrls: false },
     images: { catalog: true, availableCatalogPath: '/containers',
       customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
-    resources: [PLAN_DETAILS.builder.machine],
+    resources: MACHINE_SIZES,
     networking: { outboundInternet: true, egressPolicies: false, regionSelection: false },
     access: ACCESS_LIMITS,
   };

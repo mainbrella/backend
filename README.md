@@ -145,12 +145,11 @@ repository must remain accessible to the authenticated deployment user.
 | Plan | Monthly USD fee | Concurrent containers | Starts per UTC month | Hard session limit | Idle timeout |
 | --- | ---: | ---: | ---: | --- | --- |
 | No paid plan | $0 | 0 | 0 | No access | No access |
-| Builder | $5 | 5 | 10 | 1 hour | 10 minutes |
-| Pro | $180 | 100 | 1,000 | 24 hours | 30 minutes |
-| Scale | $999 | 500 | 10,000 | 72 hours | 60 minutes |
+| Builder | $5 | 5 | 1,000 | 1 hour | 10 minutes |
+| Pro | $180 | 100 | 10,000 | 24 hours | 30 minutes |
+| Scale | $999 | 500 | 100,000 | 72 hours | 60 minutes |
 
-Every plan uses a fixed [Cloudflare `lite` machine](https://developers.cloudflare.com/containers/platform/limits/): 1/16 vCPU, 256 MiB RAM and 2 GB ephemeral
-disk. Browser terminal, SSH and outbound internet are included. Each container permits
+Every plan supports Lite, Small, Medium, Large, and XL machines, up to 4 vCPU / 12 GiB RAM / 20 GB disk. Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Units/hour are 1, 6, 10, 16, and 28. Both the unit ceiling and container ceiling apply. Browser terminal, SSH and outbound internet are included. Each container permits
 up to four attached terminals (browser and SSH combined); each account permits
 ten live SSH access tokens, each expiring within 15 minutes or the machine deadline. Snapshots,
 filesystem persistence after stop, custom sizes, team seats, SDKs, enhanced logs,
@@ -405,3 +404,16 @@ probe. It has no recurring schedule, preserving control over its start budget.
 
 See [the backend handoff](docs/backend-handoff.md), [security evidence](docs/security-evidence.md)
 and [runtime feasibility](docs/runtime-feasibility.md) for web integration and release gates.
+
+
+### Size pricing and cost assumptions
+
+Policy lives in `containers/plan-policy.js`. All plans offer the same five sizes; omitted size defaults to Lite. Runtime is reserved account-wide before boot, with unused runtime released on confirmed stop. Delayed or unreadable machines retain reservations. Budget deadlines survive restarts and terminal activity. Sessions are capped at the UTC month boundary; monthly allowance does not roll over. Starts limits are now 1,000 / 10,000 / 100,000 per UTC month, as lifecycle safeguards. Top-ups and automatic overages are not implemented.
+
+At full allowance utilization, Builder and Pro cost $0.02 per compute-unit hour; Scale costs $0.01998. Small / Medium / Large / XL effective hourly prices on Pro are $0.12 / $0.20 / $0.32 / $0.56. These are about 33–42% above equivalent CPU/RAM at E2B/Daytona's published $0.0504/vCPU-hour and $0.0162/GiB-hour rates, before their storage charges and E2B plan fees. Partially used subscriptions have higher effective hourly prices. Resources, CPU scheduling and platform features differ; this is a resource-rate comparison, not a workload-performance benchmark.
+
+Cloudflare's published marginal rates (checked 2026-10-05) are $0.072 per active vCPU-hour, $0.009 per provisioned GiB-hour, and $0.000252 per provisioned disk GB-hour. Full-CPU compute costs/hour for our sizes are $0.007254 / $0.074016 / $0.129024 / $0.220032 / $0.401040. XL has the greatest cost per unit ($0.0143229). Worst-case container compute at full allowance is therefore $3.58 / $128.91 / $716.14, leaving roughly 28% before other costs. Cloudflare's shared included usage is excluded rather than assigned to each customer. This is not a full gross-margin guarantee: egress, Workers/DO requests and duration, logging, image builds/storage, payment fees, taxes, support and operational capacity must be monitored separately. CPU-light workloads cost less. The automated pricing check verifies the compute envelope, not total profitability.
+
+Sources: [Cloudflare pricing](https://developers.cloudflare.com/containers/platform/pricing/), [E2B pricing](https://e2b.dev/pricing), [Daytona pricing](https://www.daytona.io/pricing).
+
+Deploy the private containers Worker before the API Worker, then publish the web build. This ensures the runtime enforces compute deadlines before the API advertises larger sizes and allowances. The `deploy` script uses that order.

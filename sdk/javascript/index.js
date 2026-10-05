@@ -64,13 +64,14 @@ export class Mainbrella {
   capabilities() { return this.request('/capabilities'); }
   list() { return this.request('/containers'); }
   connect(value) { return new Sandbox(this, value); }
-  async create({ catalogId, imageId, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
+  async create({ catalogId, imageId, size, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
     if (catalogId && imageId || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
       || !Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
       throw new MainbrellaError('invalid_creation_options');
     }
     const deadline = Date.now() + waitTimeoutMs;
-    const body = imageId ? { imageId } : catalogId ? { catalogId } : {};
+    if (size !== undefined && !['lite', 'small', 'medium', 'large', 'xl'].includes(size)) throw new MainbrellaError('invalid_creation_options');
+    const body = { ...(imageId ? { imageId } : catalogId ? { catalogId } : {}), ...(size !== undefined ? { size } : {}) };
     while (Date.now() < deadline) {
       try {
         const data = await this.request('/containers', { method: 'POST', body,

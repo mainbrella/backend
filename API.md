@@ -123,7 +123,7 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | Method and path | Result |
 | --- | --- |
 | `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
-| `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; optional `Idempotency-Key` resolves retries to one reservation for 24 hours and adds `creation` identity/status; 429 if monthly starts are exhausted. |
+| `POST /containers` | 200: reserves a start and boots the selected machine size (default lite) using the default Node image or optional JSON `{catalogId, size}` / `{imageId, size}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; optional `Idempotency-Key` resolves retries to one reservation for 24 hours and adds `creation` identity/status; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `GET /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: raw `application/octet-stream` bytes for a regular file, up to 1 MiB. ID, exact generation, and URL-encoded path are required. |
@@ -139,22 +139,26 @@ Lifecycle response example (UTC timestamps and usage month):
   "containers": [{
     "id": "small",
     "name": "Small container",
+    "size": "lite",
+    "computeUnits": 1,
     "instance": "lite",
     "status": "running",
     "createdAt": "2026-10-05T12:00:00.000Z",
     "expiresAt": "2026-10-05T13:00:00.000Z"
   }],
   "limits": {
+    "maxComputeUnitHours": 250,
+    "maxConcurrentComputeUnits": 28,
     "maxContainers": 5,
-    "maxStartsPerMonth": 10,
+    "maxStartsPerMonth": 1000,
     "maxSessionMs": 3600000,
     "idleTimeoutMs": 600000
   },
-  "usage": {"month": "2026-10", "starts": 1}
+  "usage": {"month": "2026-10", "starts": 1, "computeUnitHours": 0, "reservedComputeUnitHours": 1, "availableComputeUnitHours": 249, "concurrentComputeUnits": 1}
 }
 ```
 
-`containers` is empty when stopped. During a concurrent launch, a reserved slot
+The response also includes a `sizes` catalog (omitted above for brevity). `containers` is empty when stopped. During a concurrent launch, a reserved slot
 may appear with `status: "starting"`; terminal and SSH access require `running`.
 Unpaid status has `plan: null`, `active: false` and zero limits. An unpaid first
 start returns 402 without provisioning or consuming quota. If an existing billing
@@ -163,11 +167,11 @@ that account's existing containers.
 
 | Plan | USD/month | Concurrent containers | Starts/UTC month | Hard limit | Idle timeout |
 | --- | ---: | ---: | ---: | --- | --- |
-| Builder | $5 | 5 | 10 | 1 hour | 10 minutes |
-| Pro | $180 | 100 | 1,000 | 24 hours | 30 minutes |
-| Scale | $999 | 500 | 10,000 | 72 hours | 60 minutes |
+| Builder | $5 | 5 | 1,000 | 1 hour | 10 minutes |
+| Pro | $180 | 100 | 10,000 | 24 hours | 30 minutes |
+| Scale | $999 | 500 | 100,000 | 72 hours | 60 minutes |
 
-All plans use `lite`: 1/16 vCPU, 256 MiB RAM, 2 GB ephemeral disk, bash, tmux and outbound internet. The default image includes Node 24; other runtimes depend on the selected image. All include SSH and browser terminals. A container permits four concurrent
+All plans offer five sizes with bash, tmux and outbound internet. `POST /containers` accepts `size`: `lite` (default), `small`, `medium`, `large`, or `xl`. Size is included in the idempotency fingerprint. The default image includes Node 24; other runtimes depend on the selected image. All include SSH and browser terminals. A container permits four concurrent
 terminal connections (browser/SSH combined). An account permits ten live SSH
 access tokens, each lasting at most 15 minutes or the machine deadline. Snapshots,
 resume after stop, custom resources, SDKs, teams, advanced logs/audits and priority
@@ -175,8 +179,8 @@ capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
 The filesystem is lost when a container stops.
 
 Ownership and resources come from the authenticated account and server policy.
-Request bodies and client headers cannot override the owner, plan, registry image, size,
-slots or deadlines. IDs returned by status select only the authenticated account's
+Request bodies and client headers cannot override the owner, plan, registry image, raw resource configuration,
+slots or deadlines. The named `size` field selects a server-defined size. IDs returned by status select only the authenticated account's
 slots. Arbitrary `/containers/<id>` routes are rejected. All sessions of the same
 account share the same concurrency and UTC monthly quota.
 
@@ -357,7 +361,7 @@ identifies the contract. Execution/file limits come from the runtime's shared
 constants. Unsupported persistence, preview, filesystem-directory and network
 policy features are explicit. `images.customBuilds` reflects configured build
 credentials; it does not establish build-service health. Resources currently
-advertise only `lite`. Regions are not selectable.
+advertise all five machine sizes. Regions are not selectable.
 
 Use authenticated `GET /containers` for account allowances, usage, running
 generations and the deployed `imageCatalog`. New generations include
@@ -427,3 +431,20 @@ seven distinct components and a server-assigned timestamp. The second accepts
 `{id,component,title,state,message}`; id is a UUID and state is investigating,
 identified, monitoring or resolved. An incident cannot change component or reopen
 after resolution. Incident text is public.
+
+
+## Machine sizes and compute allowance
+
+| Size | Cloudflare instance | vCPU | RAM | Disk | Compute units/hour |
+| --- | --- | --- | --- | --- | --- |
+| lite | lite | 1/16 | 256 MiB | 2 GB | 1 |
+| small | standard-1 | 0.5 | 4 GiB | 8 GB | 6 |
+| medium | standard-2 | 1 | 6 GiB | 12 GB | 10 |
+| large | standard-3 | 2 | 8 GiB | 16 GB | 16 |
+| xl | standard-4 | 4 | 12 GiB | 20 GB | 28 |
+
+Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Container ceilings and monthly start safeguards (1,000 / 10,000 / 100,000) also apply. Monthly usage resets on the UTC calendar month, without rollover.
+
+Create with `{"catalogId":"node","size":"medium"}`. `GET /containers` returns `sizes`, `limits.maxComputeUnitHours`, `limits.maxConcurrentComputeUnits`, and `usage.computeUnitHours`, `reservedComputeUnitHours`, `availableComputeUnitHours`, and `concurrentComputeUnits`. Runtime is reserved durably before provisioning; unused runtime is released on a reconciled stop. Used hours include provisioning and idle time. Ambiguous starts retain reservations until reconciliation. Capacity rejection does not reserve usage. Machines receive an immutable budget deadline and stop at the earliest of that deadline, idle/session/paid-access expiry, or the UTC month boundary. Clients must honor returned `expiresAt`.
+
+Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. No automatic overages or top-ups are enabled.

@@ -29,7 +29,7 @@ test('configuration publishes the authoritative plan policy without requiring au
   const f = await billingFixture(t);
   const response = await handleSubscriptionRequest(billingRequest('/subscription/config', undefined, false), f.env);
   const body = await response.json() as any;
-  assert.equal(body.plans.builder.limits.maxStartsPerMonth, 10);
+  assert.equal(body.plans.builder.limits.maxStartsPerMonth, 1000);
   assert.equal(body.plans.pro.limits.maxContainers, 100);
   assert.equal(body.plans.scale.limits.maxSessionMs, 72 * 3600000);
   assert.equal(body.plans.builder.price, 5);

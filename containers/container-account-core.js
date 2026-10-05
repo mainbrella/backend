@@ -1,4 +1,4 @@
-import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement } from './plan-policy.js';
+import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement, MACHINE_SIZES, machineSize } from './plan-policy.js';
 import { IMAGE_CATALOG } from './image-catalog.js';
 
 const KEY = 'containerAccount';
@@ -25,11 +25,12 @@ export class ContainerAccountController {
   respond(data, status = 200) { return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } }); }
   async machine(state, id, method, entitlement, reservationId = state.reservations?.[id], selection) {
     const response = await this.machineFor(state.userId, id).fetch(new Request('https://internal/container', {
-      method, headers: { ...entitlementHeaders(entitlement), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
+      method, headers: { ...entitlementHeaders(entitlement), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
     }));
     if (!response.ok) {
       const data = await response.json().catch(() => null);
+      if (data?.error === 'compute_allowance_exhausted') throw new Error('compute_allowance_exhausted');
       throw new Error(data?.error === 'container_start_canceled' ? 'container_not_running'
         : data?.error === 'subscription_required' ? 'subscription_required'
         : data?.error === 'image_not_available' ? 'image_not_available' : 'container_request_failed');
@@ -40,6 +41,8 @@ export class ContainerAccountController {
     let state = await this.ctx.storage.get(KEY);
     if (state) {
       if (state.userId !== userId) throw new Error('account_mismatch');
+      state.computeUsage ??= {};
+      state.leases ??= {};
       state.pending ??= {};
       state.reservations ??= {};
       state.nextReservationId ??= 0;
@@ -47,7 +50,7 @@ export class ContainerAccountController {
     }
     // Preserve legacy slot and starts. An unpaid legacy machine is stopped by
     // the slot's entitlement check, while its historical usage remains intact.
-    state = { userId, slots: ['small'], usage: {}, pending: {}, reservations: {}, nextReservationId: 0, entitlement };
+    state = { userId, slots: ['small'], usage: {}, computeUsage: {}, leases: {}, pending: {}, reservations: {}, nextReservationId: 0, entitlement };
     const legacy = await this.machine(state, 'small', 'GET', entitlement);
     state.imageCatalog = legacy.imageCatalog ?? [];
     if (legacy.usage?.month && Number.isSafeInteger(legacy.usage.starts)) state.usage[legacy.usage.month] = legacy.usage.starts;
@@ -55,12 +58,45 @@ export class ContainerAccountController {
     await this.ctx.storage.put(KEY, state);
     return state;
   }
+  // Runtime is reserved durably before provisioning. A successful stop releases
+  // only the unused portion, once; unreadable machines retain their reservation.
+  settleLease(state, id, stoppedAt = this.now()) {
+    const lease = state.leases[id];
+    if (!lease) return;
+    const elapsed = Math.max(0, Math.min(lease.endAt, stoppedAt) - lease.startAt);
+    const refund = lease.unitMs - elapsed * machineSize(lease.size).computeUnits;
+    state.computeUsage[lease.month] = Math.max(0, (state.computeUsage[lease.month] ?? 0) - refund);
+    delete state.leases[id];
+  }
+  clampLease(state, id, endAt) {
+    const lease = state.leases[id];
+    if (!lease || !Number.isFinite(endAt) || endAt >= lease.endAt) return;
+    endAt = Math.max(lease.startAt, endAt);
+    const refund = (lease.endAt - endAt) * machineSize(lease.size).computeUnits;
+    state.computeUsage[lease.month] = Math.max(0, (state.computeUsage[lease.month] ?? 0) - refund);
+    lease.endAt = endAt;
+    lease.unitMs -= refund;
+  }
+  reserveLease(state, id, size, endAt) {
+    const startAt = this.now();
+    const date = new Date(startAt);
+    const month = date.toISOString().slice(0, 7);
+    const limits = PLAN_LIMITS[state.entitlement.plan];
+    const remaining = limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
+    endAt = Math.min(endAt, Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+      startAt + Math.max(0, Math.floor(remaining / size.computeUnits)));
+    const unitMs = (endAt - startAt) * size.computeUnits;
+    state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
+    state.leases[id] = { size: size.id, startAt, endAt, month, unitMs };
+    return endAt;
+  }
   async stopIndependently(state, ids, entitlement) {
     const failed = [];
     for (let offset = 0; offset < ids.length; offset += 20) {
       const batch = ids.slice(offset, offset + 20);
       const results = await Promise.allSettled(batch.map(id => this.machine(state, id, 'DELETE', entitlement)));
-      results.forEach((result, index) => { if (result.status === 'rejected') failed.push(batch[index]); });
+      results.forEach((result, index) => { if (result.status === 'rejected') failed.push(batch[index]);
+        else this.settleLease(state, batch[index], result.value.lastRun?.stoppedAt ?? this.now()); });
     }
     return failed;
   }
@@ -87,8 +123,12 @@ export class ContainerAccountController {
     return this.respond({ ...this.status(state, containers), creation: { id: record.id, containerId: record.slot, createdAt: container.createdAt, status: container.status } });
   }
   async saveState(state, retry = false) {
+    state.leases ??= {};
+    state.computeUsage ??= {};
     const month = new Date(this.now()).toISOString().slice(0, 7);
     state.usage = { [month]: state.usage[month] ?? 0 };
+    const retainedMonths = new Set([month, ...Object.values(state.leases).map(lease => lease.month)]);
+    state.computeUsage = Object.fromEntries(Object.entries(state.computeUsage).filter(([key]) => retainedMonths.has(key)));
     state.pending = Object.fromEntries(Object.entries(state.pending).filter(([id]) => state.slots.includes(id)));
     await this.ctx.storage.put(KEY, state);
     let alarmAt;
@@ -125,9 +165,11 @@ export class ContainerAccountController {
       const batch = await Promise.allSettled(ids.map(async id => {
         const reservation = state.pending[id];
         if (reservation && this.now() < reservation + 90_000) {
+          this.clampLease(state, id, Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil));
           return { id, name: id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`,
-            instance: 'lite', status: 'starting', createdAt: new Date(reservation).toISOString(),
-            expiresAt: new Date(Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil)).toISOString() };
+            size: state.leases[id]?.size ?? 'lite', instance: machineSize(state.leases[id]?.size ?? 'lite').instance,
+            computeUnits: machineSize(state.leases[id]?.size ?? 'lite').computeUnits, status: 'starting', createdAt: new Date(reservation).toISOString(),
+            expiresAt: new Date(Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil, state.leases[id]?.endAt ?? Infinity)).toISOString() };
         }
         delete state.pending[id];
         const data = await this.machine(state, id, 'GET', entitlement);
@@ -135,9 +177,23 @@ export class ContainerAccountController {
         if (!data.containers?.[0]) {
           // Fence delayed boot dispatches before releasing an apparently empty
           // slot, including recovery after an interrupted provisioning request.
-          await this.machine(state, id, 'DELETE', entitlement);
+          const stopped = await this.machine(state, id, 'DELETE', entitlement);
+          this.settleLease(state, id, stopped.lastRun?.stoppedAt ?? this.now());
           return null;
         }
+        if (!state.leases[id]) {
+          const size = machineSize(data.containers[0].size ?? 'lite');
+          this.reserveLease(state, id, size, Math.max(this.now(), Date.parse(data.containers[0].expiresAt)));
+          await this.ctx.storage.put(KEY, state);
+          const clamped = await this.machine(state, id, 'GET', entitlement);
+          if (!clamped.containers?.[0]) {
+            const stopped = await this.machine(state, id, 'DELETE', entitlement);
+            this.settleLease(state, id, stopped.lastRun?.stoppedAt ?? this.now());
+            return null;
+          }
+          data.containers[0] = clamped.containers[0];
+        }
+        this.clampLease(state, id, Date.parse(data.containers[0].expiresAt));
         return { ...data.containers[0], id, name: id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}` };
       }));
       batch.forEach((result, index) => {
@@ -149,15 +205,28 @@ export class ContainerAccountController {
     const limits = PLAN_LIMITS[entitlement.plan];
     // Unknown machines still occupy capacity. If unknown machines alone exceed
     // the cap, try stopping each; otherwise preserve them until status recovers.
-    if (unreadable.length > limits.maxContainers) unreadable = await this.stopIndependently(state, unreadable, entitlement);
-    const retained = results.slice(0, Math.max(0, limits.maxContainers - unreadable.length));
-    let failedStops = await this.stopIndependently(state, results.slice(retained.length).map(c => c.id), entitlement);
+    if (unreadable.length > limits.maxContainers || unreadable.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? 'lite').computeUnits, 0) > limits.maxConcurrentComputeUnits) unreadable = await this.stopIndependently(state, unreadable, entitlement);
+    const weight = id => machineSize(state.leases[id]?.size ?? 'lite').computeUnits;
+    let units = unreadable.reduce((sum, id) => sum + weight(id), 0);
+    const retained = [];
+    const excess = [];
+    for (const container of results) {
+      if (retained.length + unreadable.length < limits.maxContainers && units + weight(container.id) <= limits.maxConcurrentComputeUnits) {
+        retained.push(container); units += weight(container.id);
+      } else excess.push(container);
+    }
+    let failedStops = await this.stopIndependently(state, excess.map(c => c.id), entitlement);
     // A failed stop still occupies a slot. Keep stopping reachable excess until
     // all remaining known machines fit, instead of aborting on the first error.
-    while (retained.length && retained.length + unreadable.length + failedStops.length > limits.maxContainers) {
-      const count = Math.min(retained.length, retained.length + unreadable.length + failedStops.length - limits.maxContainers);
+    while (retained.length && (retained.length + unreadable.length + failedStops.length > limits.maxContainers || [...retained.map(c => c.id), ...unreadable, ...failedStops].reduce((sum, id) => sum + weight(id), 0) > limits.maxConcurrentComputeUnits)) {
+      const count = 1;
       const extra = retained.splice(retained.length - count);
       failedStops.push(...await this.stopIndependently(state, extra.map(c => c.id), entitlement));
+    }
+    const month = new Date(this.now()).toISOString().slice(0, 7);
+    while (retained.length && (state.computeUsage[month] ?? 0) > limits.maxComputeUnitHours * 3600000) {
+      const extra = retained.pop();
+      failedStops.push(...await this.stopIndependently(state, [extra.id], entitlement));
     }
     state.slots = [...retained.map(c => c.id), ...unreadable, ...failedStops];
     if (!validEntitlement(entitlement, this.now())) {
@@ -170,9 +239,17 @@ export class ContainerAccountController {
   }
   status(state, containers) {
     const month = new Date(this.now()).toISOString().slice(0, 7);
-    return { plan: state.entitlement.plan, active: state.entitlement.active,
+    const limits = state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS;
+    const reservedUnitMs = Object.values(state.leases).filter(lease => lease.month === month)
+      .reduce((sum, lease) => sum + Math.max(0, lease.endAt - Math.max(this.now(), lease.startAt)) * machineSize(lease.size).computeUnits, 0);
+    const committedUnitMs = state.computeUsage[month] ?? 0;
+    return { sizes: MACHINE_SIZES, plan: state.entitlement.plan, active: state.entitlement.active,
       limits: state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS,
-      usage: { month, starts: state.usage[month] ?? 0 }, containers, imageCatalog: state.imageCatalog ?? [] };
+      usage: { month, starts: state.usage[month] ?? 0,
+        computeUnitHours: Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
+        reservedComputeUnitHours: reservedUnitMs / 3600000,
+        availableComputeUnitHours: Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
+        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? 'lite').computeUnits, 0) }, containers, imageCatalog: state.imageCatalog ?? [] };
   }
   async fetch(request) {
     const url = new URL(request.url);
@@ -189,7 +266,9 @@ export class ContainerAccountController {
     let reservation;
     try {
       const selection = request.method === 'POST' && request.body ? await request.json() : undefined;
-      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]);
+      const size = machineSize(selection?.size ?? 'lite');
+      if (!size) return this.respond({ error: 'invalid_size' }, 400);
+      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id]);
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
         await this.pruneCreations(state);
@@ -204,7 +283,8 @@ export class ContainerAccountController {
           if (idempotencyKey) {
             const record = await this.ctx.storage.get(CREATION_PREFIX + idempotencyKey);
             if (record && record.expiresAt > this.now()) {
-              if (record.fingerprint !== fingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
+              const legacyFingerprint = size.id === 'lite' ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
+              if (record.fingerprint !== fingerprint && record.fingerprint !== legacyFingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
               return this.creationResponse(state, containers, record);
             }
           }
@@ -213,12 +293,23 @@ export class ContainerAccountController {
             return this.respond({ error: 'image_not_available' }, 409);
           }
           const limits = PLAN_LIMITS[entitlement.plan];
+          const concurrentUnits = state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? 'lite').computeUnits, 0);
+          if (concurrentUnits + size.computeUnits > limits.maxConcurrentComputeUnits) return this.respond({ error: 'compute_capacity_exceeded' }, 409);
           if (state.slots.length >= limits.maxContainers) return this.respond({ error: 'container_limit_exceeded' }, 409);
           const month = new Date(this.now()).toISOString().slice(0, 7);
           if ((state.usage[month] ?? 0) >= limits.maxStartsPerMonth) return this.respond({ error: 'container_quota_exceeded' }, 429);
+          const startAt = this.now();
+          const monthEnd = Date.UTC(new Date(startAt).getUTCFullYear(), new Date(startAt).getUTCMonth() + 1, 1);
+          const remaining = limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
+          const endAt = Math.min(startAt + limits.maxSessionMs, entitlement.validUntil, monthEnd,
+            startAt + Math.floor(remaining / size.computeUnits));
+          if (endAt <= startAt) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
           const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));
           state.usage[month] = (state.usage[month] ?? 0) + 1;
           state.slots.push(slot);
+          const unitMs = (endAt - startAt) * size.computeUnits;
+          state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
+          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs };
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
@@ -229,7 +320,7 @@ export class ContainerAccountController {
             await this.ctx.storage.put({ [KEY]: state, [CREATION_PREFIX + idempotencyKey]: creation });
           } else await this.ctx.storage.put(KEY, state);
           await this.ctx.storage.setAlarm(Math.min(entitlement.validUntil, this.now() + 90_000, state.nextCreationExpiry ?? Infinity));
-          reservation = { state, slot, entitlement, reservationId, creation };
+          reservation = { state, slot, entitlement, reservationId, creation, selection: { ...selection, size: size.id, computeExpiresAt: endAt } };
           return null;
         }
         if (request.method === 'DELETE') {
@@ -239,7 +330,8 @@ export class ContainerAccountController {
           const generation = url.searchParams.get('createdAt');
           if (generation && containers.find(c => c.id === target)?.createdAt !== generation) return this.respond({ error: 'container_not_running' }, 409);
           if (target) {
-            await this.machine(state, target, 'DELETE', entitlement);
+            const stopped = await this.machine(state, target, 'DELETE', entitlement);
+            this.settleLease(state, target, stopped.lastRun?.stoppedAt ?? this.now());
             delete state.pending[target];
           }
           containers = await this.reconcile(state, entitlement);
@@ -250,7 +342,7 @@ export class ContainerAccountController {
       // Boot outside the reservation lock so a Scale account can launch many
       // containers together. Pending slots count toward capacity throughout.
       const { state, slot, entitlement, reservationId, creation } = reservation;
-      await this.machine(state, slot, 'POST', entitlement, reservationId, selection);
+      await this.machine(state, slot, 'POST', entitlement, reservationId, reservation.selection);
       return await this.serialized(async () => {
         const current = await this.ctx.storage.get(KEY);
         if (current.reservations?.[slot] !== reservationId || !current.slots.includes(slot)) {
@@ -265,6 +357,7 @@ export class ContainerAccountController {
       // Keep reserved quota and pending slots on every ambiguous failure.
       if (error.message === 'container_not_running') return this.respond({ error: error.message }, 409);
       if (error.message === 'image_not_available') return this.respond({ error: error.message }, 409);
+      if (error.message === 'compute_allowance_exhausted') return this.respond({ error: error.message }, 429);
       if (error.message === 'subscription_required') return this.respond({ error: error.message }, 402);
       return this.respond({ error: 'containers_unavailable' }, 503);
     }

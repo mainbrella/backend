@@ -4,6 +4,7 @@ import { containerUser } from './container-auth';
 import { resolveBillingState } from '../lib/entitlements';
 import { accountResponse, containerError, syncAccountEntitlement, type ContainerImageSelection } from '../lib/container-service';
 import { validContainerId, validIdempotencyKey } from '../../containers/container-account-core.js';
+import { machineSize } from '../../containers/plan-policy.js';
 import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -41,8 +42,9 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     }
     let selection: ContainerImageSelection | undefined;
     if (request.method === 'POST' && request.body) {
-      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown } | null;
+      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown; size?: unknown } | null;
       if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
+      if (body.size !== undefined && !machineSize(body.size)) return authJson({ error: 'invalid_size' }, 400, cors);
       if (body.catalogId !== undefined) {
         if (body.imageId !== undefined || typeof body.catalogId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);
         const image = IMAGE_CATALOG.find(image => image.id === body.catalogId);
@@ -56,6 +58,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
         if (image.status !== 'ready') return authJson({ error: 'image_not_ready' }, 409, cors);
         selection = { imageKey: image.image_key, imageId: image.id, imageName: image.name };
       }
+      if (body.size !== undefined) selection = { ...selection, size: String(body.size) };
     }
     // Forward only the server-resolved image, never browser image keys or resources.
     const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection, idempotencyKey);

@@ -90,14 +90,19 @@ test('unpaid first start returns 402, zero allowance and consumes no start', asy
 
 test('monthly quota is shared across slots, survives restart, changes and cancel/resubscribe', async () => {
   const f = fixture();
-  for (let i = 0; i < 10; i++) { assert.equal((await f.read('POST')).status, 200); await f.read('DELETE', 'small'); }
+  await f.read();
+  const seeded = await f.ctx.storage.get('containerAccount');
+  seeded.usage['2026-10'] = PLAN_LIMITS.builder.maxStartsPerMonth - 1;
+  await f.ctx.storage.put('containerAccount', seeded);
+  assert.equal((await f.read('POST')).status, 200);
+  await f.read('DELETE', 'small');
   assert.equal((await f.read('POST')).status, 429);
   f.restart(); assert.equal((await f.read('POST')).status, 429);
   f.setPlan('pro'); assert.equal((await f.read('POST')).status, 200);
   f.setTime(f.now() + 1); f.setPaid(false); await f.read();
   f.setTime(f.now() + 1); f.setPaid(true); f.setPlan('builder');
   assert.equal((await f.read('POST')).status, 429);
-  assert.equal((await f.read()).data.usage.starts, 11);
+  assert.equal((await f.read()).data.usage.starts, PLAN_LIMITS.builder.maxStartsPerMonth + 1);
   f.setTime(Date.UTC(2026, 10, 1));
   assert.equal((await f.read('POST')).status, 200);
   assert.equal((await f.read()).data.usage.starts, 1);
@@ -133,8 +138,8 @@ test('individual stop requires an id for multiple slots and cannot stop stale ge
 
 test('legacy machine and monthly usage migrate without resetting quota', async () => {
   const f = fixture(); const legacy = f.machineFor('owner', 'small');
-  await legacy.ctx.storage.put('builderMachineStarts', { '2026-10': 9 });
-  const state = await f.read(); assert.equal(state.data.usage.starts, 9);
+  await legacy.ctx.storage.put('builderMachineStarts', { '2026-10': PLAN_LIMITS.builder.maxStartsPerMonth - 1 });
+  const state = await f.read(); assert.equal(state.data.usage.starts, PLAN_LIMITS.builder.maxStartsPerMonth - 1);
   await f.read('POST'); await f.read('DELETE');
   assert.equal((await f.read('POST')).status, 429);
 });
@@ -494,4 +499,192 @@ test('same-image retries succeed at monthly quota and failed atomic reservation 
   fresh.ctx.storage.put = original;
   assert.equal((await fresh.read('POST', null, headers)).status, 200);
   assert.equal((await fresh.read()).data.usage.starts, 1);
+});
+
+test('all five sizes reach the runtime on every plan and contribute their weight', async () => {
+  const specs = [['lite', 'lite', 1], ['small', 'standard-1', 6], ['medium', 'standard-2', 10], ['large', 'standard-3', 16], ['xl', 'standard-4', 28]];
+  for (const plan of ['builder', 'pro', 'scale']) {
+    for (const [size, instance, units] of specs) {
+      const f = fixture(); f.setPlan(plan);
+      const runtime = f.machineFor('owner', 'small').ctx.container;
+      const original = runtime.start;
+      runtime.start = function(options) { this.options = options; original.call(this); };
+      const result = await f.read('POST', undefined, {}, { size });
+      assert.equal(result.status, 200, `${plan}/${size}`);
+      assert.equal(runtime.options.instance, instance);
+      assert.equal(result.data.containers[0].size, size);
+      assert.equal(result.data.usage.concurrentComputeUnits, units);
+      const allocated = (Date.parse(result.data.containers[0].expiresAt) - f.now()) / 3600000 * units;
+      assert.equal(result.data.usage.reservedComputeUnitHours, allocated);
+      assert.equal(result.data.usage.availableComputeUnitHours, PLAN_LIMITS[plan].maxComputeUnitHours - allocated);
+    }
+  }
+});
+
+test('weighted capacity serializes simultaneous large launches without spending rejected starts', async () => {
+  const f = fixture();
+  const results = await Promise.all(Array.from({ length: 5 }, () => f.read('POST', undefined, {}, { size: 'xl' })));
+  assert.equal(results.filter(result => result.status === 200).length, 1);
+  assert.equal(results.filter(result => result.data.error === 'compute_capacity_exceeded').length, 4);
+  const status = await f.read();
+  assert.equal(status.data.usage.starts, 1);
+  assert.equal(status.data.usage.concurrentComputeUnits, 28);
+});
+
+test('size participates in idempotency and invalid sizes spend no budget', async () => {
+  const f = fixture();
+  assert.equal((await f.read('POST', undefined, {}, { size: 'basic' })).status, 400);
+  assert.equal(f.ctx.storage.values.size, 0);
+  const headers = { 'Idempotency-Key': 'size-operation' };
+  assert.equal((await f.read('POST', undefined, headers, { size: 'small' })).status, 200);
+  const before = (await f.read()).data.usage;
+  assert.equal((await f.read('POST', undefined, headers, { size: 'medium' })).data.error, 'idempotency_key_conflict');
+  assert.equal((await f.read('POST', undefined, headers, { size: 'small' })).status, 200);
+  assert.deepEqual((await f.read()).data.usage, before);
+});
+
+test('unused runtime is refunded once after confirmed stop and remains correct after restart', async () => {
+  const f = fixture();
+  const start = f.now();
+  await f.read('POST', undefined, {}, { size: 'medium' });
+  f.setTime(start + 5 * 60_000);
+  const running = await f.read();
+  assert.equal(running.data.usage.computeUnitHours, 10 / 12);
+  assert.equal(running.data.usage.reservedComputeUnitHours, 10 * 55 / 60);
+  const stopped = await f.read('DELETE', 'small');
+  assert.ok(Math.abs(stopped.data.usage.computeUnitHours - 10 / 12) < 1e-10);
+  assert.equal(stopped.data.usage.reservedComputeUnitHours, 0);
+  f.restart();
+  assert.deepEqual((await f.read()).data.usage, stopped.data.usage);
+  await f.read('POST', undefined, {}, { size: 'lite' });
+  assert.equal((await f.read()).data.usage.availableComputeUnitHours, 250 - 10 / 12 - 1);
+});
+
+test('remaining budget clamps the hard machine deadline and cannot be extended by terminal activity', async () => {
+  const f = fixture(); await f.read();
+  const state = await f.ctx.storage.get('containerAccount');
+  state.computeUsage['2026-10'] = (250 - 0.1) * 3600000;
+  await f.ctx.storage.put('containerAccount', state);
+  const result = await f.read('POST', undefined, {}, { size: 'xl' });
+  assert.equal(result.status, 200);
+  const machine = f.machineFor('owner', 'small');
+  const deadline = Date.parse(result.data.containers[0].expiresAt);
+  assert.equal(deadline, f.now() + Math.floor(0.1 * 3600000 / 28));
+  assert.equal((await f.read('POST')).data.error, 'compute_capacity_exceeded');
+  f.setTime(deadline - 1);
+  assert.equal(await machine.controller.touchTerminalActivity(result.data.containers[0].createdAt), true);
+  assert.equal((await machine.ctx.storage.get('builderMachine')).expiresAt, deadline);
+  f.setTime(deadline); await machine.controller.alarm();
+  assert.equal(machine.ctx.container.running, false);
+  assert.ok((await f.read()).data.usage.computeUnitHours <= 250);
+  assert.ok((await f.read()).data.usage.availableComputeUnitHours < 28 / 3600000);
+});
+
+test('monthly compute exhaustion denies starts without increasing usage and upgrade retains consumed usage', async () => {
+  const f = fixture(); await f.read();
+  const state = await f.ctx.storage.get('containerAccount');
+  state.computeUsage['2026-10'] = 250 * 3600000;
+  await f.ctx.storage.put('containerAccount', state);
+  assert.equal((await f.read('POST')).data.error, 'compute_allowance_exhausted');
+  assert.equal((await f.read()).data.usage.starts, 0);
+  f.restart(); assert.equal((await f.read('POST')).status, 429);
+  f.setPlan('pro'); assert.equal((await f.read('POST')).status, 200);
+  assert.equal((await f.read()).data.usage.computeUnitHours, 250);
+});
+
+test('unreadable machines retain the full budget reservation until successful cleanup', async () => {
+  const f = fixture(); await f.read('POST', undefined, {}, { size: 'small' });
+  const machine = f.machineFor('owner', 'small');
+  const original = machine.fetch;
+  machine.fetch = async () => { throw new Error('unavailable'); };
+  f.setTime(f.now() + 60_000); f.restart();
+  assert.equal((await f.read()).status, 503);
+  assert.equal((await f.ctx.storage.get('containerAccount')).computeUsage['2026-10'], 6 * 3600000);
+  machine.fetch = original;
+  const stopped = await f.read('DELETE', 'small');
+  assert.equal(stopped.data.usage.computeUnitHours, 0.1);
+  assert.equal(stopped.data.usage.availableComputeUnitHours, 249.9);
+});
+
+test('effective downgrade enforces weighted capacity and the smaller runtime budget', async () => {
+  const f = fixture(); f.setPlan('scale');
+  await f.read('POST', undefined, {}, { size: 'xl' });
+  f.setTime(f.now() + 1);
+  await f.read('POST', undefined, {}, { size: 'xl' });
+  f.setTime(f.now() + 1); f.setPlan('builder');
+  const result = await f.read();
+  assert.equal(result.status, 200);
+  assert.equal(result.data.containers.length, 1); // The retained XL is clamped to Builder's one-hour lease.
+  assert.equal(result.data.usage.concurrentComputeUnits, 28);
+  assert.ok(result.data.usage.reservedComputeUnitHours <= 28);
+  assert.ok(result.data.usage.computeUnitHours < 1);
+  assert.ok(result.data.usage.availableComputeUnitHours > 221);
+});
+
+test('month boundary enforces budget deadline and the new month starts with a fresh allowance', async () => {
+  const f = fixture(); f.setPlan('pro');
+  f.setTime(Date.UTC(2026, 9, 31, 23, 59));
+  const result = await f.read('POST', undefined, {}, { size: 'large' });
+  const boundary = Date.UTC(2026, 10, 1);
+  assert.equal(Date.parse(result.data.containers[0].expiresAt), boundary);
+  f.setTime(boundary); await f.machineFor('owner', 'small').controller.alarm();
+  const status = await f.read();
+  assert.equal(status.data.usage.month, '2026-11');
+  assert.equal(status.data.usage.computeUnitHours, 0);
+  assert.equal(status.data.usage.availableComputeUnitHours, 9000);
+  assert.equal((await f.read('POST', undefined, {}, { size: 'xl' })).status, 200);
+});
+
+test('legacy running machines acquire a budget without resetting prior starts', async () => {
+  const f = fixture();
+  await f.read('POST');
+  const saved = await f.ctx.storage.get('containerAccount');
+  delete saved.leases; delete saved.computeUsage;
+  await f.ctx.storage.put('containerAccount', saved);
+  f.restart();
+  const result = await f.read();
+  assert.equal(result.status, 200);
+  assert.equal(result.data.containers.length, 1);
+  assert.equal(result.data.usage.starts, 1);
+  assert.equal(result.data.usage.reservedComputeUnitHours, 1);
+});
+
+test('simultaneous reservations cannot overdraw the remaining monthly runtime pool', async () => {
+  const f = fixture(); f.setPlan('pro'); await f.read();
+  const state = await f.ctx.storage.get('containerAccount');
+  state.computeUsage['2026-10'] = (9000 - 16) * 3600000;
+  await f.ctx.storage.put('containerAccount', state);
+  const results = await Promise.all(Array.from({ length: 3 }, () => f.read('POST', undefined, {}, { size: 'large' })));
+  assert.equal(results.filter(r => r.status === 200).length, 1);
+  assert.equal(results.filter(r => r.data.error === 'compute_allowance_exhausted').length, 2);
+  const status = await f.read();
+  assert.equal(status.data.usage.availableComputeUnitHours, 0);
+  assert.equal(status.data.usage.reservedComputeUnitHours, 16);
+  assert.equal(status.data.usage.starts, 1);
+});
+
+test('pre-size idempotency records still reconcile an omitted or explicit Lite size', async () => {
+  const f = fixture(); const headers = { 'Idempotency-Key': 'legacy-key' };
+  const started = await f.read('POST', undefined, headers);
+  const record = await f.ctx.storage.get('creation:legacy-key');
+  record.fingerprint = JSON.stringify(['terminal', null]);
+  await f.ctx.storage.put('creation:legacy-key', record);
+  f.restart();
+  const retry = await f.read('POST', undefined, headers, { size: 'lite' });
+  assert.equal(retry.status, 200);
+  assert.equal(retry.data.creation.id, started.data.creation.id);
+  assert.equal(retry.data.usage.starts, 1);
+  assert.equal((await f.read('POST', undefined, headers, { size: 'small' })).data.error, 'idempotency_key_conflict');
+});
+
+test('an alarm can migrate legacy account state before the first new request', async () => {
+  const f = fixture(); await f.read('POST');
+  const state = await f.ctx.storage.get('containerAccount');
+  delete state.leases; delete state.computeUsage;
+  await f.ctx.storage.put('containerAccount', state);
+  f.restart(); await f.alarm();
+  const result = await f.read();
+  assert.equal(result.status, 200);
+  assert.equal(result.data.containers.length, 1);
+  assert.equal(result.data.usage.reservedComputeUnitHours, 1);
 });

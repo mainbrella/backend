@@ -10,7 +10,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply delta --remote",
     "generate-types": "wrangler types",
     "type-check": "npm run generate-types && tsc --noEmit",
-    "deploy": "npm run deploy:api && npm run deploy:containers",
+    "deploy": "npm run deploy:containers && npm run deploy:api",
     "test": "npm run test:containers && npm run test:api && npm run test:sdk",
     "test:sdk": "node --test sdk/javascript/*.test.mjs && PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python -p 'test_*.py'",
     "verify:agent": "node scripts/verify-agent.mjs",

@@ -96,3 +96,19 @@ test('streaming accepts many bounded events in one transport chunk and rejects i
   await assert.rejects(async () => { for await (const event of new Execution(bad.connect({ id: 'small', createdAt }), id).events()) {} },
     { code: 'execution_stream_unavailable', cursor: 0 });
 });
+
+test('size stays attached to retries and invalid sizes fail before a request', async () => {
+  const calls = [];
+  const client = new Mainbrella({ apiKey, fetch: async (url, options) => {
+    calls.push(options);
+    if (calls.length === 1) return Response.json({ error: 'containers_unavailable' }, { status: 503 });
+    return Response.json({ creation: { id: 'sized-operation', containerId: 'small', createdAt, status: 'running' },
+      containers: [{ id: 'small', createdAt, status: 'running', instance: 'standard-2' }] });
+  } });
+  const sandbox = await client.create({ size: 'medium', catalogId: 'node', idempotencyKey: 'sized-key', pollIntervalMs: 1 });
+  assert.equal(sandbox.instance, 'standard-2');
+  assert.equal(calls.length, 2);
+  for (const options of calls) assert.deepEqual(JSON.parse(options.body), { catalogId: 'node', size: 'medium' });
+  await assert.rejects(client.create({ size: 'basic' }), { code: 'invalid_creation_options' });
+  assert.equal(calls.length, 2);
+});

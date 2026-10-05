@@ -1,9 +1,11 @@
+export type MachineSize = 'lite' | 'small' | 'medium' | 'large' | 'xl';
+export interface Size { id: MachineSize; name: string; instance: string; cpuVcpu: number; memoryMiB: number; diskGB: number; computeUnits: number }
 export interface ContainerIdentity { id: string; createdAt: string }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; outputTruncated: boolean }
-export interface Container extends ContainerIdentity { status: 'starting' | 'running'; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string }
+export interface Container extends ContainerIdentity { status: 'starting' | 'running'; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | null; active: boolean; containers: Container[];
-  imageCatalog: { id: string; name: string }[]; limits: { maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
-  usage: { month: string; starts: number } }
+  sizes: Size[]; imageCatalog: { id: string; name: string }[]; limits: { maxComputeUnitHours: number; maxConcurrentComputeUnits: number; maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
+  usage: { month: string; starts: number; computeUnitHours: number; reservedComputeUnitHours: number; availableComputeUnitHours: number; concurrentComputeUnits: number } }
 export interface Capabilities {
   apiVersion: string;
   execution: { foreground: boolean; streaming: boolean; background: boolean; cancellation: boolean; reconnect: boolean; pty: boolean;
@@ -13,7 +15,7 @@ export interface Capabilities {
   persistence: { filesystemAfterStop: boolean; snapshots: boolean; memory: boolean; volumes: boolean };
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };
-  resources: { instance: string; cpuVcpu: number; memoryMiB: number; diskGB: number }[];
+  resources: Size[];
   images: { catalog: boolean; customBuilds: boolean; availableCatalogPath: string; limits: Record<string, number> };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
@@ -23,7 +25,7 @@ export class Mainbrella {
   baseUrl: string; timeoutMs: number;
   request<T = unknown>(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string>; binary?: boolean; stream?: boolean; signal?: AbortSignal }): Promise<T>;
   capabilities(): Promise<Capabilities>; list(): Promise<AccountState>; connect(value: ContainerIdentity): Sandbox;
-  create(options?: { catalogId?: string; imageId?: string; idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<Sandbox>;
+  create(options?: { catalogId?: string; imageId?: string; size?: MachineSize; idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<Sandbox>;
 }
 export class Sandbox implements ContainerIdentity {
   constructor(client: Mainbrella, value: ContainerIdentity);

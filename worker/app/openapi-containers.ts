@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { containerSecurity, cookieSecurity, errors, jsonResponse, planSchema, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
-export const limitsSchema = z.object({ maxContainers: z.number(), maxStartsPerMonth: z.number(), maxSessionMs: z.number(), idleTimeoutMs: z.number() });
+export const limitsSchema = z.object({ maxComputeUnitHours: z.number(), maxConcurrentComputeUnits: z.number(), maxContainers: z.number(), maxStartsPerMonth: z.number(), maxSessionMs: z.number(), idleTimeoutMs: z.number() });
+export const sizeSchema = z.enum(['lite', 'small', 'medium', 'large', 'xl']);
+export const machineSizeSchema = z.object({ id: sizeSchema, name: z.string(), instance: z.string(), cpuVcpu: z.number(), memoryMiB: z.number(), diskGB: z.number(), computeUnits: z.number() });
 const status = z.object({ plan: planSchema.nullable(), active: z.boolean(), containers: z.array(z.object({
-  id: z.string(), name: z.string(), instance: z.literal("lite"), status: z.enum(["starting", "running"]),
+  id: z.string(), name: z.string(), size: sizeSchema, computeUnits: z.number(), instance: z.enum(['lite', 'standard-1', 'standard-2', 'standard-3', 'standard-4']), status: z.enum(["starting", "running"]),
   createdAt: z.string(), expiresAt: z.string(), imageId: z.string().optional(), imageName: z.string().optional(), catalogId: z.string().optional(),
   imageDigest: z.string().optional().describe('Deployment-resolved immutable image reference for this generation; absent on older generations.'),
-})), limits: limitsSchema, usage: z.object({ month: z.string(), starts: z.number() }), imageCatalog: z.array(z.object({ id: z.string(), name: z.string() })) }).openapi("ContainerStatus");
+})), limits: limitsSchema, usage: z.object({ month: z.string(), starts: z.number(), computeUnitHours: z.number(), reservedComputeUnitHours: z.number(), availableComputeUnitHours: z.number(), concurrentComputeUnits: z.number() }), sizes: z.array(machineSizeSchema), imageCatalog: z.array(z.object({ id: z.string(), name: z.string() })) }).openapi("ContainerStatus");
 const selection = z.object({ id: z.string().optional(), createdAt: z.string().optional() });
 const browserOrigin = z.object({ Origin: z.string().describe("Trusted browser origin; required for cookie mutations.").optional() });
 
@@ -18,8 +20,8 @@ export function registerContainerRoutes(api: OpenAPIApi, handler: LegacyHandler)
   }, handler);
   register(api, "post", "/containers", {
     operationId: "startContainer", tags: ["Containers"], summary: "Reserve a start and boot a container", security: containerSecurity,
-    description: "Requires paid access. Body is optional; imageId and catalogId are mutually exclusive. Optional Idempotency-Key (1–128 letters, digits, underscores or hyphens) resolves retries to one account-scoped reservation for 24 hours. Keyed responses include creation identity and current starting/running status. Changed image selection returns 409 idempotency_key_conflict; stopped/replaced reservations return 409 creation_no_longer_running. Unkeyed requests reserve a new start. Cookie requests require a trusted Origin.",
-    request: { headers: browserOrigin.extend({ "Idempotency-Key": z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional() }), ...requestBody(z.object({ imageId: z.string().optional(), catalogId: z.string().optional() }), false) },
+    description: "Requires paid access. Body is optional; size defaults to lite and accepts lite, small, medium, large, xl. Runtime is reserved against the shared monthly compute allowance before boot; unused reserved runtime is released on stop. Sessions also end at the UTC month boundary. imageId and catalogId are mutually exclusive. Optional Idempotency-Key (1–128 letters, digits, underscores or hyphens) resolves retries to one account-scoped reservation for 24 hours. Keyed responses include creation identity and current starting/running status. Changed image or size selection returns 409 idempotency_key_conflict; stopped/replaced reservations return 409 creation_no_longer_running. Unkeyed requests reserve a new start. Cookie requests require a trusted Origin.",
+    request: { headers: browserOrigin.extend({ "Idempotency-Key": z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional() }), ...requestBody(z.object({ imageId: z.string().optional(), catalogId: z.string().optional(), size: sizeSchema.optional() }), false) },
     responses: { 200: jsonResponse(status.extend({ creation: z.object({ id: z.string(), containerId: z.string(), createdAt: z.string(), status: z.enum(["starting", "running"]) }).optional() })), ...errors(400, 401, 402, 403, 404, 429, 503),
       409: jsonResponse(z.object({ error: z.string(), creation: z.object({ id: z.string(), containerId: z.string(), status: z.literal("stopped") }).optional() }), "Capacity, image selection, idempotency conflict, or original creation no longer running.") },
   }, handler);

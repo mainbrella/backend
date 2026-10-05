@@ -250,8 +250,10 @@ test('paid custom-image launches resolve ownership before forwarding selection t
   });
   assert.equal(customAccountRequest.headers.get('x-mainbrella-plan'), 'builder');
   const customMachineRequest = system.machineRequests.find(({ request: forwarded }) => forwarded.method === 'POST')!.request;
-  assert.deepEqual(await customMachineRequest.json(), {
-    imageKey: `custom_${readyId.replaceAll('-', '')}`, imageId: readyId, imageName: 'My tools',
+  const machineSelection = await customMachineRequest.json() as { computeExpiresAt: number };
+  assert.ok(machineSelection.computeExpiresAt > Date.now());
+  assert.deepEqual(machineSelection, {
+    imageKey: `custom_${readyId.replaceAll('-', '')}`, imageId: readyId, imageName: 'My tools', size: 'lite', computeExpiresAt: machineSelection.computeExpiresAt,
   });
   assert.ok(Number(customMachineRequest.headers.get('x-mainbrella-reservation')) > 0);
   const customRuntime = system.machines.get('user:account-one')!.runtime;
@@ -264,8 +266,10 @@ test('paid custom-image launches resolve ownership before forwarding selection t
   assert.equal(defaultAccountRequest.headers.get('content-type'), null);
   assert.equal(defaultAccountRequest.body, null);
   const defaultMachineRequest = system.machineRequests.filter(({ request: forwarded }) => forwarded.method === 'POST').at(-1)!.request;
-  assert.equal(defaultMachineRequest.headers.get('content-type'), null);
-  assert.equal(defaultMachineRequest.body, null);
+  assert.equal(defaultMachineRequest.headers.get('content-type'), 'application/json');
+  const defaultSelection = await defaultMachineRequest.json() as { size: string; computeExpiresAt: number };
+  assert.equal(defaultSelection.size, 'lite');
+  assert.ok(defaultSelection.computeExpiresAt > Date.now());
   assert.equal((system.machines.get('user:account-one:slot:1')!.runtime.startOptions[0] as { image: { image: string } }).image.image,
     'terminal-test-image');
 

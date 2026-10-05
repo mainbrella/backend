@@ -1,8 +1,7 @@
-import { PLAN_LIMITS, NO_PLAN_LIMITS, requestEntitlement, validEntitlement } from "./plan-policy.js";
+import { PLAN_LIMITS, NO_PLAN_LIMITS, requestEntitlement, validEntitlement, machineSize } from "./plan-policy.js";
 import { IMAGE_CATALOG, availableCatalog } from './image-catalog.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
-const INSTANCE = "lite";
 const METADATA_KEY = "builderMachine";
 const USAGE_KEY = "builderMachineStarts";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -71,7 +70,8 @@ export class UserContainerController {
           // Plan changes can shorten an existing lease, but never extend its
           // original hard deadline. Idle activity alone renews the idle deadline.
           const limits = PLAN_LIMITS[entitlement.plan];
-          metadata.expiresAt = Math.min(metadata.expiresAt, metadata.createdAt + limits.maxSessionMs, entitlement.validUntil);
+          metadata.expiresAt = Math.min(metadata.expiresAt, metadata.createdAt + limits.maxSessionMs, entitlement.validUntil,
+            request.headers.has('x-mainbrella-compute-until') ? Number(request.headers.get('x-mainbrella-compute-until')) : Infinity);
           const lastActivityAt = metadata.lastActivityAt ?? Math.max(metadata.createdAt,
             (metadata.idleExpiresAt ?? metadata.createdAt) - (metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs));
           metadata.idleTimeoutMs = limits.idleTimeoutMs;
@@ -126,7 +126,9 @@ export class UserContainerController {
       ? [{
           id: "small",
           name: "Small container",
-          instance: INSTANCE,
+          size: metadata.size ?? 'lite',
+          instance: machineSize(metadata.size ?? 'lite').instance,
+          computeUnits: machineSize(metadata.size ?? 'lite').computeUnits,
           status: "running",
           ...(metadata.imageName ? { imageName: metadata.imageName } : {}),
           ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
@@ -138,6 +140,7 @@ export class UserContainerController {
       : [];
     return {
       containers,
+      lastRun: metadata ? { reservationId: metadata.reservationId, stoppedAt: metadata.computeStoppedAt } : null,
       imageCatalog: availableCatalog(this.container.images),
       plan: this.entitlement?.plan ?? null,
       active: this.entitlement?.active ?? false,
@@ -209,6 +212,9 @@ export class UserContainerController {
       return this.respond({ error: "container_limit_exceeded" }, 409);
     }
 
+    const size = machineSize(selection.size ?? 'lite');
+    if (!size) return this.respond({ error: 'invalid_size' }, 400);
+    if (selection.computeExpiresAt !== undefined && (!Number.isSafeInteger(selection.computeExpiresAt) || selection.computeExpiresAt <= this.now())) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
     const imageKey = selection.imageKey || "terminal";
     const image = Object.hasOwn(this.container.images, imageKey) ? this.container.images[imageKey] : undefined;
     if (!image) return this.respond({ error: "image_not_available" }, 409);
@@ -230,11 +236,13 @@ export class UserContainerController {
     const createdAt = Math.max(now, (previousMetadata?.createdAt ?? -1) + 1);
     const metadata = {
       createdAt,
+      size: size.id,
+      reservationId: (await this.ctx.storage.get('machineReservation'))?.accepted,
       imageDigest: image,
       ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,
-      expiresAt: Math.min(now + limits.maxSessionMs, this.entitlement.validUntil),
+      expiresAt: Math.min(now + limits.maxSessionMs, this.entitlement.validUntil, selection.computeExpiresAt ?? Infinity),
       idleExpiresAt: Math.min(now + limits.idleTimeoutMs, this.entitlement.validUntil),
       idleTimeoutMs: limits.idleTimeoutMs,
     };
@@ -248,7 +256,7 @@ export class UserContainerController {
       }
       this.container.start({
         image,
-        instance: INSTANCE,
+        instance: size.instance,
         entrypoint: ["sleep", "infinity"],
         enableInternet: true,
       });
@@ -292,6 +300,11 @@ export class UserContainerController {
     // a failed platform cleanup must not leave authenticated shells attached.
     this.onStopped?.();
     await this.container.destroy(reason);
+    const metadata = await this.ctx.storage.get(METADATA_KEY);
+    if (metadata && metadata.computeStoppedAt === undefined) {
+      metadata.computeStoppedAt = this.now();
+      await this.ctx.storage.put(METADATA_KEY, metadata);
+    }
   }
 
   async alarm() {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { machineSizeSchema } from './openapi-containers';
 import { errors, jsonResponse, register, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
 const flags = <T extends string>(...names: T[]) => z.object(Object.fromEntries(names.map(name => [name, z.boolean()])) as Record<T, z.ZodBoolean>);
@@ -17,7 +18,7 @@ export const capabilitiesSchema = z.object({
   previews: flags('supported', 'signedUrls'),
   images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
-  resources: z.array(z.object({ instance: z.string(), cpuVcpu: z.number().positive(), memoryMiB: limit, diskGB: limit })),
+  resources: z.array(machineSizeSchema),
   networking: flags('outboundInternet', 'egressPolicies', 'regionSelection'),
   access: z.object({ maxTerminalConnections: limit, maxSSHAccessTokens: limit, sshTokenLifetimeMs: limit }),
 }).openapi('Capabilities');

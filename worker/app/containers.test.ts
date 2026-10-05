@@ -193,3 +193,21 @@ test('creation validates and forwards only POST idempotency keys, with browser C
   const preflight = await handleRequest(keyed('OPTIONS', 'safe-retry_1'), f.env);
   assert.match(preflight.headers.get('access-control-allow-headers')!, /idempotency-key/);
 });
+
+test('named sizes are validated and forwarded without trusting raw resource or budget fields', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const call = (body: unknown) => handleRequest(new Request('https://api.mainbrella.com/containers', {
+    method: 'POST', headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }, body: JSON.stringify(body),
+  }), f.env);
+  for (const size of ['lite', 'small', 'medium', 'large', 'xl']) {
+    assert.equal((await call({ size, instance: 'arbitrary', computeExpiresAt: Date.now() + 9999999999 })).status, 200);
+    assert.deepEqual(await f.accountCalls.at(-1)!.request.json(), { size });
+  }
+  const calls = f.accountCalls.length;
+  for (const size of ['basic', 'standard-1', 'XL', '', null, 1, { vcpu: 4 }]) {
+    const response = await call({ size });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'invalid_size' });
+  }
+  assert.equal(f.accountCalls.length, calls);
+});
