@@ -226,15 +226,16 @@ See [API.md](API.md) for authentication, endpoints, curl examples, limits and re
 behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both files
 are mirrored in `../web`; update both copies when the API changes.
 
-Lifecycle and SSH issuance accept `Authorization: Bearer <login-session-value>`
-without Origin, using the existing hashed, expiring, revocable session record.
+Lifecycle, images, and SSH issuance accept `Authorization: Bearer mb_<key-value>`
+without Origin. Create named keys at `https://mainbrella.com/api-keys/`.
+Login-session Bearer credentials remain supported for compatibility.
 Cookie mutations still require a trusted Origin. Browser terminals remain
 cookie-only. Paid entitlements and quota are identical for UI and automation.
 Cleanup remains available during a Stripe outage and cannot start a machine.
 
 To install the skill in Codex, copy `SKILL.md` and `API.md` into
 `~/.codex/skills/mainbrella-containers/` (or the equivalent skills directory for
-your agent), then invoke `$mainbrella-containers`. Provision the session credential
+your agent), then invoke `$mainbrella-containers`. Provision `MAINBRELLA_API_KEY`
 separately using the instructions in `API.md`.
 
 ## Custom image build and deployment

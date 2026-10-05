@@ -1,44 +1,102 @@
 ---
 name: mainbrella-containers
-description: Start, inspect, use through SSH, and stop Mainbrella small containers through the authenticated API for scripted jobs and automation.
+description: Set up Mainbrella API access, integrate account-owned Linux containers into agent projects, verify SSH execution, and clean up containers created for the task.
 ---
 
 # Mainbrella container automation
 
-Read [API.md](API.md) for authentication setup, curl examples, response fields,
-and error handling. Use `https://api.mainbrella.com` unless the user specifies a
-different environment. Use the user's provisioned login session as a Bearer
-credential through a secret store or protected header file. If it is missing or
-expired, ask the user to provision it using the documented login flow. Never
-include credentials or token-bearing SSH commands in logs or your response.
+Use this workflow when asked to set up Mainbrella or execute work in its containers.
+Read [API.md](API.md) for endpoint contracts, images, quotas, and billing rules.
+Use `https://api.mainbrella.com` unless the user specifies another environment.
+Mainbrella currently uses REST for lifecycle and SSH for execution; no published
+SDK or HTTP exec endpoint is available. Do not install invented SDK packages.
 
-1. GET `/containers` to inspect the running container and remaining allowance.
-   Read paid `active`, effective `plan`, `limits`, `usage` and container IDs from
-   the API. Unpaid accounts have zero allowance; a login alone grants no access.
-2. Reuse the running container for the authorized task. If a new container is needed and
-   the paid concurrency and monthly limits allow it, POST `/containers` with no body. The backend selects ownership
-   and resources. Do not supply plan, size, image, owner, or lifetime overrides.
-3. For command execution, POST `/containers/ssh` with the selected container ID and
-   generation (`{"id":"small","createdAt":"<ISO generation>"}`); use its SSH command
-   privately with local `ssh` and `cloudflared`. Access lasts at most 15 minutes,
-   is tied to the container generation, and does not extend the hard lifetime.
-   No HTTP exec endpoint exists. Export needed results before stopping because
-   storage is ephemeral.
-4. DELETE `/containers?id=<id>&createdAt=<generation>` when the task calls for cleanup of the container you
-   launched. If you reused an existing container, preserve it unless the user
-   authorized stopping it. Report the task result and current container state.
+## Quick Setup
 
-A launch at the concurrency cap returns 409 `container_limit_exceeded` without spending another
-start. Read status and reuse; do not stop an existing container merely to retry
-creation. Monthly exhaustion returns 429 `container_quota_exceeded`: stop launch
-attempts until the next UTC month. SSH token exhaustion also returns 429; reuse
-existing access or wait for token expiry. Never evade limits with new sessions
-or accounts.
+1. Read `MAINBRELLA_API_KEY` from the project's existing environment loading or
+   secret manager. It starts with `mb_`. If missing, ask the user to sign in at
+   `https://mainbrella.com/api-keys/`, create a named key, and provision it locally
+   as `MAINBRELLA_API_KEY`. Do not ask them to paste the secret into chat. A key
+   grants no compute allowance by itself; paid access or a coupon trial is required.
+2. Detect the project without asking: `package.json` means JavaScript/TypeScript;
+   `pyproject.toml` or `requirements.txt` means Python; `Cargo.toml` means Rust;
+   `go.mod` means Go. Preserve the existing package manager, lockfile, environment
+   loading, and module format. For an empty directory, use a minimal Python project
+   in a new `mainbrella-example` subdirectory unless the user named a language.
+3. Require local `ssh` and `cloudflared` for execution. The supplied check and
+   verification tools additionally need Node 22+. Use existing tools first; install
+   missing prerequisites with the environment's established package manager.
+   There are no project SDK dependencies to install. Node tools use `.mjs` so they
+   also work in CommonJS projects; do not change the project's module type.
+4. Download `https://mainbrella.com/mainbrella-doctor.mjs` and
+   `https://mainbrella.com/mainbrella-verify.mjs` into the same local directory.
+   Inspect them, then run `node mainbrella-doctor.mjs` from the project directory.
+   The doctor prints JSON diagnostics without secrets and performs only GETs.
+   Exit 0 means ready for a new verification container; exit 1 identifies blockers.
+   `MAINBRELLA_API_URL` optionally selects a different HTTPS origin (HTTP localhost
+   is allowed for development). It must not contain a credential, path, or query.
+5. Choose an image from the returned `GET /containers` `imageCatalog`: prefer
+   `node`, `python`, `rust`, or `go` for the detected language, and `devops` for
+   infrastructure tasks. Only choose IDs actually advertised by this deployment.
+   For user-requested custom environments, read `/images` and use an owned `ready`
+   image. `buildsEnabled` determines whether new builds can be submitted.
 
-After a launch timeout or 503, reconcile with GET before considering another
-POST. Failed starts still consume quota, so avoid automatic launch retry loops.
-A 401 requires credential renewal. A 402 requires paid access; stop creation
-attempts and report the billing requirement. Do not purchase, change or cancel a
-subscription unless that billing action was explicitly authorized. Browser cookies still require trusted Origins
-for mutations; Bearer lifecycle and SSH requests can omit Origin. Browser terminal
-WebSockets remain cookie-only. Status polling does not renew the idle lease.
+## Integrate
+
+Use native HTTP facilities and the existing process runner (`fetch` in Node,
+`urllib.request` and `subprocess` in Python). Follow [API.md](API.md) for authenticated
+create, status, SSH issuance, and deletion. Keep credentials server-side.
+If agent/tool-calling code already exists, add Mainbrella where execution occurs;
+otherwise add a small example matching the detected language.
+
+Capture each container's `id` **and** `createdAt`, and pass both to SSH issuance
+and cleanup. The API returns account-wide status, not a unique creation operation;
+compare the successful creation response with pre-launch status to identify the new
+generation. Do not launch concurrently during initial setup. If multiple new
+containers appear, ownership is ambiguous: report it and preserve them.
+Use SSH as a noninteractive process, pass the remote command as an argument,
+collect stdout and exit status, and keep the returned token-bearing command private.
+Do not evaluate unvalidated API command text through a shell.
+
+## Verify
+
+Run `node mainbrella-verify.mjs` with the provisioned key in the environment.
+Set `MAINBRELLA_CATALOG_ID` to the available image selected for the project;
+without it the script selects `node`. This verification consumes one monthly start.
+It creates a new container, runs `echo "hello from mainbrella"` through SSH, checks
+stdout and exit code, and deletes **only that container generation** in a `finally`
+block. SSH accepts a new host key on first use and rejects a changed known key.
+
+Pass requires `ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`, and
+`cleanup: "completed"`. Never report success without all four. On a failure, use
+Troubleshooting to fix the demonstrated cause and re-run at most once **only after
+cleanup is confirmed and allowance permits**. If creation was ambiguous or cleanup
+failed, reconcile first and report any remaining machine; do not blindly re-run.
+
+Preserve containers that existed before setup. Reuse one only when authorized for
+the task; never stop it just to free a slot or satisfy a verification gate. Export
+needed artifacts before cleanup: files are lost on stop. Status polling does not
+renew idle time, and SSH issuance does not extend the hard deadline.
+
+## Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| Missing key / 401 | Provision or renew a named API key; never print it. |
+| 402 / inactive access | Report the paid-access or trial requirement. Do not purchase or change billing as part of setup. |
+| Missing ssh/cloudflared | Install the missing local tool, then repeat the read-only doctor. |
+| Missing catalog image / `image_not_available` | Refresh status and choose an advertised suitable image. |
+| 409 `container_limit_exceeded` | Inspect status; reuse only authorized work or wait. Do not evict existing machines. |
+| 429 `container_quota_exceeded` | Wait for the next UTC month; stop launch attempts. |
+| 429 `ssh_token_limit` / `terminal_limit` | Reuse authorized access, close an authorized connection, or wait for expiry. |
+| SSH exit 255 / `execution_failed` | Check local tools, connectivity, and the SSH host key. Preserve host-key verification; never delete a known key blindly. |
+| `creation_ambiguous` / launch timeout / 503 | GET status once and report uncertain ownership or a failed start. Creation is not idempotent; failed starts may consume quota. |
+| `cleanup: "failed"` | Retry generation-qualified DELETE for the reported container; cleanup remains available during billing outages. Confirm absence with GET. |
+| 409 `container_not_running` | Refresh status; a stopped or replaced generation must not be targeted. |
+
+## Report
+
+One paragraph: which integration changed, what command ran, stdout, exit code,
+and whether cleanup completed. State any blocker or remaining container plainly.
+Offer one relevant next step: an owned custom image, an LLM tool that runs commands,
+or a coding agent inside a container. Do not start that additional work unasked.

@@ -5,7 +5,7 @@ The dashboard and automation share the same account-owned containers and allowan
 
 ## Authentication
 
-Sign in at `https://mainbrella.com/login/`, open **Account → API Keys**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
+Sign in at `https://mainbrella.com/login/`, open **Account → API Keys (`/api-keys/`)**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
 
 Manage keys using a browser session cookie:
 
@@ -37,15 +37,17 @@ unset MAINBRELLA_API_KEY
 # Check status and allowance before starting.
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" "$API_URL/containers"
 
-# Start one small container. No request body is required.
+# Start one small container. No body selects the default Node image.
+# Optionally send {"catalogId":"python"} using a deployed imageCatalog ID.
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X POST "$API_URL/containers"
 
-# Obtain SSH access to the ID returned by status (requires local ssh and cloudflared).
+# Replace ID and generation below with values from the successful launch response.
+# Obtain SSH access (requires local ssh and cloudflared).
 # This response contains a secret-bearing command; store it privately.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H 'Content-Type: application/json' -d '{"id":"small"}' -X POST "$API_URL/containers/ssh"
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H 'Content-Type: application/json' -d '{"id":"<returned-id>","createdAt":"<returned-createdAt>"}' -X POST "$API_URL/containers/ssh"
 
 # Stop only the selected container when finished.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X DELETE "$API_URL/containers?id=small"
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X DELETE "$API_URL/containers?id=<returned-id>&createdAt=<returned-createdAt>"
 ```
 
 Only run the operations needed for the task. The four examples are separate
@@ -53,12 +55,69 @@ requests, not a script to launch and immediately stop a container. For unattende
 use, provision the protected header file through your secret manager and keep it
 for the authorized job's duration.
 
+## Agent setup and verification
+
+The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
+integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
+existing secret manager or environment loader; never put it into chat or commit it.
+No Mainbrella SDK is published yet. Use native REST requests and local `ssh` plus
+`cloudflared` for execution; there is no HTTP exec endpoint.
+
+Download and inspect the dependency-free Node 22+ tools:
+
+```sh
+curl --fail --silent --show-error https://mainbrella.com/mainbrella-doctor.mjs -o mainbrella-doctor.mjs
+curl --fail --silent --show-error https://mainbrella.com/mainbrella-verify.mjs -o mainbrella-verify.mjs
+node mainbrella-doctor.mjs
+# This creates a container and consumes one start. Run after the doctor passes.
+node mainbrella-verify.mjs
+```
+
+Keep both scripts in the same directory. The doctor performs only GET requests,
+checks access, quotas, image availability, local tools, and project markers, and
+never prints credentials. Both commands print JSON and exit 0 for a pass or 1
+for a failure. `MAINBRELLA_API_URL` can select another HTTPS API origin, or HTTP
+localhost for development. `MAINBRELLA_CATALOG_ID` selects an advertised image for
+verification; it defaults to `node`.
+
+Verification runs `echo "hello from mainbrella"`, checks stdout and exit code 0,
+and deletes the newly created generation in `finally`. Pass requires
+`ok: true` and `cleanup: "completed"`. It preserves pre-existing containers.
+Do not launch other containers concurrently during setup: creation returns
+account-wide status without an operation identity. Ambiguous ownership or a
+startup timeout produces `creation_ambiguous` and `cleanup: "reconcile_manually"`;
+it never retries creation or deletes a machine by guesswork. Cleanup failures
+include the created ID and generation for targeted reconciliation.
+
+## Images
+
+`GET /containers` includes `imageCatalog: [{id, name}]` for images actually
+published by the deployment. Catalog definitions alone do not guarantee availability.
+Supported catalog IDs are `node`, `python`, `rust`, `go`, and `devops` when advertised.
+`POST /containers` accepts either `{"catalogId":"python"}` or
+`{"imageId":"<owned-ready-image-id>"}`, never both. An omitted body uses the
+Node image. These choices do not change plan resource sizes or deadlines.
+
+| Method and path | Result |
+| --- | --- |
+| `GET /images` | Owned images, `buildsEnabled`, build `limits`, and monthly `usage`. |
+| `POST /images` | Multipart `name`, text `dockerfile`, and optional file `context`; returns 202 `{image}`. Builds must be enabled. |
+| `GET /images/{id}` | Owned image `{image}` with status `queued`, `building`, `publishing`, `ready`, or `failed`. |
+| `GET /images/{id}/logs` | `{logs, status}` for an owned build. |
+| `DELETE /images/{id}` | Deletes an owned image; active builds cannot be deleted. Existing running containers remain. |
+
+Dockerfiles must start with `FROM mainbrella:base` (after optional comments), use
+one build stage, and be at most 16 KiB. Optional context is a `.tar.gz` file of at
+most 512 KiB. Read returned limits instead of assuming allowance; currently up to
+10 builds per UTC month, 3 saved images, and a 300-second build deadline.
+Launch custom images only after status is `ready`; inspect logs for a failed build.
+
 ## Endpoints
 
 | Method and path | Result |
 | --- | --- |
 | `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
-| `POST /containers` | 200: reserves a start and boots a fixed lite container; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
+| `POST /containers` | 200: reserves a start and boots a lite container using the default Node image or optional JSON `{catalogId}` / `{imageId}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
 | `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
 
@@ -99,8 +158,7 @@ that account's existing containers.
 | Pro | $180 | 100 | 1,000 | 24 hours | 30 minutes |
 | Scale | $999 | 500 | 10,000 | 72 hours | 60 minutes |
 
-All plans use `lite`: 1/16 vCPU, 256 MiB RAM, 2 GB ephemeral disk, Node 24, bash,
-tmux and outbound internet. All include SSH and browser terminals. A container permits four concurrent
+All plans use `lite`: 1/16 vCPU, 256 MiB RAM, 2 GB ephemeral disk, bash, tmux and outbound internet. The default image includes Node 24; other runtimes depend on the selected image. All include SSH and browser terminals. A container permits four concurrent
 terminal connections (browser/SSH combined). An account permits ten live SSH
 access tokens, each lasting at most 15 minutes or the machine deadline. Snapshots,
 resume after stop, custom resources, SDKs, teams, advanced logs/audits and priority
@@ -108,7 +166,7 @@ capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
 The filesystem is lost when a container stops.
 
 Ownership and resources come from the authenticated account and server policy.
-Request bodies and client headers cannot override the owner, plan, image, size,
+Request bodies and client headers cannot override the owner, plan, registry image, size,
 slots or deadlines. IDs returned by status select only the authenticated account's
 slots. Arbitrary `/containers/<id>` routes are rejected. All sessions of the same
 account share the same concurrency and UTC monthly quota.
@@ -158,12 +216,14 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 | Status | Code | Action |
 | --- | --- | --- |
 | 400 | `invalid_container_id` / `container_id_required` | Select an ID returned by GET; supply it when multiple containers exist. |
-| 401 | `not_authenticated` | Session missing, malformed, expired, or revoked. Obtain a fresh login credential. |
+| 401 | `not_authenticated` | API key or session missing, malformed, expired, or revoked. Provision a valid credential. |
 | 402 | `subscription_required` | No paid container access. Use the web billing controls to subscribe or resolve payment; do not retry creation. |
 | 403 | `origin_required` / `origin_not_allowed` | Cookie mutations need a trusted Origin; Bearer requests may omit it. Supplied Origins must be trusted. |
 | 404 | `not_found` | Use the exact documented route; no arbitrary container IDs. |
 | 405 | `method_not_allowed` | Use the documented HTTP method. |
 | 409 | `container_limit_exceeded` | The plan's concurrency cap is occupied. GET status and reuse it, or stop it only if the task authorizes replacement. |
+| 404 | `image_not_found` | Choose an advertised catalog ID or an owned custom image. |
+| 409 | `image_not_ready` / `image_not_available` | Wait for custom-image readiness or choose a currently published catalog image. |
 | 409 | `container_not_running` | SSH needs a live container; GET status before deciding whether to start. |
 | 429 | `container_quota_exceeded` | The plan's starts are exhausted this UTC month. Wait for next month; do not retry or create another account to evade the limit. |
 | 429 | `terminal_limit` | Four terminal connections are attached to this container. Close or reuse an existing connection. |
