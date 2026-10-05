@@ -33,8 +33,8 @@ uses binary UTF-8 stdin, raw binary stdout, JSON `{cols, rows}` resizing and
 Disconnect terminates only the attached tmux client. The existing idle/hard
 expiration alarm still destroys the container and closes terminal sockets.
 
-Apply the database migrations, then run `npm run deploy` here to deploy the API
-first and the container Worker second. Deploy `../web` afterward. The image is built in GitHub
+Apply the database migrations, then run `npm run deploy` here to check compatibility
+and deploy the container Worker before the API. Deploy `../web` afterward. The image is built in GitHub
 Actions; local deployments require GitHub CLI authentication, not Docker.
 Existing old-image containers need to be stopped and recreated. This path does
 not need SSH tokens. The image deploy script reads `IMAGE_BUILD_SECRET`
@@ -69,7 +69,8 @@ SQLite `CONTAINER_ACCOUNT` binding/export for atomic per-account reservations. `
 benchmark and historical material only; production builds do not read it.
 
 ```sh
-npm run deploy             # API first, then containers; stops on failure
+npm run deploy:preflight   # Read deployment compatibility metadata; no starts
+npm run deploy             # Preflight, containers, then API; stops on failure
 npm run deploy:containers  # Container Worker with the CI-published image
 npm run deploy:api         # API only
 ```
@@ -81,13 +82,18 @@ Register `https://api.mainbrella.com/subscription/webhook` in Stripe for checkou
 subscription, schedule, invoice and payment/refund changes as described below.
 Keep webhook signing secrets in Wrangler secrets; never commit them.
 
-For this rollout, deploy the API before the container Worker: the previous API
-does not send paid-entitlement headers, which the new container Worker correctly
-rejects. Deploying the new container Worker first would stop legacy machines on
-an old API status poll. During an API-first rollout, the old private worker's
-smaller lifetime/quota may temporarily constrain paid higher tiers until the
-second deployment completes; it never grants extra access. Check the published
-image with `npm run deploy:containers -- --dry-run` before starting the rollout.
+For the current release, deploy containers before API, then web. The preflight
+requires an entitlement-aware, generation-specific predecessor API, the complete
+migration ledger (including `011_operational_status.sql`), and configured
+`IMAGE_BUILD_SECRET` and separate `MONITORING_SECRET`. It checks the authenticated
+image lease endpoint without acquiring a lock. The deployment script continues
+to validate the shared image map and acquire its lease before publication.
+
+The original paid-entitlement rollout required API first because its predecessor
+did not send entitlement headers. That historical sequence is not safe for the
+current release. If preflight rejects an older API, stop and use the staged
+bootstrap guidance in [deployment.md](docs/deployment.md). That runbook also
+covers release evidence, partial failures and rollback.
 
 The container image includes Node 24, bash, and tmux, with outbound internet enabled.
 Deploying an image does not replace running containers; stop and recreate old
@@ -248,11 +254,12 @@ GitHub Actions, and set `IMAGE_BUILD_GITHUB_TOKEN` in the API Worker to a token
 with Actions write access to this repository. `CLOUDFLARE_API_TOKEN` in Actions
 must permit both registry access and deployment of the container Worker.
 
-For the first rollout of the live manifest/deployment lease, apply remote D1
-migrations (including `007_image_deployment_lock.sql`) and deploy the API first:
-`npm run db:migrate:remote`, then `npm run deploy:api`. Merge the custom-image
-workflow to `main` and configure its secrets before accepting builds. Subsequent
-releases can use the normal `npm run deploy` command with `IMAGE_BUILD_SECRET` in the shell or backend `.env`.
+The original live-manifest rollout required an API-first bootstrap. For the
+current release, apply all remote D1 migrations, configure the custom-image
+workflow and its secrets, then use `npm run deploy` with `IMAGE_BUILD_SECRET`
+in the shell or backend `.env`. If the deployed API predates the manifest/lease
+contract, follow [the staged bootstrap runbook](docs/deployment.md) before
+accepting builds; do not deploy the current API ahead of its runtime.
 Node loads this secret from `.env` automatically for container deployments; an
 explicit shell/Actions value takes precedence.
 

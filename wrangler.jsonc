@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "mainbrella-api",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
   "main": "worker/index.ts",
   "compatibility_date": "2026-09-18",
   "compatibility_flags": ["nodejs_compat"],
