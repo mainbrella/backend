@@ -39,7 +39,7 @@ export class Mainbrella {
     this.baseUrl = apiOrigin(baseUrl);
     this.timeoutMs = timeoutMs;
   }
-  async request(path, { method = 'GET', body, headers = {}, binary = false, signal } = {}) {
+  async request(path, { method = 'GET', body, headers = {}, binary = false, stream = false, signal } = {}) {
     if (!path.startsWith('/') || path.startsWith('//')) throw new MainbrellaError('invalid_api_path');
     const url = new URL(path, this.baseUrl);
     if (url.origin !== this.baseUrl) throw new MainbrellaError('invalid_api_path');
@@ -57,6 +57,7 @@ export class Mainbrella {
       const code = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(data.error) ? data.error : 'request_failed';
       throw new MainbrellaError(code, response.status);
     }
+    if (stream) return response;
     try { return binary ? new Uint8Array(await response.arrayBuffer()) : await response.json(); }
     catch { throw new MainbrellaError('invalid_response', response.status); }
   }
@@ -107,8 +108,17 @@ export class Sandbox {
         return this.client.request(this.path('/containers/files', { path }), { method: 'PUT', body: bytes });
       },
     };
-    this.commands = { run: (command, { timeoutMs, signal } = {}) => this.client.request(this.path('/containers/exec'),
-      { method: 'POST', body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, signal }) };
+    this.commands = {
+      run: (command, { timeoutMs, signal } = {}) => this.client.request(this.path('/containers/exec'),
+        { method: 'POST', body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, signal }),
+      start: async (command, { timeoutMs, idempotencyKey = crypto.randomUUID() } = {}) => {
+        try {
+          const record = await this.client.request(this.path('/containers/executions'), { method: 'POST',
+            body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, headers: { 'Idempotency-Key': idempotencyKey } });
+          return new Execution(this, record.id);
+        } catch (error) { error.idempotencyKey = idempotencyKey; throw error; }
+      },
+    };
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
   async kill() {
@@ -117,6 +127,63 @@ export class Sandbox {
       throw new MainbrellaError('cleanup_unconfirmed');
     }
     return data;
+  }
+}
+
+export class Execution {
+  constructor(sandbox, id) {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id ?? '')) throw new MainbrellaError('invalid_execution_identity');
+    this.sandbox = sandbox;
+    this.id = id;
+    this.cursor = 0;
+  }
+  path(suffix = '', extra = {}) { return this.sandbox.path(`/containers/executions/${this.id}${suffix}`, extra); }
+  get() { return this.sandbox.client.request(this.path()); }
+  cancel() { return this.sandbox.client.request(this.path(), { method: 'DELETE' }); }
+  async wait({ timeoutMs = 15 * 60_000, pollIntervalMs = 1000 } = {}) {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) throw new MainbrellaError('invalid_wait_options');
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const result = await this.get();
+      if (terminal.has(result.status)) return result;
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(pollIntervalMs, deadline - Date.now()))));
+    }
+    throw new MainbrellaError('execution_wait_timeout');
+  }
+  async *events({ cursor = this.cursor, signal } = {}) {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new MainbrellaError('invalid_cursor');
+    while (!signal?.aborted) {
+      const response = await this.sandbox.client.request(this.path('/events', { cursor: String(cursor) }), { stream: true, signal });
+      const reader = response.body?.getReader();
+      if (!reader) throw new MainbrellaError('invalid_stream_response');
+      const decoder = new TextDecoder();
+      let buffer = '', completed = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+          if (buffer.length > 64 * 1024) throw new Error();
+          let boundary;
+          while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+            const type = frame.split('\n').find(line => line.startsWith('event: '))?.slice(7);
+            const data = frame.split('\n').find(line => line.startsWith('data: '))?.slice(6);
+            if (!data) continue;
+            const item = JSON.parse(data);
+            if (type === 'status') {
+              completed = terminal.has(item.status);
+              yield { type: 'status', execution: item };
+            } else if (['stdout', 'stderr'].includes(type)) {
+              if (!Number.isSafeInteger(item.sequence) || typeof item.data !== 'string') throw new Error();
+              if (item.sequence > cursor) { this.cursor = cursor = item.sequence; yield item; }
+            }
+          }
+          if (done || completed) break;
+        }
+      } catch { throw new MainbrellaError('execution_stream_unavailable', 0, { cursor }); }
+      finally { await reader.cancel().catch(() => {}); }
+      if (completed) return;
+    }
   }
 }
 

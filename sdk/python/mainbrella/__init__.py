@@ -140,6 +140,96 @@ class _Commands:
             body["timeoutMs"] = timeout_ms
         return self.sandbox.client.request(self.sandbox._path("/containers/exec"), "POST", body)
 
+    def start(self, command, timeout_ms=None, idempotency_key=None):
+        key = idempotency_key or str(uuid.uuid4())
+        body = {"command": command}
+        if timeout_ms is not None:
+            body["timeoutMs"] = timeout_ms
+        try:
+            record = self.sandbox.client.request(self.sandbox._path("/containers/executions"), "POST", body, {"Idempotency-Key": key})
+            return Execution(self.sandbox, record["id"])
+        except MainbrellaError as error:
+            error.idempotency_key = key
+            raise
+
+
+class Execution:
+    def __init__(self, sandbox, execution_id):
+        if not re.fullmatch(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", execution_id):
+            raise MainbrellaError("invalid_execution_identity")
+        self.sandbox = sandbox
+        self.id = execution_id
+        self.cursor = 0
+
+    def _path(self, suffix="", **extra):
+        return self.sandbox._path("/containers/executions/" + self.id + suffix, **extra)
+
+    def get(self):
+        return self.sandbox.client.request(self._path())
+
+    def cancel(self):
+        return self.sandbox.client.request(self._path(), "DELETE")
+
+    def wait(self, timeout=900, poll_interval=1):
+        if timeout <= 0 or poll_interval <= 0:
+            raise MainbrellaError("invalid_wait_options")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.get()
+            if result["status"] not in ("starting", "running"):
+                return result
+            time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
+        raise MainbrellaError("execution_wait_timeout")
+
+    def events(self, cursor=None):
+        """Yield live SSE output, replaying retained chunks after stream rotation."""
+        cursor = self.cursor if cursor is None else cursor
+        if not isinstance(cursor, int) or cursor < 0:
+            raise MainbrellaError("invalid_cursor")
+        client = self.sandbox.client
+        while True:
+            completed = False
+            try:
+                response = build_opener(_NoRedirect()).open(Request(client.base_url + self._path("/events", cursor=cursor),
+                    headers={"Authorization": "Bearer " + client._api_key}), timeout=client.timeout)
+                with response:
+                    frame = []
+                    while True:
+                        line = response.readline(65537)
+                        if not line:
+                            break
+                        if len(line) > 65536:
+                            raise ValueError("oversized_event")
+                        if line.strip():
+                            frame.append(line.decode("utf-8").rstrip("\n"))
+                            if sum(len(part) for part in frame) > 65536:
+                                raise ValueError("oversized_event")
+                            continue
+                        kind = next((part[7:] for part in frame if part.startswith("event: ")), None)
+                        data = next((part[6:] for part in frame if part.startswith("data: ")), None)
+                        frame = []
+                        if not data:
+                            continue
+                        item = json.loads(data)
+                        if kind == "status":
+                            completed = item["status"] not in ("starting", "running")
+                            yield {"type": "status", "execution": item}
+                            if completed:
+                                break
+                        elif kind in ("stdout", "stderr"):
+                            if not isinstance(item.get("sequence"), int) or not isinstance(item.get("data"), str):
+                                raise ValueError("invalid_event")
+                            if item["sequence"] > cursor:
+                                self.cursor = cursor = item["sequence"]
+                                yield item
+            except HTTPError as error:
+                error.close()
+                raise MainbrellaError("execution_stream_unavailable", error.code) from None
+            except (OSError, ValueError, KeyError):
+                raise MainbrellaError("execution_stream_unavailable") from None
+            if completed:
+                return
+
 
 class Sandbox:
     def __init__(self, client, container_id, created_at):

@@ -20,7 +20,7 @@ test('JavaScript SDK uses real API auth, schemas, binary forwarding and generati
     return { async fetch(req: Request) {
       if (new URL(req.url).pathname === '/exec') return Response.json({ stdout: 'hello', stderr: '', exitCode: 0, timedOut: false, outputTruncated: false });
       if (req.method === 'PUT') { stored = new Uint8Array(await req.arrayBuffer()); return Response.json({}); }
-      return new Response(stored);
+      return new Response(stored ? new Uint8Array(stored) : undefined);
     } };
   } } as unknown as DurableObjectNamespace;
   const client = new Mainbrella({ apiKey, fetch: (async (input: RequestInfo | URL, options?: RequestInit) =>
