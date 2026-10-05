@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { parseEnv } from 'node:util';
 import { assembleImageMap, imageBuildApi } from './custom-images.mjs';
 import { validateImage } from './terminal-image.mjs';
 
@@ -36,6 +37,14 @@ const lease = randomUUID();
 let locked = false;
 const temporaryConfig = join(root, `.wrangler-containers-${randomUUID()}.json`);
 try {
+  // Node does not load Wrangler's local .env automatically. Import only the
+  // shared image secret, preserving any explicit shell/Actions value.
+  if (process.env.IMAGE_BUILD_SECRET === undefined) {
+    try {
+      const local = parseEnv(readFileSync(join(root, '.env'), 'utf8'));
+      if (local.IMAGE_BUILD_SECRET !== undefined) process.env.IMAGE_BUILD_SECRET = local.IMAGE_BUILD_SECRET;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   if (!args.includes('--dry-run')) {
     const deadline = Date.now() + 8 * 60_000;
     while (true) {

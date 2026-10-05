@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
-function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true } = {}) {
+function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'terminal-deploy-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
@@ -19,13 +19,15 @@ function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, a
   writeFileSync(join(root, 'bin/gh'), `#!${process.execPath}\nconsole.log(process.argv.includes('-H') ? ${JSON.stringify(JSON.stringify(manifest))} : '{"assets":[{"id":1,"name":"terminal-image.json"}]}');\n`, { mode: 0o755 });
   writeFileSync(join(root, 'node_modules/wrangler/bin/wrangler.js'), `const fs = require('node:fs'); const args = process.argv.slice(2); fs.writeFileSync('result.json', JSON.stringify({args, config: JSON.parse(fs.readFileSync(args[args.indexOf('--config')+1]))})); process.exit(${exitCode});`);
   writeFileSync(join(root, 'fetch.mjs'), `globalThis.fetch = async (url, options) => {
+    if (options.headers.Authorization !== 'Bearer ' + 's'.repeat(32)) throw new Error('Wrong image-build credential');
     if (url.endsWith('/deployment-lock')) {
       const fs = await import('node:fs'); fs.appendFileSync('locks.log', options.method + '\\n');
       return Response.json({ acquired: true });
     }
     return Response.json(${JSON.stringify(custom)}, { status: ${apiStatus} });
   };`);
-  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : [])], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: join(root, 'bin'), IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' } });
+  if (localSecret !== undefined) writeFileSync(join(root, '.env'), `IMAGE_BUILD_SECRET="${localSecret}"\n`);
+  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : [])], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
   return { root, image, run };
 }
 
@@ -78,4 +80,16 @@ test('invalid registry references and missing API credentials prevent deployment
     assert.equal(f.run().status, 1);
     assert.equal(readdirSync(f.root).includes('result.json'), false);
   }
+});
+
+test('local deployment reads the shared secret from ignored .env', t => {
+  const f = fixture(t, { secret: 'local', localSecret: 's'.repeat(32) });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('explicit environment secret takes precedence over .env', t => {
+  const f = fixture(t, { localSecret: 'different-local-secret'.repeat(3) });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
 });

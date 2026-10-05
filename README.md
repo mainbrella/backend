@@ -34,7 +34,8 @@ Run `npm run deploy` here to deploy the container Worker and its bash/tmux image
 first, then the API. Deploy `../web` afterward. The image is built in GitHub
 Actions; local deployments require GitHub CLI authentication, not Docker.
 Existing old-image containers need to be stopped and recreated. This path does
-not need SSH tokens or any additional secrets. `/containers/ssh`, its token
+does not need SSH tokens. The image deploy script reads `IMAGE_BUILD_SECRET`
+from the shell or ignored backend `.env` for the live image manifest. `/containers/ssh`, its token
 migration/table, and the existing SSH gateway remain unchanged.
 
 ## Verification
@@ -105,7 +106,8 @@ The deploy script downloads the terminal release manifest and live custom-image
 manifest, verifies the registry account,
 repository, digest, and Dockerfile hash, and supplies Wrangler a temporary config
 with digest-pinned entries for `terminal` and all ready/publishing custom images.
-Set `IMAGE_BUILD_SECRET` in the local deployment environment; a missing secret or
+Set `IMAGE_BUILD_SECRET` in the shell or ignored backend `.env` (the same value
+as the API Worker and GitHub Actions); a missing secret or
 unavailable custom manifest stops deployment rather than removing user images. The tracked config remains
 the build blueprint. Use the npm deploy commands rather than invoking
 `wrangler deploy --config wrangler.containers.jsonc` directly, which would still
@@ -155,7 +157,9 @@ For the first rollout of the live manifest/deployment lease, apply remote D1
 migrations (including `007_image_deployment_lock.sql`) and deploy the API first:
 `npm run db:migrate:remote`, then `npm run deploy:api`. Merge the custom-image
 workflow to `main` and configure its secrets before accepting builds. Subsequent
-releases can use the normal `npm run deploy` command with `IMAGE_BUILD_SECRET` set.
+releases can use the normal `npm run deploy` command with `IMAGE_BUILD_SECRET` in the shell or backend `.env`.
+Node loads this secret from `.env` automatically for container deployments; an
+explicit shell/Actions value takes precedence.
 
 Preparation downloads the recipe and pinned base image on a trusted runner.
 The user Dockerfile builds and runs its compatibility check on a separate,
