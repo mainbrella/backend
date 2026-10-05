@@ -1,13 +1,16 @@
 # Mainbrella API
 
-The session-authenticated `/containers` API maps each account server-side to
-``USER_CONTAINER.idFromName(`user:${user.id}`)`` in the private
-`mainbrella-containers` Worker (`containers/`). Container creation and quota
-reservation remain exclusively in `POST /containers`.
+The session-authenticated `/containers` API resolves paid access from Stripe and
+reserves starts in an account-owned `ContainerAccount` Durable Object. Each
+container runs in its own private `UserContainer` in `mainbrella-containers`.
+The original `user:<userId>` machine remains the `small` slot; additional slots
+use `user:<userId>:slot:<number>`. Container creation and quota reservation remain
+exclusive to `POST /containers`; client ownership, plan, resource and lease
+headers are never forwarded.
 
 ## Browser terminal
 
-`GET /containers/terminal?createdAt=<ISO generation>&cols=80&rows=24` requires
+`GET /containers/terminal?id=<container id>&createdAt=<ISO generation>&cols=80&rows=24` requires
 `Upgrade: websocket`, an explicit allowlisted browser Origin, and the existing
 `mainbrella_session` cookie. `createdAt` is required and must exactly match the
 current running container. Dimensions default to 80×24, must be integer strings,
@@ -15,7 +18,7 @@ and clamp to 1–500 columns / 1–200 rows. Unknown or duplicate parameters are
 rejected. Client headers cannot override the account, image, resources, session
 name, generation, or deadline.
 
-The API first reads `GET https://internal/container` for the authenticated owner,
+The API checks paid access, reads the authenticated account's container list,
 then forwards only Upgrade and trusted generation/expiration/dimension headers
 to `GET https://internal/terminal`. Cookie and Authorization are not forwarded.
 The DO rechecks the generation and persisted lease before `exec()` to reject
@@ -30,13 +33,14 @@ uses binary UTF-8 stdin, raw binary stdout, JSON `{cols, rows}` resizing and
 Disconnect terminates only the attached tmux client. The existing idle/hard
 expiration alarm still destroys the container and closes terminal sockets.
 
-Run `npm run deploy` here to deploy the container Worker and its bash/tmux image
-first, then the API. Deploy `../web` afterward. The image is built in GitHub
+Apply the database migrations, then run `npm run deploy` here to deploy the API
+first and the container Worker second. Deploy `../web` afterward. The image is built in GitHub
 Actions; local deployments require GitHub CLI authentication, not Docker.
 Existing old-image containers need to be stopped and recreated. This path does
-does not need SSH tokens. The image deploy script reads `IMAGE_BUILD_SECRET`
-from the shell or ignored backend `.env` for the live image manifest. `/containers/ssh`, its token
-migration/table, and the existing SSH gateway remain unchanged.
+not need SSH tokens. The image deploy script reads `IMAGE_BUILD_SECRET`
+from the shell or ignored backend `.env` for the live image manifest.
+`/containers/ssh` accepts an explicit container ID; `007_ssh_container_id.sql`
+binds tokens to that slot as well as its generation. The SSH gateway protocol is unchanged.
 
 ## Verification
 
@@ -44,9 +48,8 @@ migration/table, and the existing SSH gateway remain unchanged.
 npm ci
 npm run type-check
 npm run check:containers
-npm run test:containers
-npx tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts
-npx tsx --test worker/app/terminal.test.ts worker/app/containers.test.ts worker/app/ssh.test.ts
+npm run test:plans  # Paid billing, account quotas, lifecycle, SSH and terminals
+npm test           # Full suite, including legacy fixtures noted below
 ```
 
 The full suite currently includes three legacy admin/Apple-auth tests referencing
@@ -60,19 +63,32 @@ independent of those files.
 All production backend code lives here. `containers/` contains the private
 container Worker, lifecycle controller, terminal bridge, Dockerfile, and tests.
 `wrangler.containers.jsonc` deploys `mainbrella-containers`; `wrangler.jsonc`
-deploys `mainbrella-api`. The API's cross-Worker binding, `UserContainer` class,
-account, and storage identity are unchanged by this move. `../reference` is
+deploys `mainbrella-api`. The API retains the original cross-Worker `USER_CONTAINER` binding and adds a
+SQLite `CONTAINER_ACCOUNT` binding/export for atomic per-account reservations. `../reference` is
 benchmark and historical material only; production builds do not read it.
 
 ```sh
-npm run deploy             # Containers and image first, then API; stops on failure
+npm run deploy             # API first, then containers; stops on failure
 npm run deploy:containers  # Container Worker with the CI-published image
 npm run deploy:api         # API only
 ```
 
-Container limits remain one running container per account, ten reserved starts
-per UTC month, a one-hour hard deadline, and a ten-minute idle timeout. The
-container image includes Node 24, bash, and tmux, with outbound internet enabled.
+Apply migrations before deploying the API, including 006 (billing webhook
+receipts and billing operation leases) and 007 (SSH container IDs). Configure the existing
+`STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY`, and add `STRIPE_WEBHOOK_SECRET`.
+Register `https://api.mainbrella.com/subscription/webhook` in Stripe for checkout,
+subscription, schedule, invoice and payment/refund changes as described below.
+Keep webhook signing secrets in Wrangler secrets; never commit them.
+
+For this rollout, deploy the API before the container Worker: the previous API
+does not send paid-entitlement headers, which the new container Worker correctly
+rejects. Deploying the new container Worker first would stop legacy machines on
+an old API status poll. During an API-first rollout, the old private worker's
+smaller lifetime/quota may temporarily constrain paid higher tiers until the
+second deployment completes; it never grants extra access. Check the published
+image with `npm run deploy:containers -- --dry-run` before starting the rollout.
+
+The container image includes Node 24, bash, and tmux, with outbound internet enabled.
 Deploying an image does not replace running containers; stop and recreate old
 containers to use the updated image.
 
@@ -120,25 +136,101 @@ Registry references and hashes are public metadata; API tokens stay in Actions
 secrets and are never put in the deployment manifest. The GitHub release and
 repository must remain accessible to the authenticated deployment user.
 
-## API automation and Builder enforcement
+## Paid plans and enforcement
 
-See [API.md](API.md) for authentication, endpoints, curl examples, limits, and
-retry behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both
-files are mirrored in `../web`; update both copies when the API changes.
+`containers/plan-policy.js` is the authoritative policy imported by both workers.
+`GET /subscription/config` publishes these same definitions to the web UI.
+
+| Plan | Monthly USD fee | Concurrent containers | Starts per UTC month | Hard session limit | Idle timeout |
+| --- | ---: | ---: | ---: | --- | --- |
+| No paid plan | $0 | 0 | 0 | No access | No access |
+| Builder | $5 | 5 | 10 | 1 hour | 10 minutes |
+| Pro | $180 | 100 | 1,000 | 24 hours | 30 minutes |
+| Scale | $999 | 500 | 10,000 | 72 hours | 60 minutes |
+
+Every plan uses a fixed [Cloudflare `lite` machine](https://developers.cloudflare.com/containers/platform/limits/): 1/16 vCPU, 256 MiB RAM and 2 GB ephemeral
+disk. Browser terminal, SSH and outbound internet are included. Each container permits
+up to four attached terminals (browser and SSH combined); each account permits
+ten live SSH access tokens, each expiring within 15 minutes or the machine deadline. Snapshots,
+filesystem persistence after stop, custom sizes, team seats, SDKs, enhanced logs,
+audit exports and priority capacity are unavailable on all plans. There are no
+compute overages: the start quota is a hard cap and usage billing is disabled.
+
+A logged-in account has no container allowance until its recognized, single-item,
+quantity-one subscription is active and its current plan period has a successful
+Stripe payment. Trials, incomplete, past-due, unpaid, canceled and paused
+subscriptions do not grant access. Local `pro_billing.plan` is a synchronized
+record, not authorization. Stripe lookup failures fail closed with 503; the API
+never substitutes Builder. Unpaid starts return 402 `subscription_required`
+before reserving usage or provisioning a machine. An unpaid attempt from an
+existing billing account also schedules revocation of its existing machines,
+without delaying the 402 response; failed cleanup retains slots for alarm retries.
+
+Reservations are shared across all slots, browser sessions and Bearer sessions.
+The account saves a reservation before boot; readiness runs outside the reservation
+lock so multiple machines can start together. Failed or ambiguous starts remain
+charged. Stopping, upgrading, downgrading, canceling and resubscribing do not reset
+usage. UTC month rollover resets the allowance. Legacy usage migrates from the
+original slot without granting a fresh quota.
+
+Every reservation has a persistent sequence number. Slot cleanup fences canceled
+reservations, so delayed boots and responses cannot resurrect a stopped machine
+or alter its replacement. Reconciliation persists its entitlement decision before
+fanout and continues stopping reachable machines if another slot is unavailable;
+failed cleanup retains the slot and retries after 30 seconds.
+
+Each machine has a fixed hard deadline capped by its paid period. An upgrade
+changes limits for new sessions and never extends existing hard deadlines.
+Renewal also leaves the original hard deadline in place; start a new container
+after it expires.
+Downgrades and cancellation take effect at the end of the current paid period.
+When a lower tier becomes effective, the oldest unexpired containers within its cap remain; excess
+containers stop and remaining session/idle deadlines are clamped. Loss of paid
+access stops all containers. Polling and token issuance do not renew idle time;
+terminal input/output can renew idle time within the fixed hard deadline. Machine
+and account alarms enforce deadlines without an open dashboard.
+
+## Subscription changes
+
+Purchases require login and belong to the account's Stripe customer. Checkout
+session ownership is verified on completion. A second purchase is rejected while
+any live subscription exists; existing subscribers use plan-change endpoints.
+
+- Upgrades use a Stripe-hosted confirmation showing the immediate prorated charge.
+  The higher tier requires a successfully paid invoice for that tier.
+- Downgrades use an explicitly confirmed Stripe subscription schedule at renewal,
+  preserving the current paid tier until then. Selecting the current plan removes
+  a pending downgrade. Custom schedules work across the separate plan products.
+- Cancellation is explicitly confirmed, removes a pending downgrade, and sets
+  `cancel_at_period_end`. Resume before expiration clears that cancellation;
+  after expiration, a new checkout is required.
+- The billing portal provides payment-method updates and invoice history. Plan
+  changes and cancellation use the dedicated app flows to preserve their rules.
+
+See [Stripe's update confirmation flow](https://docs.stripe.com/customer-management/portal-deep-links)
+and [subscription schedules](https://docs.stripe.com/billing/subscriptions/subscription-schedules)
+for the underlying billing mechanisms.
+
+The signed webhook verifies the raw body, timestamp and HMAC before reading an
+account, resolves live Stripe state rather than trusting event order, and saves
+an event receipt only after entitlement reconciliation succeeds. Failed revocation
+remains retryable. Configure subscription, schedule, invoice, checkout and payment
+refund/dispute events: `customer.subscription.*`, `subscription_schedule.*`,
+`invoice.*`, `checkout.session.*`, `charge.refunded`, and `charge.dispute.created`.
+Status, startup and terminal/SSH connections also resolve
+live billing state, so a saved plan name cannot bypass payment checks.
+
+## API automation
+
+See [API.md](API.md) for authentication, endpoints, curl examples, limits and retry
+behavior, and [SKILL.md](SKILL.md) for the reusable automation skill. Both files
+are mirrored in `../web`; update both copies when the API changes.
 
 Lifecycle and SSH issuance accept `Authorization: Bearer <login-session-value>`
 without Origin, using the existing hashed, expiring, revocable session record.
-Cookie mutations still require a trusted Origin. Browser terminal authentication
-and gateway credentials are unchanged. No migration or new secret is required.
-
-`BUILDER_LIMITS` in `containers/user-container-core.js` is the effective policy
-for every account until database-backed plan resolution is implemented. Status
-includes `plan: "builder"`. The serialized controller returns 409
-`container_limit_exceeded` for attempts to launch a second running container,
-without spending quota; monthly exhaustion remains 429
-`container_quota_exceeded`. Ownership and resources come exclusively from the
-backend, and UI/API launches share the same slot and reservations. Deploy the
-container Worker before the API to activate the new lifecycle behavior.
+Cookie mutations still require a trusted Origin. Browser terminals remain
+cookie-only. Paid entitlements and quota are identical for UI and automation.
+Cleanup remains available during a Stripe outage and cannot start a machine.
 
 To install the skill in Codex, copy `SKILL.md` and `API.md` into
 `~/.codex/skills/mainbrella-containers/` (or the equivalent skills directory for

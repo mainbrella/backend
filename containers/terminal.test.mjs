@@ -67,6 +67,7 @@ function fixture({ blockWrites = false } = {}) {
     async exec(argv, options) { calls.push({ argv, options }); process.isPty = !!options.pty; if (options.pty) process.stderr = undefined; return process; },
   };
   const storage = new Storage();
+  storage.values.set('machineEntitlement', { active: true, plan: 'builder', validUntil: BASE + 3_600_000, checkedAt: BASE });
   storage.values.set('builderMachine', {
     createdAt: BASE,
     expiresAt: BASE + 3_600_000,
@@ -380,6 +381,27 @@ test('browser activity cannot move hard deadline; expiration alarm destroys cont
   assert.equal(f.active.size, 0);
   assert.equal((await f.connect({}, { browser: true })).status, 409);
   assert.equal(f.container.starts, 0);
+});
+
+test('payment revocation closes browser and SSH sockets even when VM destruction fails', async () => {
+  for (const browser of [false, true]) {
+    const f = fixture();
+    await f.connect({}, { browser });
+    if (!browser) f.server().receive(JSON.stringify({ type: 'start' }));
+    await tick();
+    const socket = f.server();
+    f.container.destroy = async () => { throw new Error('platform unavailable'); };
+    f.setTime(BASE + 1);
+    await assert.rejects(f.controller.fetch(new Request('https://internal/container', {
+      method: 'DELETE', headers: { 'x-mainbrella-checked-at': String(BASE + 1) },
+    })), /platform unavailable/);
+    assert.equal(f.container.running, true);
+    assert.equal(socket.closed, true);
+    assert.equal(f.active.size, 0);
+    assert.deepEqual(f.signals, [15]);
+    assert.equal((await f.connect({}, { browser })).status, browser ? 409 : 403);
+    assert.equal(f.calls.length, 1);
+  }
 });
 
 test('open idle browser terminal does not prevent the ten-minute alarm or manual stop', async () => {

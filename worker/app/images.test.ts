@@ -4,6 +4,8 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { handleRequest } from './router';
 import { hashToken } from './auth-core';
+import { PLAN_PRICES } from '../lib/stripe';
+import { ContainerAccountController, machineName } from '../../containers/container-account-core.js';
 // These dependency-free production modules are shared with the container Worker/deploy script.
 // @ts-expect-error JavaScript runtime module has no declarations.
 import { UserContainerController } from '../../containers/user-container-core.js';
@@ -16,13 +18,15 @@ const account = '2b7a9be82bb64187230703b024e25157';
 async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  for (const name of ['001_initial', '002_auth_sessions', '006_custom_images', '007_image_deployment_lock']) {
+  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock']) {
     db.exec(readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8'));
   }
   db.prepare("INSERT INTO users (id, email) VALUES ('owner', 'owner@test.com'), ('other', 'other@test.com')").run();
   for (const user of ['owner', 'other']) {
     db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
       .run(await hashToken(user), user, new Date(Date.now() + 3600000).toISOString());
+    db.prepare('INSERT INTO pro_billing (user_id, stripe_customer_id, checkout_session_id) VALUES (?, ?, ?)')
+      .run(user, `cus_${user}`, `cs_${user}`);
   }
   class Statement {
     values: SQLInputValue[] = [];
@@ -34,6 +38,23 @@ async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) 
   }
   const dispatches: { url: string; body: { ref: string; inputs: Record<string, string> } }[] = [];
   t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
+    const target = new URL(String(url));
+    if (target.hostname === 'api.stripe.com') {
+      const now = Math.floor(Date.now() / 1000);
+      const customer = target.searchParams.get('customer') ?? 'cus_owner';
+      const subscription = target.searchParams.get('subscription') ?? `sub_${customer}`;
+      if (target.pathname === '/v1/subscriptions') return Response.json({ data: [{ id: subscription, status: 'active', customer,
+        items: { data: [{ id: 'si_paid', quantity: 1, price: { id: PLAN_PRICES.builder }, current_period_start: now - 3600, current_period_end: now + 86400 }] },
+      }], has_more: false });
+      if (target.pathname === '/v1/invoices') return Response.json({ data: [{ id: 'in_paid', status: 'paid', amount_paid: 500,
+        lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: PLAN_PRICES.builder } },
+          parent: { subscription_item_details: { subscription, subscription_item: 'si_paid' } }, period: { start: now - 3600, end: now + 86400 } }], has_more: false },
+      }], has_more: false });
+      if (target.pathname === '/v1/invoice_payments') return Response.json({ data: [{ id: 'inpay_paid', invoice: 'in_paid', status: 'paid', amount_paid: 500,
+        payment: { type: 'payment_intent', payment_intent: 'pi_paid' } }], has_more: false });
+      if (target.pathname === '/v1/payment_intents/pi_paid') return Response.json({ id: 'pi_paid', status: 'succeeded', amount_received: 500,
+        latest_charge: { id: 'ch_paid', paid: true, status: 'succeeded', amount: 500, amount_refunded: 0, refunded: false, disputed: false } });
+    }
     dispatches.push({ url: String(url), body: JSON.parse(options.body as string) });
     if (dispatch === 'network') throw new Error('Network failure');
     return new Response(null, { status: dispatch });
@@ -47,19 +68,42 @@ async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) 
     async exec() { return { output: async () => ({ exitCode: 0 }) }; },
     async destroy() { this.running = false; },
   };
-  const controller = new UserContainerController({ container, storage: {
+  const machineStorage = () => ({
     async get(key: string) { return structuredClone(values.get(key)); },
     async put(key: string, value: unknown) { values.set(key, structuredClone(value)); },
     async setAlarm() {}, async deleteAlarm() {},
-  } });
+  });
+  const machines = new Map<string, UserContainerController>();
+  const machineBinding = {
+    idFromName(name: string) { return name; },
+    get(name: string) { return { async fetch(request: Request) {
+      let controller = machines.get(name);
+      if (!controller) { controller = new UserContainerController({ container, storage: machineStorage() }); machines.set(name, controller); }
+      return controller.fetch(request);
+    } }; },
+  };
+  const accountControllers = new Map<string, ContainerAccountController>();
+  const accountBinding = {
+    idFromName(name: string) { return name; },
+    get(name: string) { return { async fetch(request: Request) {
+      let controller = accountControllers.get(name);
+      if (!controller) {
+        controller = new ContainerAccountController({ storage: machineStorage() } as never,
+          (userId, id) => machineBinding.get(machineName(userId, id)) as never);
+        accountControllers.set(name, controller);
+      }
+      return controller.fetch(request);
+    } }; },
+  };
   const env = {
-    IMAGE_BUILD_SECRET: secret, IMAGE_BUILD_GITHUB_TOKEN: 'test-token',
+    IMAGE_BUILD_SECRET: secret, IMAGE_BUILD_GITHUB_TOKEN: 'test-token', STRIPE_SECRET_KEY: 'sk_test_images',
     DB: { prepare(sql: string) { return new Statement(sql); }, async batch(statements: Statement[]) {
       db.exec('BEGIN');
       try { const results = []; for (const stmt of statements) results.push(await stmt.run()); db.exec('COMMIT'); return results; }
       catch (error) { db.exec('ROLLBACK'); throw error; }
     } },
-    USER_CONTAINER: { idFromName(name: string) { assert.equal(name, 'user:owner'); return name; }, get() { return controller; } },
+    USER_CONTAINER: machineBinding,
+    CONTAINER_ACCOUNT: accountBinding,
   } as unknown as Env;
   const user = (path: string, method = 'GET', body?: BodyInit, owner = 'owner') => handleRequest(new Request(`https://api.mainbrella.com${path}`, {
     method, headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${owner}` }, ...(body ? { body } : {}),
@@ -149,7 +193,7 @@ test('dispatch target exists and user-controlled build has no publishing secrets
   assert.match(workflow, /needs: \[prepare, build\]/);
 });
 
-test('a ready image absent from the deployed map cannot start or spend container quota', async t => {
+test('a ready image absent from the deployed map cannot start a container', async t => {
   const f = await fixture(t);
   const { image } = await (await f.create()).json() as { image: { id: string } };
   await f.internal(`/${image.id}/source`);

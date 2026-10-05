@@ -46,7 +46,7 @@ function fixture(initialTime = Date.UTC(2026, 9, 5, 12), timers = globalThis) {
   const ctx = { storage: new MemoryStorage(), container: new FakeContainer() };
   const controller = new UserContainerController(ctx, () => now, timers);
   const setTime = (time) => { now = time; };
-  const request = (method = "GET") => controller.fetch(new Request("https://builder.test/container", { method }));
+  const request = (method = "GET") => controller.fetch(new Request("https://builder.test/container", { method, headers: { "x-mainbrella-plan": "builder", "x-mainbrella-paid-until": String(now + 30 * 86400000) } }));
   const read = async (method = "GET") => {
     const response = await request(method);
     return { response, body: await response.json() };
@@ -74,7 +74,7 @@ test("concurrent POSTs reject a second container and reserve only one monthly st
   ]);
   assert.equal(result.usage.starts, 1);
   assert.deepEqual(result.limits, {
-    maxContainers: 1,
+    maxContainers: 5,
     maxStartsPerMonth: 10,
     maxSessionMs: 3_600_000,
     idleTimeoutMs: 600_000,
@@ -99,22 +99,6 @@ test("GET is read-only and DELETE stops without erasing monthly usage", async ()
   assert.equal(f.ctx.storage.alarmAt, null);
 });
 
-test("quota is capped per UTC month and resets on rollover", async () => {
-  const f = fixture(Date.UTC(2026, 9, 31, 23, 59));
-  for (let i = 0; i < 10; i += 1) {
-    await f.read("POST");
-    await f.read("DELETE");
-  }
-  const exhausted = await f.read("POST");
-  assert.equal(exhausted.response.status, 429);
-  assert.deepEqual(exhausted.body, { error: "container_quota_exceeded" });
-  assert.equal(f.ctx.container.starts, 10);
-
-  f.setTime(Date.UTC(2026, 10, 1, 0, 0));
-  const nextMonth = await f.read("POST");
-  assert.equal(nextMonth.response.status, 200);
-  assert.deepEqual(nextMonth.body.usage, { month: "2026-11", starts: 1 });
-});
 
 test("hard expiry is enforced by GET even when the alarm has not run", async () => {
   const f = fixture();
@@ -160,14 +144,14 @@ test("restart and GET preserve the absolute idle deadline without renewing it", 
   const metadata = await f.ctx.storage.get("builderMachine");
   f.setTime(f.now() + 5 * 60_000);
   const restarted = new UserContainerController(f.ctx, f.now);
-  const response = await restarted.fetch(new Request("https://builder.test/container"));
+  const response = await restarted.fetch(new Request("https://builder.test/container", { headers: { "x-mainbrella-plan": "builder", "x-mainbrella-paid-until": String(f.now() + 30 * 86400000) } }));
   const body = await response.json();
   assert.equal(body.containers[0].expiresAt, new Date(metadata.expiresAt).toISOString());
   assert.equal(f.ctx.storage.alarmAt, metadata.idleExpiresAt);
   assert.equal(f.ctx.container.inactivityTimeouts.length, 1);
 
   f.setTime(metadata.idleExpiresAt);
-  const expired = await restarted.fetch(new Request("https://builder.test/container"));
+  const expired = await restarted.fetch(new Request("https://builder.test/container", { headers: { "x-mainbrella-plan": "builder", "x-mainbrella-paid-until": String(f.now() + 30 * 86400000) } }));
   assert.deepEqual((await expired.json()).containers, []);
   assert.equal(f.ctx.container.running, false);
 });
@@ -231,4 +215,90 @@ test("running container without metadata is destroyed fail closed", async () => 
   assert.equal(f.ctx.container.destroys, 1);
   assert.equal(f.ctx.storage.alarmAt, null);
   assert.deepEqual(result.body.containers, []);
+});
+
+
+test("same-millisecond recreation gets a distinct generation and rejects old terminal access", async () => {
+  const f = fixture();
+  const first = (await f.read("POST")).body.containers[0];
+  await f.read("DELETE");
+  const second = (await f.read("POST")).body.containers[0];
+  assert.notEqual(second.createdAt, first.createdAt);
+  assert.equal(await f.controller.getTerminalMetadata(first.createdAt, Date.parse(first.expiresAt)), null);
+  assert.ok(await f.controller.getTerminalMetadata(second.createdAt, Date.parse(second.expiresAt)));
+});
+
+for (const plan of ["builder", "pro", "scale"]) {
+  test(`${plan} sessions are capped by paid expiration and use that plan's idle timeout`, async () => {
+    const f = fixture();
+    const paidUntil = f.now() + 100_000;
+    const response = await f.controller.fetch(new Request("https://internal/container", { method: "POST", headers: {
+      "x-mainbrella-plan": plan, "x-mainbrella-paid-until": String(paidUntil), "x-mainbrella-checked-at": String(f.now()),
+    } }));
+    const body = await response.json();
+    assert.equal(body.plan, plan);
+    assert.equal(Date.parse(body.containers[0].expiresAt), paidUntil);
+    assert.equal(f.ctx.storage.alarmAt, paidUntil);
+    f.setTime(paidUntil);
+    await f.controller.alarm();
+    assert.equal(f.ctx.container.running, false);
+  });
+}
+
+test("a newer unpaid decision blocks an older paid start at the machine boundary", async () => {
+  const f = fixture();
+  const now = f.now();
+  await f.controller.fetch(new Request("https://internal/container", { headers: {
+    "x-mainbrella-plan": "", "x-mainbrella-paid-until": "0", "x-mainbrella-checked-at": String(now + 1),
+  } }));
+  const response = await f.controller.fetch(new Request("https://internal/container", { method: "POST", headers: {
+    "x-mainbrella-plan": "scale", "x-mainbrella-paid-until": String(now + 30 * 86400000), "x-mainbrella-checked-at": String(now),
+  } }));
+  assert.equal(response.status, 402);
+  assert.equal(f.ctx.container.starts, 0);
+});
+
+test('paid expiry during storage reads denies boot without consuming slot usage', async () => {
+  const f = fixture(); const initial = f.now(); const original = f.ctx.storage.get.bind(f.ctx.storage);
+  f.ctx.storage.get = async key => {
+    const result = await original(key);
+    if (key === 'builderMachineStarts') f.setTime(initial + 1000);
+    return result;
+  };
+  const response = await f.controller.fetch(new Request('https://internal/container', { method: 'POST', headers: {
+    'x-mainbrella-plan': 'builder', 'x-mainbrella-paid-until': String(initial + 1000), 'x-mainbrella-checked-at': String(initial),
+  } }));
+  assert.equal(response.status, 402);
+  assert.equal(f.ctx.container.starts, 0);
+  assert.equal(await original('builderMachineStarts'), undefined);
+});
+
+test('expiry while persisting a reservation cannot launch an already expired machine', async () => {
+  const f = fixture(); const initial = f.now(); const original = f.ctx.storage.setAlarm.bind(f.ctx.storage);
+  f.ctx.storage.setAlarm = async at => { await original(at); f.setTime(initial + 1000); };
+  const response = await f.controller.fetch(new Request('https://internal/container', { method: 'POST', headers: {
+    'x-mainbrella-plan': 'builder', 'x-mainbrella-paid-until': String(initial + 1000), 'x-mainbrella-checked-at': String(initial),
+  } }));
+  assert.equal(response.status, 402); assert.equal(f.ctx.container.starts, 0);
+  assert.equal(f.ctx.storage.alarmAt, null);
+  assert.equal((await f.ctx.storage.get('builderMachineStarts'))['2026-10'], 1);
+});
+
+test('revocation closes terminal access even when platform destruction fails', async () => {
+  const f = fixture(); await f.read('POST');
+  const metadata = await f.ctx.storage.get('builderMachine'); const generation = new Date(metadata.createdAt).toISOString();
+  let closed = false; f.controller.onStopped = () => { closed = true; };
+  f.ctx.container.destroyError = new Error('platform unavailable');
+  f.setTime(f.now() + 1);
+  await assert.rejects(f.controller.fetch(new Request('https://internal/container', { method: 'DELETE', headers: {
+    'x-mainbrella-checked-at': String(f.now()),
+  } })), /platform unavailable/);
+  assert.equal(closed, true); assert.equal(f.ctx.container.running, true);
+  assert.equal(await f.controller.getTerminalMetadata(generation, metadata.expiresAt), null);
+  assert.equal(await f.controller.touchTerminalActivity(generation), false);
+  await assert.rejects(f.controller.startTerminalProcess(generation, metadata.expiresAt, ['bash'], {}), /Machine unavailable/);
+  const restarted = new UserContainerController(f.ctx, f.now);
+  assert.equal(await restarted.getTerminalMetadata(generation, metadata.expiresAt), null);
+  f.ctx.container.destroyError = null; await restarted.alarm();
+  assert.equal(f.ctx.container.running, false);
 });

@@ -1,3 +1,4 @@
+import { runningContainer, containerError } from "../lib/container-service";
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 
 // Browser WebSockets carry the HttpOnly session cookie. Require an explicit
@@ -9,7 +10,7 @@ export async function handleTerminalRequest(request: Request, env: Env): Promise
   if (request.method !== 'GET') return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, OPTIONS' });
   if (!request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
   const params = new URL(request.url).searchParams;
-  const allowed = new Set(['createdAt', 'cols', 'rows']);
+  const allowed = new Set(['id', 'createdAt', 'cols', 'rows']);
   if ([...params.keys()].some(key => !allowed.has(key) || params.getAll(key).length !== 1)) {
     return authJson({ error: 'invalid_request' }, 400, cors);
   }
@@ -29,19 +30,14 @@ export async function handleTerminalRequest(request: Request, env: Env): Promise
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return authJson({ error: 'websocket_required' }, 426, cors);
-    if (!env.USER_CONTAINER) throw new Error('missing_binding');
-    const machine = env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(`user:${user.id}`));
-    const state = await machine.fetch(new Request('https://internal/container'));
-    if (!state.ok) throw new Error('status_failed');
-    const data = await state.json() as { containers?: { createdAt: string; expiresAt: string }[] };
-    const current = data.containers?.[0];
+    const { stub: machine, container: current } = await runningContainer(env, user.id, params.get('id'));
     const expiresAt = current ? Date.parse(current.expiresAt) : NaN;
     if (!current || current.createdAt !== createdAt || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
       return authJson({ error: 'container_not_running' }, 409, cors);
     }
     // Bind to the current generation and hard deadline, then recheck inside the DO.
     // Only this account's private DO can choose its shell and lifecycle policy.
-    const response = await machine.fetch(new Request('https://internal/terminal', {
+    const response = await machine!.fetch(new Request('https://internal/terminal', {
       headers: {
         Upgrade: 'websocket',
         'x-terminal-created-at': current.createdAt,
@@ -54,7 +50,8 @@ export async function handleTerminalRequest(request: Request, env: Env): Promise
       return authJson({ error: response.status === 409 ? 'container_not_running' : 'terminal_limit' }, response.status, cors);
     }
     throw new Error('terminal_failed');
-  } catch {
-    return authJson({ error: 'terminal_unavailable' }, 503, cors);
+  } catch (error) {
+    const failure = containerError(error, 'terminal_unavailable');
+    return authJson({ error: failure.error }, failure.status, cors);
   }
 }

@@ -1,3 +1,4 @@
+import { syncAccountEntitlement } from "../lib/container-service";
 import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
@@ -10,6 +11,7 @@ import { handleTerminalRequest } from "./terminal";
 export async function handleRequest(
   request: Request,
   env: Env,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -23,11 +25,11 @@ export async function handleRequest(
   }
 
   if (url.pathname === "/containers" || url.pathname.startsWith("/containers/")) {
-    return handleContainersRequest(request, env);
+    return handleContainersRequest(request, env, ctx);
   }
 
   if (url.pathname === "/subscription" || url.pathname.startsWith("/subscription/")) {
-    return handleSubscriptionRequest(request, env);
+    return handleSubscriptionRequest(request, env, (userId, entitlement) => syncAccountEntitlement(env, userId, entitlement));
   }
 
   if (url.pathname.startsWith("/auth/")) {

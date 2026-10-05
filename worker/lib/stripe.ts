@@ -6,16 +6,21 @@ export const PLAN_PRICES = {
 } as const;
 export type Plan = keyof typeof PLAN_PRICES;
 export function subscriptionPlan(subscription: StripeSubscription | null): Plan | null {
+  if (!subscription || subscription.items.has_more || subscription.items.data.length !== 1 || subscription.items.data[0].quantity !== 1) return null;
   return (Object.keys(PLAN_PRICES) as Plan[]).find((plan) =>
     subscription?.items.data.some((item) => item.price.id === PLAN_PRICES[plan]),
   ) || null;
 }
-export type BillingEnv = Env & { STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string };
+export type BillingEnv = Env & { STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string };
 export interface StripeSubscription {
   id: string;
   status: string;
   cancel_at_period_end?: boolean;
-  items: { data: { price: { id: string }; current_period_end?: number }[] };
+  cancel_at?: number | null;
+  pause_collection?: unknown;
+  schedule?: string | { id: string } | null;
+  customer?: string;
+  items: { has_more?: boolean; data: { id?: string; quantity?: number; price: { id: string }; current_period_start?: number; current_period_end?: number }[] };
 }
 export interface CheckoutSession {
   id: string;
@@ -26,7 +31,7 @@ export interface CheckoutSession {
   metadata?: Record<string, string>;
   client_reference_id: string;
   customer: string;
-  subscription?: StripeSubscription | null;
+  subscription?: StripeSubscription | string | null;
 }
 
 // Match Cubacadabra's versioned, form-encoded Stripe REST requests.
@@ -42,6 +47,7 @@ export async function stripeRequest<T>(
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   const response = await fetch(`https://api.stripe.com/v1${path}`, {
     method: params ? "POST" : "GET", headers, body: params?.toString(),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) {
     console.error("stripe_request_failed", path.split("?")[0], response.status);
@@ -60,8 +66,11 @@ export async function billingSubscription(env: BillingEnv, customer: string): Pr
     if (!page.has_more || !page.data.length) break;
     params.set("starting_after", page.data[page.data.length - 1].id);
   }
-  return subscriptions.find((subscription) =>
-    subscriptionPlan(subscription) !== null
-    && !["canceled", "incomplete_expired"].includes(subscription.status),
-  ) || null;
+  const knownPrices = new Set<string>(Object.values(PLAN_PRICES));
+  const candidates = subscriptions.filter((subscription) => subscription.items.data.some((item) =>
+    knownPrices.has(item.price.id))
+    && !["canceled", "incomplete_expired"].includes(subscription.status));
+  // Ambiguous duplicate live purchases never yield an arbitrarily selected plan.
+  if (candidates.length > 1) throw new Error("multiple_subscriptions");
+  return candidates[0] || null;
 }

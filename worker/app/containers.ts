@@ -1,49 +1,62 @@
-import { authCorsHeaders, authJson } from "./auth-core";
-import { ownedImage } from "./images";
-import { containerUser } from "./container-auth";
+import { authCorsHeaders, authJson } from './auth-core';
+import { ownedImage } from './images';
+import { containerUser } from './container-auth';
+import { resolveBillingState } from '../lib/entitlements';
+import { accountResponse, containerError, syncAccountEntitlement, type ContainerImageSelection } from '../lib/container-service';
+import { validContainerId } from '../../containers/container-account-core.js';
 
-// All authenticated users currently resolve to Builder. UserContainer enforces
-// its policy atomically; client-supplied plan/resource overrides are ignored.
-export async function handleContainersRequest(request: Request, env: Env): Promise<Response> {
+export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const cors = authCorsHeaders(request);
-  if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-  if (new URL(request.url).pathname !== "/containers") {
-    return authJson({ error: "not_found" }, 404, cors);
-  }
-  if (!["GET", "POST", "DELETE"].includes(request.method)) {
-    return authJson({ error: "method_not_allowed" }, 405, { ...cors, allow: "GET, POST, DELETE, OPTIONS" });
-  }
-  if (request.method !== "GET" && !request.headers.get("Origin") && !request.headers.has("Authorization")) {
-    return authJson({ error: "origin_required" }, 403, cors);
-  }
+  if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+  const url = new URL(request.url);
+  if (url.pathname !== '/containers') return authJson({ error: 'not_found' }, 404, cors);
+  if (!['GET', 'POST', 'DELETE'].includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, POST, DELETE, OPTIONS' });
+  if (request.method !== 'GET' && !request.headers.get('Origin') && !request.headers.has('Authorization')) return authJson({ error: 'origin_required' }, 403, cors);
+  const id = url.searchParams.get('id');
+  if ([...url.searchParams.keys()].some(key => key !== 'id' && key !== 'createdAt') || (id !== null && (!validContainerId(id) || url.searchParams.getAll('id').length !== 1))) return authJson({ error: 'invalid_container_id' }, 400, cors);
+  if (request.method !== 'DELETE' && url.searchParams.has('createdAt')) return authJson({ error: 'invalid_request' }, 400, cors);
+  if (url.searchParams.getAll('createdAt').length > 1) return authJson({ error: 'invalid_request' }, 400, cors);
+  if (request.method === 'POST' && id !== null) return authJson({ error: 'invalid_request' }, 400, cors);
   try {
     const user = await containerUser(env, request);
-    if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
-    if (!env.USER_CONTAINER) return authJson({ error: "containers_unavailable" }, 503, cors);
-    let selection: { imageKey: string; imageId: string; imageName: string } | undefined;
-    if (request.method === "POST" && request.body) {
+    if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    const billing = request.method === 'DELETE' ? null : await resolveBillingState(env, user.id);
+    const entitlement = billing?.entitlement ?? { plan: null, active: false, validUntil: null };
+    // Reject the first unpaid start before reserving quota or asking a machine to boot.
+    if (request.method === 'POST' && !entitlement.active) {
+      // Propagate an observed loss of payment to existing accounts, including
+      // open terminals, even if the signed webhook is delayed. Never-billed
+      // users still receive 402 without touching any container coordinator.
+      if (billing?.record) {
+        const revocation = syncAccountEntitlement(env, user.id, entitlement)
+          .catch(() => { console.error('containers_revocation_failed'); });
+        if (ctx) ctx.waitUntil(revocation);
+        else await revocation;
+      }
+      return authJson({ error: 'subscription_required' }, 402, cors);
+    }
+    let selection: ContainerImageSelection | undefined;
+    if (request.method === 'POST' && request.body) {
       const body = await request.json().catch(() => null) as { imageId?: unknown } | null;
-      if (!body || typeof body !== "object" || Array.isArray(body)) return authJson({ error: "invalid_request" }, 400, cors);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
       if (body.imageId !== undefined) {
-        if (typeof body.imageId !== "string") return authJson({ error: "invalid_request" }, 400, cors);
+        if (typeof body.imageId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);
         const image = await ownedImage(env, user.id, body.imageId);
-        if (!image) return authJson({ error: "image_not_found" }, 404, cors);
-        if (image.status !== "ready") return authJson({ error: "image_not_ready" }, 409, cors);
+        if (!image) return authJson({ error: 'image_not_found' }, 404, cors);
+        if (image.status !== 'ready') return authJson({ error: 'image_not_ready' }, 409, cors);
         selection = { imageKey: image.image_key, imageId: image.id, imageName: image.name };
       }
     }
-    // A single slot per account. Never accept a machine ID, size, lease, or image
-    // from the browser, and never pass session cookies to the container service.
-    const machine = env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(`user:${user.id}`));
-    const response = await machine.fetch(new Request("https://internal/container", { method: request.method, ...(selection ? { body: JSON.stringify(selection), headers: { "Content-Type": "application/json" } } : {}) }));
+    // Forward only the server-resolved image, never browser image keys or resources.
+    const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection);
     const data = await response.json() as { error?: string };
-    if (response.status === 409) return authJson({ error: data.error === "image_not_available" ? "image_not_available" : "container_limit_exceeded" }, 409, cors);
-    if (response.status === 429) return authJson({ error: "container_quota_exceeded" }, 429, cors);
-    if (!response.ok) throw new Error("machine_request_failed");
+    if ([400, 402, 409, 429].includes(response.status)) return authJson(data, response.status, cors);
+    if (!response.ok) throw new Error('machine_request_failed');
     return authJson(data, response.status, cors);
   } catch (error) {
-    console.error("containers_request_failed", error instanceof Error ? error.message : "unknown");
-    return authJson({ error: "containers_unavailable" }, 503, cors);
+    console.error('containers_request_failed', error instanceof Error ? error.message : 'unknown');
+    const failure = containerError(error, 'containers_unavailable');
+    return authJson({ error: failure.error }, failure.status, cors);
   }
 }

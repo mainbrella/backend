@@ -1,136 +1,126 @@
-import { authCorsHeaders, authJson, currentUser, readJSON } from "./auth-core";
-import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession, type StripeSubscription } from "../lib/stripe";
+import { authCorsHeaders, authJson, currentUser, readJSON, type StringHeaders } from "./auth-core";
+import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
+import { resolveBillingState, syncSubscriptionRecord, type BillingRecord, type BillingState } from "../lib/entitlements";
+import { PLAN_DETAILS } from "../../containers/plan-policy.js";
+import { PLAN_ORDER, portalSession, releaseScheduledChange, scheduleDowngrade, scheduledChange, scheduleID } from "../lib/billing-changes";
+import { handleSubscriptionWebhook, type EntitlementChanged } from "./subscription-webhook";
 
-interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
-
-async function syncSubscriptionRecord(env: BillingEnv, userId: string, subscription: StripeSubscription | null): Promise<void> {
-  const plan = subscriptionPlan(subscription);
-  const item = subscription?.items.data.find((item) => plan && item.price.id === PLAN_PRICES[plan]);
-  await env.DB.prepare(`UPDATE pro_billing SET plan = ?, stripe_subscription_id = ?,
-    subscription_status = ?, cancel_at_period_end = ?, current_period_end = ?,
-    synced_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`)
-    .bind(plan, subscription?.id || null, subscription?.status || null,
-      subscription?.cancel_at_period_end ? 1 : 0, item?.current_period_end ?? null, userId).run();
+function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_PRICES, value); }
+async function stateResponse(env: BillingEnv, state: BillingState, cors: StringHeaders): Promise<Response> {
+  const plan = subscriptionPlan(state.subscription);
+  return authJson({ subscription: state.subscription, plan, active: state.entitlement.active,
+    valid_until: state.entitlement.validUntil, pro: state.entitlement.active && (plan === "pro" || plan === "scale"),
+    configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
 }
 
-export async function handleSubscriptionRequest(request: Request, env: BillingEnv): Promise<Response> {
+export async function handleSubscriptionRequest(request: Request, env: BillingEnv, changed?: EntitlementChanged): Promise<Response> {
+  const path = new URL(request.url).pathname;
+  // Stripe delivers signed requests without a browser origin or login cookie.
+  if (path === "/subscription/webhook") return handleSubscriptionWebhook(request, env, changed);
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-  const path = new URL(request.url).pathname;
   if (path === "/subscription/config" && request.method === "GET") {
-    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
+    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS,
+      configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
   }
-  if (!(["/subscription", "/subscription/checkout", "/subscription/complete", "/subscription/portal"].includes(path))) {
+  if (!["/subscription", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume"].includes(path)) {
     return authJson({ error: "not_found" }, 404, cors);
   }
-  if (request.method !== (path === "/subscription" ? "GET" : "POST")) {
-    return authJson({ error: "method_not_allowed" }, 405, cors);
-  }
-  // Cookie-authenticated billing mutations must have a trusted browser origin.
-  if (request.method === "POST" && !request.headers.get("Origin")) {
-    return authJson({ error: "origin_required" }, 403, cors);
-  }
+  if (request.method !== (path === "/subscription" ? "GET" : "POST")) return authJson({ error: "method_not_allowed" }, 405, cors);
+  if (request.method === "POST" && !request.headers.get("Origin")) return authJson({ error: "origin_required" }, 403, cors);
+  let lock: { userId: string; token: string } | null = null;
   try {
-    let plan: Plan = "pro";
-    if (path === "/subscription/checkout") {
-      const body = await readJSON(request, 2000);
-      if (!body || typeof body.plan !== "string" || !Object.hasOwn(PLAN_PRICES, body.plan)) {
-        return authJson({ error: "invalid_plan" }, 400, cors);
-      }
-      plan = body.plan as Plan;
-      if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PUBLISHABLE_KEY) {
-        return authJson({ error: "billing_unavailable" }, 503, cors);
-      }
-    }
     const user = await currentUser(env, request);
-    if (!user && path === "/subscription/checkout") {
-      const origin = request.headers.get("Origin")!;
-      const session = await stripeRequest<CheckoutSession>(env, "/checkout/sessions", new URLSearchParams({
-        mode: "subscription", ui_mode: "custom",
-        "payment_method_types[0]": "card",
-        "metadata[plan]": plan, "subscription_data[metadata][plan]": plan,
-        "line_items[0][price]": PLAN_PRICES[plan], "line_items[0][quantity]": "1",
-        "metadata[checkout_type]": "guest", "subscription_data[metadata][checkout_type]": "guest",
-        return_url: `${origin}/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing`,
-      }));
-      if (!session.client_secret) throw new Error("billing_unavailable");
-      return authJson({ client_secret: session.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
-    }
-    if (!user && path === "/subscription/complete") {
-      const body = await readJSON(request, 2000);
-      if (typeof body?.session_id !== "string" || !/^cs_[A-Za-z0-9_]+$/.test(body.session_id)
-        || typeof body.client_secret !== "string" || !body.client_secret) {
-        return authJson({ error: "invalid_request" }, 400, cors);
-      }
-      const session = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${body.session_id}?expand[]=subscription`);
-      if (session.metadata?.checkout_type !== "guest" || session.client_secret !== body.client_secret) {
-        return authJson({ error: "checkout_not_owned" }, 403, cors);
-      }
-      if (session.status !== "complete" || !subscriptionPlan(session.subscription || null)) {
-        return authJson({ error: "checkout_not_complete" }, 409, cors);
-      }
-      return authJson({ plan: subscriptionPlan(session.subscription || null), active: ["active", "trialing"].includes(session.subscription?.status || "") }, 200, cors);
-    }
+    // Never sell an orphan subscription; every purchase belongs to this account.
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
-    if (!env.STRIPE_SECRET_KEY) return authJson({ error: "billing_unavailable" }, 503, cors);
+    const body = request.method === "POST" ? await readJSON(request, 2000) : null;
+    if (request.method === "POST" && !body) return authJson({ error: "invalid_request" }, 400, cors);
+    if (["/subscription/checkout", "/subscription/change"].includes(path) && !validPlan(body?.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
+    if (path === "/subscription/portal" && body?.plan !== undefined && !validPlan(body.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
+    if (["/subscription/change", "/subscription/cancel"].includes(path) && body?.confirm !== true) return authJson({ error: "confirmation_required" }, 400, cors);
+    if (!["/subscription", "/subscription/complete"].includes(path)) {
+      if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
+      const now = Date.now();
+      const token = crypto.randomUUID();
+      const acquired = await env.DB.prepare(`INSERT INTO billing_operation_locks (user_id, lock_token, expires_at)
+        VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET lock_token = excluded.lock_token,
+        expires_at = excluded.expires_at WHERE billing_operation_locks.expires_at <= ? RETURNING lock_token`)
+        .bind(user.id, token, now + 300_000, now).first<{ lock_token: string }>();
+      if (acquired?.lock_token !== token) return authJson({ error: "billing_operation_pending" }, 409, cors);
+      lock = { userId: user.id, token };
+    }
+    const origin = cors["access-control-allow-origin"] || "https://mainbrella.com";
+    const returnUrl = `${origin}/#pricing`;
     let record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
       .bind(user.id).first<BillingRecord>();
-    const origin = request.headers.get("Origin") || "https://mainbrella.com";
-    const returnUrl = `${origin}/#pricing`;
-    let completedSubscription: StripeSubscription | null = null;
     if (path === "/subscription/complete") {
-      const body = await readJSON(request, 2000);
       const id = body?.session_id;
-      if (typeof id !== "string" || !/^cs_[A-Za-z0-9_]+$/.test(id)) {
-        return authJson({ error: "invalid_request" }, 400, cors);
-      }
-      const session = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${id}?expand[]=subscription`);
-      if (session.client_reference_id !== user.id || session.customer !== record?.stripe_customer_id) {
-        return authJson({ error: "checkout_not_owned" }, 403, cors);
-      }
-      if (session.status !== "complete" || !subscriptionPlan(session.subscription || null)) {
-        return authJson({ error: "checkout_not_complete" }, 409, cors);
-      }
-      completedSubscription = session.subscription!;
+      if (typeof id !== "string" || !/^cs_[A-Za-z0-9_]+$/.test(id)) return authJson({ error: "invalid_request" }, 400, cors);
+      if (!record) return authJson({ error: "checkout_not_owned" }, 403, cors);
+      const session = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${encodeURIComponent(id)}`);
+      if (session.client_reference_id !== user.id || session.customer !== record.stripe_customer_id) return authJson({ error: "checkout_not_owned" }, 403, cors);
+      if (session.status !== "complete") return authJson({ error: "checkout_not_complete" }, 409, cors);
     }
     if (path === "/subscription" || path === "/subscription/complete") {
-      const subscription = completedSubscription || (record ? await billingSubscription(env, record.stripe_customer_id) : null);
-      if (record) await syncSubscriptionRecord(env, user.id, subscription);
-      const active = ["active", "trialing"].includes(subscription?.status || "");
-      const plan = subscriptionPlan(subscription);
-      return authJson({ subscription, plan, active, pro: active && plan === "pro", configured: true }, 200, cors);
+      const state = await resolveBillingState(env, user.id);
+      await changed?.(user.id, state.entitlement);
+      return stateResponse(env, state, cors);
     }
-    if (path === "/subscription/portal") {
+    if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
+    if (path !== "/subscription/checkout") {
       if (!record) return authJson({ error: "no_subscription" }, 409, cors);
-      const session = await stripeRequest<{ url: string }>(env, "/billing_portal/sessions", new URLSearchParams({
-        customer: record.stripe_customer_id, return_url: returnUrl,
-      }));
-      return authJson({ url: session.url }, 200, cors);
+      const state = await resolveBillingState(env, user.id);
+      const subscription = state.subscription;
+      if (path === "/subscription/portal") {
+        const target = body?.plan as Plan | undefined;
+        if (target) {
+          const currentPlan = subscriptionPlan(subscription);
+          if (!subscription || !currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
+          if (PLAN_ORDER[target] <= PLAN_ORDER[currentPlan]) return authJson({ error: "use_scheduled_change" }, 409, cors);
+          if (scheduleID(subscription)) return authJson({ error: "scheduled_change_exists" }, 409, cors);
+          if (subscription.cancel_at_period_end) return authJson({ error: "cancellation_pending" }, 409, cors);
+        }
+        return authJson(await portalSession(env, record.stripe_customer_id, returnUrl, subscription, target), 200, cors);
+      }
+      if (!subscription) return authJson({ error: "no_subscription" }, 409, cors);
+      if (path === "/subscription/change") {
+        const plan = body!.plan as Plan;
+        const currentPlan = subscriptionPlan(subscription);
+        if (!currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
+        if (subscription.cancel_at_period_end) return authJson({ error: "cancellation_pending" }, 409, cors);
+        if (PLAN_ORDER[plan] > PLAN_ORDER[currentPlan]) return authJson({ error: "use_upgrade_confirmation" }, 409, cors);
+        if (plan === currentPlan) await releaseScheduledChange(env, subscription, user.id);
+        else await scheduleDowngrade(env, subscription, user.id, plan, lock!.token);
+      } else if (path === "/subscription/cancel") {
+        await releaseScheduledChange(env, subscription, user.id);
+        await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`, new URLSearchParams({ cancel_at_period_end: "true" }));
+      } else {
+        if (!subscription.cancel_at_period_end) return authJson({ error: "not_canceling" }, 409, cors);
+        await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`, new URLSearchParams({ cancel_at_period_end: "false", cancel_at: "" }));
+      }
+      const updated = await resolveBillingState(env, user.id);
+      await changed?.(user.id, updated.entitlement);
+      return stateResponse(env, updated, cors);
     }
+    const plan = body!.plan as Plan;
     if (!record) {
       const params = new URLSearchParams({ "metadata[app_user_id]": user.id });
       if (user.email) params.set("email", user.email);
       if (user.name) params.set("name", user.name);
       const customer = await stripeRequest<{ id: string }>(env, "/customers", params, `mainbrella-customer-${user.id}`);
-      await env.DB.prepare("INSERT INTO pro_billing (user_id, stripe_customer_id) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING")
-        .bind(user.id, customer.id).run();
-      record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
-        .bind(user.id).first<BillingRecord>();
+      await env.DB.prepare("INSERT INTO pro_billing (user_id, stripe_customer_id) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING").bind(user.id, customer.id).run();
+      record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?").bind(user.id).first<BillingRecord>();
       if (!record) throw new Error("billing_unavailable");
     }
     const existingSubscription = await billingSubscription(env, record.stripe_customer_id);
     await syncSubscriptionRecord(env, user.id, existingSubscription);
-    if (existingSubscription) {
-      return authJson({ error: "subscription_exists" }, 409, cors);
-    }
+    if (existingSubscription) return authJson({ error: "subscription_exists" }, 409, cors);
     if (record.checkout_session_id) {
-      const existing = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${record.checkout_session_id}`);
+      const existing = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${encodeURIComponent(record.checkout_session_id)}`);
       if (existing.status === "open") {
-        if (existing.ui_mode === "custom" && existing.metadata?.plan === plan && existing.client_secret) {
-          return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
-        }
-        await stripeRequest(env, `/checkout/sessions/${existing.id}/expire`, new URLSearchParams());
+        if (existing.ui_mode === "custom" && existing.metadata?.plan === plan && existing.client_secret) return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
+        await stripeRequest(env, `/checkout/sessions/${encodeURIComponent(existing.id)}/expire`, new URLSearchParams());
       }
     }
     const params = new URLSearchParams({
@@ -144,11 +134,18 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     const session = await stripeRequest<CheckoutSession>(env, "/checkout/sessions", params,
       `mainbrella-inline-checkout-${user.id}-${plan}-${record.checkout_session_id || "initial"}`);
     if (!session.client_secret) throw new Error("billing_unavailable");
-    await env.DB.prepare("UPDATE pro_billing SET checkout_session_id = ? WHERE user_id = ?")
-      .bind(session.id, user.id).run();
+    await env.DB.prepare("UPDATE pro_billing SET checkout_session_id = ? WHERE user_id = ?").bind(session.id, user.id).run();
     return authJson({ client_secret: session.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
   } catch (error) {
-    console.error("subscription_request_failed", error instanceof Error ? error.message : "unknown");
+    const code = error instanceof Error ? error.message : "unknown";
+    console.error("subscription_request_failed", code);
+    if (code === "unsupported_schedule") return authJson({ error: "unsupported_schedule" }, 409, cors);
     return authJson({ error: "billing_unavailable" }, 503, cors);
+  } finally {
+    if (lock) {
+      try {
+        await env.DB.prepare("DELETE FROM billing_operation_locks WHERE user_id = ? AND lock_token = ?").bind(lock.userId, lock.token).run();
+      } catch { console.error("billing_lock_release_failed"); }
+    }
   }
 }

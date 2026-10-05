@@ -1,7 +1,7 @@
 # Container automation API
 
 Base URL: `https://api.mainbrella.com` (local API: `http://localhost:8787`).
-The dashboard and automation share the same account-owned container and allowance.
+The dashboard and automation share the same account-owned containers and allowance. A paid plan is required.
 
 ## Authentication
 
@@ -43,12 +43,12 @@ curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" "$API_URL/con
 # Start one small container. No request body is required.
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X POST "$API_URL/containers"
 
-# Obtain SSH access to run commands (requires local ssh and cloudflared).
+# Obtain SSH access to the ID returned by status (requires local ssh and cloudflared).
 # This response contains a secret-bearing command; store it privately.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X POST "$API_URL/containers/ssh"
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -H 'Content-Type: application/json' -d '{"id":"small"}' -X POST "$API_URL/containers/ssh"
 
-# Stop the account's container when finished.
-curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X DELETE "$API_URL/containers"
+# Stop only the selected container when finished.
+curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" -X DELETE "$API_URL/containers?id=small"
 ```
 
 Only run the operations needed for the task. The four examples are separate
@@ -60,16 +60,17 @@ for the authorized job's duration.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /containers` | 200: current container, effective plan, limits, and usage. Does not renew idle time. |
-| `POST /containers` | 200: starts the fixed Builder container and returns status after readiness. 409 if one is already running; 429 if monthly starts are exhausted. |
-| `DELETE /containers` | 200: stops the account's container and returns status. Safe if already stopped. Does not refund starts. |
-| `POST /containers/ssh` | 200: `{command, expiresAt, hostname}` for the running container. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
+| `GET /containers` | 200: current containers, effective paid plan, limits, and usage. Does not renew idle time. |
+| `POST /containers` | 200: reserves a start and boots a fixed lite container; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; 429 if monthly starts are exhausted. |
+| `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
+| `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
 
 Lifecycle response example (UTC timestamps and usage month):
 
 ```json
 {
   "plan": "builder",
+  "active": true,
   "containers": [{
     "id": "small",
     "name": "Small container",
@@ -79,7 +80,7 @@ Lifecycle response example (UTC timestamps and usage month):
     "expiresAt": "2026-10-05T13:00:00.000Z"
   }],
   "limits": {
-    "maxContainers": 1,
+    "maxContainers": 5,
     "maxStartsPerMonth": 10,
     "maxSessionMs": 3600000,
     "idleTimeoutMs": 600000
@@ -88,26 +89,70 @@ Lifecycle response example (UTC timestamps and usage month):
 }
 ```
 
-`containers` is empty when stopped. All logged-in users currently get Builder
-($5/month) limits, regardless of saved subscription or billing status. Database
-plan resolution is deferred. There is no client-selectable plan or resource size.
-The container uses `lite`: 1/16 vCPU, 256 MiB RAM, 2 GB ephemeral disk, with Node 24,
-bash, tmux, and outbound internet. The filesystem is lost when the container stops.
+`containers` is empty when stopped. During a concurrent launch, a reserved slot
+may appear with `status: "starting"`; terminal and SSH access require `running`.
+Unpaid status has `plan: null`, `active: false` and zero limits. An unpaid first
+start returns 402 without provisioning or consuming quota. If an existing billing
+record is now unpaid, an attempted start also triggers background revocation of
+that account's existing containers.
 
-The backend derives ownership from the authenticated user and serializes starts
-inside that account's private Durable Object. Concurrent launches produce one
-success and a 409 for the second request. Request bodies cannot override ownership,
-plan, machine ID, image, size, or deadlines. Arbitrary `/containers/<id>` routes
-are rejected. UI and API calls, across all sessions of the same account, share
-one slot and one monthly quota.
+| Plan | USD/month | Concurrent containers | Starts/UTC month | Hard limit | Idle timeout |
+| --- | ---: | ---: | ---: | --- | --- |
+| Builder | $5 | 5 | 10 | 1 hour | 10 minutes |
+| Pro | $180 | 100 | 1,000 | 24 hours | 30 minutes |
+| Scale | $999 | 500 | 10,000 | 72 hours | 60 minutes |
 
-A start reserves one of ten starts in the UTC calendar month before platform
-startup. Failed starts still consume a reservation. Repeated POSTs while running
-return 409 without using another start. Stopping early does not refund a start.
-Usage persists across stops and controller restarts; the allowance resets at the
-next UTC month. The one-hour hard deadline never extends. Polling and SSH token
-issuance do not keep the container alive; terminal activity can renew the
-10-minute idle deadline only within the hard deadline.
+All plans use `lite`: 1/16 vCPU, 256 MiB RAM, 2 GB ephemeral disk, Node 24, bash,
+tmux and outbound internet. All include SSH and browser terminals. A container permits four concurrent
+terminal connections (browser/SSH combined). An account permits ten live SSH
+access tokens, each lasting at most 15 minutes or the machine deadline. Snapshots,
+resume after stop, custom resources, SDKs, teams, advanced logs/audits and priority
+capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
+The filesystem is lost when a container stops.
+
+Ownership and resources come from the authenticated account and server policy.
+Request bodies and client headers cannot override the owner, plan, image, size,
+slots or deadlines. IDs returned by status select only the authenticated account's
+slots. Arbitrary `/containers/<id>` routes are rejected. All sessions of the same
+account share the same concurrency and UTC monthly quota.
+
+The account serializes reservations before booting, so concurrent launches never
+exceed its cap. Readiness can proceed in parallel. Failed starts still consume a
+reservation; stopping early does not refund usage. Quota persists across stops,
+restarts, upgrades, downgrades, cancellation and resubscription, and resets at the
+next UTC month. At capacity, additional POSTs return 409 without spending usage.
+
+A successful payment for the current recognized plan period is required. Trials,
+failed payments, expired periods, paused/canceled subscriptions and stale database
+plan fields grant no access. Stripe outages return 503 instead of guessing a plan.
+DELETE cleanup remains available during billing outages. Hard deadlines are fixed
+at creation and capped by the original paid period; upgrades and renewals never
+lengthen existing sessions. Start a new container after that deadline.
+Downgrades/cancellation take effect at the end of the paid period. On an effective
+downgrade, excess machines stop (oldest unexpired machines within the cap remain) and deadlines
+are clamped; loss of paid access stops all machines. Polling/token issuance do not
+renew idle time; terminal activity renews only the idle deadline.
+
+## Browser billing endpoints
+
+Billing mutations require the login cookie and a trusted browser Origin.
+Bearer automation credentials do not authorize purchases or plan changes.
+
+| Method and path | Result |
+| --- | --- |
+| `GET /subscription/config` | Public server plan definitions and billing availability. |
+| `GET /subscription` | Current Stripe subscription, paid `active`, `plan`, `valid_until` (Unix ms), `scheduled_plan`, and `scheduled_change_at` (Unix seconds). |
+| `POST /subscription/checkout` with `{"plan":"builder"}` | Creates/reuses account-owned embedded checkout; rejects an existing live subscription. |
+| `POST /subscription/complete` with `{"session_id":"cs_..."}` | Verifies owned checkout completion and current paid entitlement. |
+| `POST /subscription/portal` with `{"plan":"pro"}` | Stripe confirmation URL for an upgrade with immediate invoiced proration. |
+| `POST /subscription/portal` with `{}` | Payment methods and invoice history portal URL. |
+| `POST /subscription/change` with `{"plan":"builder","confirm":true}` | Schedules a downgrade for renewal. Select the current plan to remove a scheduled downgrade. |
+| `POST /subscription/cancel` with `{"confirm":true}` | Cancels at paid period end and removes a pending downgrade. |
+| `POST /subscription/resume` with `{}` | Resumes a subscription pending period-end cancellation. |
+| `POST /subscription/webhook` | Stripe signature authenticated; private integration for live reconciliation. |
+
+Use the web billing controls for explicit user confirmation. Never perform a
+purchase, plan change or cancellation as part of an ordinary container job.
 
 ## Errors and retry behavior
 
@@ -115,15 +160,18 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 
 | Status | Code | Action |
 | --- | --- | --- |
+| 400 | `invalid_container_id` / `container_id_required` | Select an ID returned by GET; supply it when multiple containers exist. |
 | 401 | `not_authenticated` | Session missing, malformed, expired, or revoked. Obtain a fresh login credential. |
+| 402 | `subscription_required` | No paid container access. Use the web billing controls to subscribe or resolve payment; do not retry creation. |
 | 403 | `origin_required` / `origin_not_allowed` | Cookie mutations need a trusted Origin; Bearer requests may omit it. Supplied Origins must be trusted. |
 | 404 | `not_found` | Use the exact documented route; no arbitrary container IDs. |
 | 405 | `method_not_allowed` | Use the documented HTTP method. |
-| 409 | `container_limit_exceeded` | Builder's one slot is occupied. GET status and reuse it, or stop it only if the task authorizes replacement. |
+| 409 | `container_limit_exceeded` | The plan's concurrency cap is occupied. GET status and reuse it, or stop it only if the task authorizes replacement. |
 | 409 | `container_not_running` | SSH needs a live container; GET status before deciding whether to start. |
-| 429 | `container_quota_exceeded` | Ten starts reserved this UTC month. Wait for next month; do not retry or create another account to evade the limit. |
+| 429 | `container_quota_exceeded` | The plan's starts are exhausted this UTC month. Wait for next month; do not retry or create another account to evade the limit. |
+| 429 | `terminal_limit` | Four terminal connections are attached to this container. Close or reuse an existing connection. |
 | 429 | `ssh_token_limit` | Ten live SSH access tokens for this account. Reuse existing access or wait for expiration. |
-| 503 | `containers_unavailable` / `ssh_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
+| 503 | `billing_unavailable` / `containers_unavailable` / `ssh_unavailable` | Service unavailable. Reconcile with GET before any further launch. |
 
 POST creation is not idempotent. If a request times out or returns 503, GET status
 before doing anything else: startup may have succeeded, or a failed startup may

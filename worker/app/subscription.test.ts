@@ -1,246 +1,229 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { handleSubscriptionRequest } from "./subscription";
-import { PRO_PRICE_ID, PLAN_PRICES, billingSubscription, type BillingEnv } from "../lib/stripe";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { handleSubscriptionRequest } from './subscription';
+import { PLAN_PRICES, billingSubscription, subscriptionPlan, type Plan, type BillingEnv } from '../lib/stripe';
+import { billingFixture, billingRequest, paidSubscription, TEST_CUSTOMER, TEST_USER } from './billing-test-helpers';
 
-function request(path = "/subscription/checkout", origin: string | null = "https://mainbrella.com", method = "POST", body: unknown = { plan: "pro" }, authenticated = false) {
-  return new Request(`https://api.mainbrella.com${path}`, {
-    method, headers: { ...(origin ? { Origin: origin } : {}), ...(authenticated ? { Cookie: "mainbrella_session=test_token" } : {}) },
-    body: method === "POST" ? JSON.stringify(body) : undefined,
-  });
-}
+const post = (path: string, body: unknown = {}) => billingRequest(path, body);
 
-const env = {
-  STRIPE_PUBLISHABLE_KEY: "pk_test_example",
-  STRIPE_SECRET_KEY: "sk_test_example",
-  DB: { prepare() { throw new Error("Guest checkout must not require account storage"); } },
-} as unknown as BillingEnv;
+test('every account billing operation requires authentication, including checkout and completion', async t => {
+  const f = await billingFixture(t);
+  for (const [path, body] of [['/subscription', undefined], ['/subscription/checkout', { plan: 'pro' }], ['/subscription/complete', { session_id: 'cs_old', client_secret: 'anything' }],
+    ['/subscription/portal', {}], ['/subscription/change', { plan: 'builder', confirm: true }], ['/subscription/cancel', { confirm: true }], ['/subscription/resume', {}]] as const) {
+    assert.equal((await handleSubscriptionRequest(billingRequest(path, body, false), f.env)).status, 401);
+  }
+  assert.equal(f.calls.length, 0);
+});
 
-test("guest checkout uses inline Pro checkout without an account or pre-created customer", async (t) => {
-  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
-    assert.equal(input, "https://api.stripe.com/v1/checkout/sessions");
-    assert.equal(init?.method, "POST");
-    const params = new URLSearchParams(String(init?.body));
-    assert.equal(params.get("mode"), "subscription");
-    assert.equal(params.get("line_items[0][price]"), PRO_PRICE_ID);
-    assert.equal(params.get("line_items[0][quantity]"), "1");
-    assert.equal(params.has("customer"), false);
-    assert.equal(params.has("client_reference_id"), false);
-    assert.equal(params.get("ui_mode"), "custom");
-    assert.equal(params.get("payment_method_types[0]"), "card");
-    assert.equal(params.has("success_url"), false);
-    assert.equal(params.has("cancel_url"), false);
-    assert.equal(params.get("return_url"), "https://mainbrella.com/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing");
-    return Response.json({ id: "cs_test_guest", client_secret: "cs_test_guest_secret" });
-  });
-  const response = await handleSubscriptionRequest(request(), env);
+test('billing mutations reject missing/untrusted origins, unsupported methods and malformed plans before Stripe', async t => {
+  const f = await billingFixture(t);
+  for (const origin of [null, 'https://untrusted.example']) assert.equal((await handleSubscriptionRequest(billingRequest('/subscription/checkout', { plan: 'pro' }, true, origin), f.env)).status, 403);
+  assert.equal((await handleSubscriptionRequest(billingRequest('/subscription/checkout'), f.env)).status, 405);
+  for (const body of [{}, { plan: 'toString' }, { plan: '__proto__' }, { plan: 'enterprise' }, { plan: 1 }, { price_id: PLAN_PRICES.pro }]) {
+    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', body), f.env)).status, 400);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('configuration publishes the authoritative plan policy without requiring authentication', async t => {
+  const f = await billingFixture(t);
+  const response = await handleSubscriptionRequest(billingRequest('/subscription/config', undefined, false), f.env);
+  const body = await response.json() as any;
+  assert.equal(body.plans.builder.limits.maxStartsPerMonth, 10);
+  assert.equal(body.plans.pro.limits.maxContainers, 100);
+  assert.equal(body.plans.scale.limits.maxSessionMs, 72 * 3600000);
+  assert.equal(body.plans.builder.price, 5);
+  assert.equal(body.plans.pro.features.snapshots, false);
+  assert.equal(f.calls.length, 0);
+});
+
+test('an unpaid account has no plan even when Stripe configuration is absent', async t => {
+  const f = await billingFixture(t, 'builder', false);
+  const response = await handleSubscriptionRequest(billingRequest(), { ...f.env, STRIPE_SECRET_KEY: undefined } as unknown as BillingEnv);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { client_secret: "cs_test_guest_secret", publishable_key: "pk_test_example" });
+  const body = await response.json() as any;
+  assert.equal(body.plan, null); assert.equal(body.active, false); assert.equal(body.valid_until, null);
+  assert.equal(f.calls.length, 0);
 });
 
-test("guest checkout keeps origin and method restrictions", async (t) => {
-  const stripe = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected Stripe request"); });
-  assert.equal((await handleSubscriptionRequest(request(undefined, null), env)).status, 403);
-  assert.equal((await handleSubscriptionRequest(request(undefined, "https://untrusted.example"), env)).status, 403);
-  assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "GET"), env)).status, 405);
-  assert.equal(stripe.mock.callCount(), 0);
-});
-
-test("subscription status and portal still require authentication", async () => {
-  for (const path of ["/subscription", "/subscription/portal"]) {
-    const response = await handleSubscriptionRequest(request(path, undefined, path === "/subscription" ? "GET" : "POST"), env);
-    assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), { error: "not_authenticated" });
-  }
-});
-
-test("guest checkout handles unavailable billing and missing client secrets", async (t) => {
-  t.mock.method(console, "error", () => {});
-  const stripe = t.mock.method(globalThis, "fetch", async () => Response.json({ id: "cs_test_guest", url: null }));
-  const unavailable = await handleSubscriptionRequest(request(), { DB: env.DB } as BillingEnv);
-  assert.equal(unavailable.status, 503);
-  assert.equal(stripe.mock.callCount(), 0);
-  const missingURL = await handleSubscriptionRequest(request(), env);
-  assert.equal(missingURL.status, 503);
-  assert.deepEqual(await missingURL.json(), { error: "billing_unavailable" });
-});
-
-for (const [plan, price] of Object.entries(PLAN_PRICES)) {
-  test(`guest checkout selects ${plan} from the server allowlist`, async (t) => {
-    t.mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
-      const params = new URLSearchParams(String(init?.body));
-      assert.equal(params.get("line_items[0][price]"), price);
-      assert.equal(params.get("metadata[plan]"), plan);
-      assert.equal(params.get("subscription_data[metadata][plan]"), plan);
-      return Response.json({ id: "cs_test_guest", client_secret: "cs_test_secret" });
-    });
-    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan }), env)).status, 200);
+for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
+  test(`authenticated checkout selects only the fixed ${plan} price and quantity one`, async t => {
+    const f = await billingFixture(t, plan, false); f.state.subscriptions = [];
+    const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env);
+    assert.equal(response.status, 200);
+    const customer = f.calls.find(c => c.url.pathname === '/v1/customers')!;
+    assert.equal(customer.params.get('metadata[app_user_id]'), TEST_USER);
+    const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
+    assert.equal(checkout.params.get('line_items[0][price]'), PLAN_PRICES[plan]);
+    assert.equal(checkout.params.get('line_items[0][quantity]'), '1');
+    assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
+    assert.equal(checkout.params.get('client_reference_id'), TEST_USER);
+    assert.equal(checkout.params.has('subscription_data[trial_period_days]'), false);
+    assert.equal((f.sqlite.prepare('SELECT checkout_session_id FROM pro_billing').get() as any).checkout_session_id, 'cs_new');
+  });
+  test(`verified ${plan} subscription is refreshed from live invoices and persisted`, async t => {
+    const f = await billingFixture(t, plan);
+    const response = await handleSubscriptionRequest(billingRequest(), f.env);
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    assert.equal(body.plan, plan); assert.equal(body.active, true);
+    assert.ok(body.valid_until > Date.now());
+    const record = f.sqlite.prepare('SELECT * FROM pro_billing').get() as any;
+    assert.equal(record.plan, plan); assert.equal(record.subscription_status, 'active'); assert.equal(record.stripe_subscription_id, 'sub_paid');
   });
 }
 
-test("invalid plans cannot reach Stripe, including prototype properties and price injection", async (t) => {
-  const stripe = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected request"); });
-  for (const body of [{}, { plan: "enterprise" }, { plan: "toString" }, { plan: "__proto__" }, { price_id: PRO_PRICE_ID }, { plan: 5 }]) {
-    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", body), env)).status, 400);
+test('checkout reuses an open matching session and expires a session for a different plan', async t => {
+  const f = await billingFixture(t); f.state.subscriptions = [];
+  const reused = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'builder' }), f.env);
+  assert.deepEqual(await reused.json(), { client_secret: 'cs_old_secret', publishable_key: 'pk_test' });
+  const changed = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'scale' }), f.env);
+  assert.equal(changed.status, 200);
+  assert.ok(f.calls.some(c => c.url.pathname.endsWith('/cs_old/expire')));
+  assert.equal(f.calls.at(-1)?.params.get('line_items[0][price]'), PLAN_PRICES.scale);
+});
+
+test('live active, trialing, past_due, and unpaid subscriptions block duplicate purchases', async t => {
+  const f = await billingFixture(t);
+  for (const status of ['active', 'trialing', 'past_due', 'unpaid', 'paused', 'incomplete']) {
+    f.state.subscriptions[0].status = status;
+    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'pro' }), f.env)).status, 409);
   }
-  assert.equal(stripe.mock.callCount(), 0);
+  assert.ok(f.calls.every(c => c.url.pathname === '/v1/subscriptions'));
 });
 
-test("inline checkout requires both Stripe keys", async (t) => {
-  const stripe = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected request"); });
-  const response = await handleSubscriptionRequest(request(), { ...env, STRIPE_PUBLISHABLE_KEY: undefined } as unknown as BillingEnv);
-  assert.equal(response.status, 503);
-  assert.equal(stripe.mock.callCount(), 0);
+test('checkout completion verifies account ownership then reconciles live payment, not the session snapshot', async t => {
+  const f = await billingFixture(t);
+  f.state.checkout.status = 'complete';
+  f.state.checkout.client_reference_id = 'someone_else';
+  assert.equal((await handleSubscriptionRequest(post('/subscription/complete', { session_id: 'cs_old' }), f.env)).status, 403);
+  f.state.checkout.client_reference_id = TEST_USER;
+  f.state.checkout.customer = 'cus_someone_else';
+  assert.equal((await handleSubscriptionRequest(post('/subscription/complete', { session_id: 'cs_old' }), f.env)).status, 403);
+  f.state.checkout.customer = TEST_CUSTOMER;
+  f.state.checkout.status = 'open';
+  assert.equal((await handleSubscriptionRequest(post('/subscription/complete', { session_id: 'cs_old' }), f.env)).status, 409);
+  f.state.checkout.status = 'complete'; f.state.subscriptions[0].status = 'past_due';
+  const response = await handleSubscriptionRequest(post('/subscription/complete', { session_id: 'cs_old' }), f.env);
+  assert.equal(response.status, 200); assert.equal((await response.json() as any).active, false);
 });
 
-test("guest completion verifies ownership and actual subscription status", async (t) => {
-  let status = "complete";
-  let price = PLAN_PRICES.builder as string;
-  t.mock.method(globalThis, "fetch", async () => Response.json({
-    id: "cs_test_guest", status, client_secret: "cs_test_secret", metadata: { checkout_type: "guest" },
-    subscription: { id: "sub_test", status: "active", items: { data: [{ price: { id: price } }] } },
-  }));
-  const complete = (secret: string) => handleSubscriptionRequest(request("/subscription/complete", undefined, "POST", {
-    session_id: "cs_test_guest", client_secret: secret,
-  }), env);
-  assert.equal((await complete("wrong_secret")).status, 403);
-  status = "open";
-  assert.equal((await complete("cs_test_secret")).status, 409);
-  status = "complete";
-  price = "price_unrelated";
-  assert.equal((await complete("cs_test_secret")).status, 409);
-  price = PLAN_PRICES.builder;
-  const result = await complete("cs_test_secret");
-  assert.equal(result.status, 200);
-  assert.deepEqual(await result.json(), { plan: "builder", active: true });
+test('plan upgrades use hosted Stripe confirmation with invoiced prorations and locked target price', async t => {
+  const f = await billingFixture(t, 'builder');
+  const response = await handleSubscriptionRequest(post('/subscription/portal', { plan: 'pro' }), f.env);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { url: 'https://billing.stripe.com/session_test' });
+  const config = f.calls.find(c => c.url.pathname === '/v1/billing_portal/configurations')!;
+  assert.equal(config.params.get('features[subscription_update][proration_behavior]'), 'always_invoice');
+  assert.equal(config.params.get('features[subscription_update][default_allowed_updates][0]'), 'price');
+  assert.equal(config.params.get('features[subscription_update][products][0][prices][0]'), PLAN_PRICES.pro);
+  assert.equal(config.params.has('features[subscription_update][products][0][prices][1]'), false);
+  const session = f.calls.at(-1)!;
+  assert.equal(session.params.get('flow_data[type]'), 'subscription_update_confirm');
+  assert.equal(session.params.get('flow_data[subscription_update_confirm][items][0][id]'), 'si_paid');
+  assert.equal(session.params.get('flow_data[subscription_update_confirm][items][0][quantity]'), '1');
+  assert.equal(f.state.subscriptions[0].items.data[0].price.id, PLAN_PRICES.builder);
 });
 
-function accountEnv(checkout = "cs_old", writes: { sql: string; values: unknown[] }[] = []) {
-  return {
-    ...env,
-    DB: {
-      prepare(sql: string) {
-        let values: unknown[] = [];
-        return {
-          bind(...args: unknown[]) { values = args; return this; },
-          async first() { return sql.includes("FROM sessions") ? { id: "user_test", email: "user@example.com", name: "Test" } : { stripe_customer_id: "cus_test", checkout_session_id: checkout }; },
-          async run() { writes.push({ sql, values }); return {}; },
-        };
-      },
-    },
-  } as unknown as BillingEnv;
-}
-
-test("changing plans expires the prior session and creates checkout for the selected price", async (t) => {
-  const calls: string[] = [];
-  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
-    calls.push(url);
-    if (url.includes("/subscriptions?")) return Response.json({ data: [], has_more: false });
-    if (url.endsWith("/cs_old")) return Response.json({ id: "cs_old", status: "open", ui_mode: "custom", metadata: { plan: "pro" }, client_secret: "cs_old_secret" });
-    if (url.endsWith("/cs_old/expire")) return Response.json({ id: "cs_old", status: "expired" });
-    assert.ok(url.endsWith("/checkout/sessions"));
-    const params = new URLSearchParams(String(init?.body));
-    assert.equal(params.get("line_items[0][price]"), PLAN_PRICES.scale);
-    assert.equal(params.get("customer"), "cus_test");
-    assert.ok((init?.headers as Record<string, string>)["Idempotency-Key"].includes("-scale-"));
-    return Response.json({ id: "cs_new", client_secret: "cs_new_secret" });
-  });
-  const result = await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan: "scale" }, true), accountEnv());
-  assert.equal(result.status, 200);
-  assert.deepEqual(await result.json(), { client_secret: "cs_new_secret", publishable_key: "pk_test_example" });
-  assert.equal(calls.length, 4);
+test('payment recovery portal cannot change plan or cancel outside the app policy', async t => {
+  const f = await billingFixture(t); f.state.subscriptions[0].status = 'past_due';
+  assert.equal((await handleSubscriptionRequest(post('/subscription/portal'), f.env)).status, 200);
+  const config = f.calls.find(c => c.url.pathname === '/v1/billing_portal/configurations')!;
+  assert.equal(config.params.get('features[subscription_update][enabled]'), 'false');
+  assert.equal(config.params.get('features[subscription_cancel][enabled]'), 'false');
+  assert.equal((await handleSubscriptionRequest(post('/subscription/portal', { plan: 'pro' }), f.env)).status, 402);
 });
 
-for (const [plan, price] of Object.entries(PLAN_PRICES)) {
-  test(`account completion persists verified ${plan} subscription without a second Stripe lookup`, async (t) => {
-    const writes: { sql: string; values: unknown[] }[] = [];
-    const subscription = { id: "sub_paid", status: "active", cancel_at_period_end: false,
-      items: { data: [{ price: { id: price }, current_period_end: 1800000000 }] } };
-    const stripe = t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
-      assert.ok(String(input).includes("/checkout/sessions/cs_paid?"));
-      return Response.json({ id: "cs_paid", status: "complete", customer: "cus_test",
-        client_reference_id: "user_test", subscription });
-    });
-    const result = await handleSubscriptionRequest(request("/subscription/complete", undefined, "POST",
-      { session_id: "cs_paid" }, true), accountEnv("cs_paid", writes));
-    assert.equal(result.status, 200);
-    const payload = await result.json() as { plan: string; active: boolean };
-    assert.equal(payload.plan, plan);
-    assert.equal(payload.active, true);
-    assert.equal(stripe.mock.callCount(), 1);
-    assert.equal(writes.length, 1);
-    assert.match(writes[0].sql, /UPDATE pro_billing SET plan/);
-    assert.deepEqual(writes[0].values, [plan, "sub_paid", "active", 0, 1800000000, "user_test"]);
-  });
-}
-
-test("account completion rejects unowned and incomplete sessions without writing billing details", async (t) => {
-  const writes: { sql: string; values: unknown[] }[] = [];
-  let owner = "another_user";
-  let status = "complete";
-  t.mock.method(globalThis, "fetch", async () => Response.json({
-    id: "cs_paid", status, customer: "cus_test", client_reference_id: owner,
-    subscription: { id: "sub_paid", status: "active", items: { data: [{ price: { id: PRO_PRICE_ID } }] } },
-  }));
-  const complete = () => handleSubscriptionRequest(request("/subscription/complete", undefined, "POST",
-    { session_id: "cs_paid" }, true), accountEnv("cs_paid", writes));
-  assert.equal((await complete()).status, 403);
-  owner = "user_test";
-  status = "open";
-  assert.equal((await complete()).status, 409);
-  assert.equal(writes.length, 0);
+test('downgrades keep the paid plan until period end and can be replaced, withdrawn, and scheduled again', async t => {
+  const f = await billingFixture(t, 'scale');
+  const periodEnd = f.state.subscriptions[0].items.data[0].current_period_end;
+  assert.equal((await handleSubscriptionRequest(post('/subscription/change', { plan: 'pro' }), f.env)).status, 400);
+  const first = await handleSubscriptionRequest(post('/subscription/change', { plan: 'pro', confirm: true }), f.env);
+  assert.equal(first.status, 200);
+  const body = await first.json() as any;
+  assert.equal(body.plan, 'scale'); assert.equal(body.active, true); assert.equal(body.scheduled_plan, 'pro'); assert.equal(body.scheduled_change_at, periodEnd);
+  const write = f.calls.find(c => c.params.has('phases[1][items][0][price]'))!;
+  assert.equal(write.params.get('proration_behavior'), 'none');
+  assert.equal(write.params.get('phases[0][end_date]'), String(periodEnd));
+  assert.equal(write.params.get('phases[1][start_date]'), String(periodEnd));
+  assert.equal(write.params.get('phases[0][items][0][price]'), PLAN_PRICES.scale);
+  assert.equal(write.params.get('phases[1][items][0][price]'), PLAN_PRICES.pro);
+  assert.equal(write.params.get('phases[1][iterations]'), '1');
+  const second = await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env);
+  assert.equal((await second.json() as any).scheduled_plan, 'builder');
+  const withdrew = await handleSubscriptionRequest(post('/subscription/change', { plan: 'scale', confirm: true }), f.env);
+  assert.equal((await withdrew.json() as any).scheduled_plan, null);
+  const again = await handleSubscriptionRequest(post('/subscription/change', { plan: 'pro', confirm: true }), f.env);
+  assert.equal(again.status, 200); assert.equal(f.state.schedules.size, 2);
+  const creates = f.calls.filter(c => c.url.pathname === '/v1/subscription_schedules');
+  assert.notEqual((creates[0].init!.headers as any)['Idempotency-Key'], (creates[1].init!.headers as any)['Idempotency-Key']);
 });
 
-test("status refresh backfills plans, records payment problems and cancellation, and clears ended subscriptions", async (t) => {
-  const writes: { sql: string; values: unknown[] }[] = [];
-  let price: string = PLAN_PRICES.builder;
-  let status = "active";
-  let cancel = false;
-  t.mock.method(globalThis, "fetch", async () => Response.json({ data: [
-    { id: "sub_test", status, cancel_at_period_end: cancel,
-      items: { data: [{ price: { id: price }, current_period_end: 1800000000 }] } },
-  ], has_more: false }));
-  const refresh = () => handleSubscriptionRequest(request("/subscription", undefined, "GET", undefined, true), accountEnv("cs_old", writes));
-  assert.equal((await refresh()).status, 200);
-  assert.deepEqual(writes.at(-1)?.values, ["builder", "sub_test", "active", 0, 1800000000, "user_test"]);
-  price = PLAN_PRICES.scale;
-  status = "past_due";
-  cancel = true;
-  const changed = await refresh();
-  assert.equal((await changed.json() as { active: boolean }).active, false);
-  assert.deepEqual(writes.at(-1)?.values, ["scale", "sub_test", "past_due", 1, 1800000000, "user_test"]);
-  status = "canceled";
-  assert.equal((await refresh()).status, 200);
-  assert.deepEqual(writes.at(-1)?.values, [null, null, null, 0, null, "user_test"]);
+test('canceling a scheduled downgrade releases phases and cancels at paid period end; resume restores renewal', async t => {
+  const f = await billingFixture(t, 'pro');
+  await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env);
+  assert.equal((await handleSubscriptionRequest(post('/subscription/cancel'), f.env)).status, 400);
+  const canceled = await handleSubscriptionRequest(post('/subscription/cancel', { confirm: true }), f.env);
+  assert.equal(canceled.status, 200);
+  const body = await canceled.json() as any;
+  assert.equal(body.subscription.cancel_at_period_end, true); assert.equal(body.active, true); assert.equal(body.scheduled_plan, null);
+  assert.ok(f.calls.some(c => c.url.pathname.endsWith('/release')));
+  assert.ok(f.calls.every(c => !c.url.pathname.endsWith('/cancel')));
+  assert.equal((await handleSubscriptionRequest(post('/subscription/portal', { plan: 'scale' }), f.env)).status, 409);
+  const resumed = await handleSubscriptionRequest(post('/subscription/resume'), f.env);
+  assert.equal((await resumed.json() as any).subscription.cancel_at_period_end, false);
+  assert.equal((await handleSubscriptionRequest(post('/subscription/resume'), f.env)).status, 409);
 });
 
-test("Stripe failures preserve the last saved subscription", async (t) => {
-  const writes: { sql: string; values: unknown[] }[] = [];
-  t.mock.method(console, "error", () => {});
-  t.mock.method(globalThis, "fetch", async () => new Response("unavailable", { status: 503 }));
-  assert.equal((await handleSubscriptionRequest(request("/subscription", undefined, "GET", undefined, true), accountEnv("cs_old", writes))).status, 503);
-  assert.equal(writes.length, 0);
+test('an interrupted schedule conversion can be safely recovered for retry or cancellation', async t => {
+  const f = await billingFixture(t, 'scale');
+  t.mock.method(console, 'error', () => {});
+  f.state.override = (url, init) => url.pathname.startsWith('/v1/subscription_schedules/') && init?.method === 'POST' ? new Response('failure', { status: 500 }) : undefined;
+  assert.equal((await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env)).status, 503);
+  assert.equal(f.state.schedules.size, 1); assert.equal(f.state.schedules.values().next().value!.metadata.app_user_id, undefined);
+  f.state.override = null;
+  assert.equal((await handleSubscriptionRequest(post('/subscription/change', { plan: 'pro', confirm: true }), f.env)).status, 200);
+  assert.equal(f.state.schedules.size, 1);
+  assert.equal((await handleSubscriptionRequest(post('/subscription/cancel', { confirm: true }), f.env)).status, 200);
 });
 
-test("existing Builder or Scale subscriptions block duplicate purchases", async (t) => {
-  let price: string = PLAN_PRICES.builder;
-  const stripe = t.mock.method(globalThis, "fetch", async () => Response.json({ data: [
-    { id: "sub_test", status: "active", items: { data: [{ price: { id: price } }] } },
-  ], has_more: false }));
-  for (price of [PLAN_PRICES.builder, PLAN_PRICES.scale]) {
-    assert.equal((await handleSubscriptionRequest(request(undefined, undefined, "POST", { plan: "pro" }, true), accountEnv())).status, 409);
-  }
-  assert.equal(stripe.mock.callCount(), 2);
+test('foreign or ambiguous schedules are never changed or released', async t => {
+  const f = await billingFixture(t, 'scale');
+  f.state.subscriptions[0].schedule = 'sub_sched_foreign';
+  f.state.schedules.set('sub_sched_foreign', { id: 'sub_sched_foreign', status: 'active', metadata: { app_user_id: 'someone_else' }, phases: [] });
+  t.mock.method(console, 'error', () => {});
+  assert.equal((await handleSubscriptionRequest(post('/subscription/cancel', { confirm: true }), f.env)).status, 409);
+  assert.ok(f.calls.every(c => !c.url.pathname.endsWith('/release')));
 });
 
-test("subscription discovery searches older pages and ignores canceled plans", async (t) => {
+test('competing checkout plans serialize so they cannot create duplicate subscriptions', async t => {
+  const f = await billingFixture(t); f.state.subscriptions = [];
+  let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  f.state.override = async url => { if (url.pathname === '/v1/subscriptions') { entered(); await pending; } return undefined; };
+  const first = handleSubscriptionRequest(post('/subscription/checkout', { plan: 'pro' }), f.env);
+  await started;
+  const competing = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'scale' }), f.env);
+  assert.equal(competing.status, 409); assert.deepEqual(await competing.json(), { error: 'billing_operation_pending' });
+  release(); assert.equal((await first).status, 200);
+  assert.equal(f.calls.filter(c => c.url.pathname === '/v1/checkout/sessions').length, 1);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS n FROM billing_operation_locks').get() as any).n, 0);
+});
+
+test('Stripe outage preserves saved state and never authorizes cached paid access', async t => {
+  const f = await billingFixture(t);
+  f.sqlite.prepare("UPDATE pro_billing SET plan = 'pro', subscription_status = 'active'").run();
+  f.state.override = () => new Response('outage', { status: 503 }); t.mock.method(console, 'error', () => {});
+  assert.equal((await handleSubscriptionRequest(billingRequest(), f.env)).status, 503);
+  assert.equal((f.sqlite.prepare('SELECT plan FROM pro_billing').get() as any).plan, 'pro');
+});
+
+test('subscription discovery paginates past ended subscriptions and rejects ambiguous live subscriptions', async t => {
+  const f = await billingFixture(t);
   let page = 0;
-  t.mock.method(globalThis, "fetch", async () => Response.json(++page === 1 ? {
-    data: [{ id: "sub_old", status: "canceled", items: { data: [{ price: { id: PRO_PRICE_ID } }] } }], has_more: true,
-  } : {
-    data: [{ id: "sub_scale", status: "active", items: { data: [{ price: { id: PLAN_PRICES.scale } }] } }], has_more: false,
-  }));
-  assert.equal((await billingSubscription(env, "cus_test"))?.id, "sub_scale");
-  assert.equal(page, 2);
+  f.state.override = url => url.pathname === '/v1/subscriptions' ? Response.json(++page === 1 ?
+    { data: [{ ...paidSubscription(), id: 'sub_old', status: 'canceled' }], has_more: true } : { data: [paidSubscription('scale')], has_more: false }) : undefined;
+  assert.equal(subscriptionPlan(await billingSubscription(f.env, TEST_CUSTOMER)), 'scale'); assert.equal(page, 2);
+  f.state.override = null; f.state.subscriptions.push({ ...paidSubscription('pro'), id: 'sub_second' });
+  await assert.rejects(billingSubscription(f.env, TEST_CUSTOMER), /multiple_subscriptions/);
 });

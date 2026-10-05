@@ -21,6 +21,7 @@
   ],
   "durable_objects": {
     "bindings": [
+      { "name": "CONTAINER_ACCOUNT", "class_name": "ContainerAccount" },
       {
         "name": "USER_CONTAINER",
         "class_name": "UserContainer",
@@ -28,6 +29,7 @@
       }
     ]
   },
+  "exports": { "ContainerAccount": { "type": "durable-object", "storage": "sqlite" } },
   "observability": {
     "logs": {
       "enabled": true,

@@ -6,7 +6,10 @@ export class UserContainer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     if (ctx.container.running) {
-      ctx.blockConcurrencyWhile(() => ctx.container.setInactivityTimeout(10 * 60_000));
+      ctx.blockConcurrencyWhile(async () => {
+        const metadata = await ctx.storage.get("builderMachine");
+        await ctx.container.setInactivityTimeout(metadata?.idleTimeoutMs ?? 10 * 60_000);
+      });
     }
     this.controller = new UserContainerController(ctx);
     this.terminals = new Set();

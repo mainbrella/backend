@@ -1,9 +1,10 @@
+import { ACCESS_LIMITS } from './plan-policy.js';
 const MAX_FRAME = 64 * 1024;
 const MAX_PENDING_STDIN = 256 * 1024;
 const START_TIMEOUT_MS = 15_000;
 const ACK_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 1_000;
-const MAX_TERMINALS = 4;
+const MAX_TERMINALS = ACCESS_LIMITS.maxTerminalConnections;
 const encoder = new TextEncoder();
 
 function dimensions(value) {
