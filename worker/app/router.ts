@@ -1,3 +1,4 @@
+import { handleAPIKeysRequest } from "./api-keys";
 import { createOpenAPIApp } from "./openapi";
 import { syncAccountEntitlement } from "../lib/container-service";
 import { jsonResponse } from "../shared/http";
@@ -15,6 +16,8 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);
 
   if (url.pathname === "/images" || url.pathname.startsWith("/images/")) return handleImagesRequest(request, env);
   if (url.pathname.startsWith("/internal/image-builds/")) return handleImageBuildRequest(request, env);

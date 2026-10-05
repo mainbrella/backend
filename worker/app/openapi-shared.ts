@@ -6,7 +6,7 @@ import { z } from "zod";
 export type LegacyHandler = (request: Request, env: Env, ctx?: ExecutionContext) => Promise<Response>;
 export type OpenAPIApi = HonoOpenAPIRouterType<{ Bindings: Env }>;
 export const cookieSecurity = [{ cookieAuth: [] }];
-export const containerSecurity: NonNullable<OpenAPIRouteSchema["security"]> = [{ cookieAuth: [] }, { sessionBearer: [] }];
+export const containerSecurity: NonNullable<OpenAPIRouteSchema["security"]> = [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }];
 export const nativeSecurity = [{ nativeBearer: [] }];
 export const planSchema = z.enum(["builder", "pro", "scale"]);
 export const okSchema = z.object({ ok: z.boolean() });

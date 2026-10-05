@@ -314,3 +314,11 @@ Billing mutations use browser cookies and a trusted Origin; container/image
 automation uses the session Bearer credential. Native app and internal service
 tokens have separate security schemes. WebSocket routes describe the HTTP upgrade;
 Swagger UI does not open terminal WebSocket sessions.
+
+### API keys
+
+Signed-in web users can create and revoke automation credentials at `/api-keys/`.
+Before deploying API key support, apply D1 migration `010_api_keys.sql` using
+`npm run db:migrate:remote`, then deploy the API and web builds. Only token hashes
+are stored; the secret is returned once. Keys authorize the existing container,
+image, and SSH issuance routes, with the same account entitlements and quotas.

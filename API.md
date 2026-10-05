@@ -5,26 +5,23 @@ The dashboard and automation share the same account-owned containers and allowan
 
 ## Authentication
 
-Sign in at `https://mainbrella.com/login/`. In browser developer tools, inspect
-Storage/Application → Cookies for `https://api.mainbrella.com` and copy the
-**value** of `mainbrella_session`. It is an HttpOnly login credential, not a
-Google ID token, SSH access token, or Cloudflare token. Supply it as
-`Authorization: Bearer <session-value>` to `/containers` and `/containers/ssh`.
-There is no separate API key issuance endpoint yet.
+Sign in at `https://mainbrella.com/login/`, open **Account → API Keys**, and create a named key. Copy the secret immediately; it is shown only once. Send it as `Authorization: Bearer mb_<key-value>` to container, image, and SSH issuance endpoints. Keys stay valid until revoked, independently of browser sign-out, and remain subject to your account’s plan and quotas.
 
-Sessions expire 30 days after login. Logging out that session revokes the Bearer
-credential too. An expired, revoked, unknown, or malformed Bearer credential
-returns 401, even if a valid cookie is also sent. Sign in again to obtain a new
-session; do not automatically loop through login on errors.
+Manage keys using a browser session cookie:
+
+- `GET /api-keys` lists names, prefixes, creation dates, and last-used dates without secrets.
+- `POST /api-keys` with `{"name":"Deployment script"}` creates a key and returns `{key, token}` once (201). Names must contain 1–80 characters after trimming; each account can have up to 20 keys.
+- `DELETE /api-keys?id=<key-id>` revokes a key. Subsequent requests with that key return 401.
+
+Key creation and revocation require a trusted Origin. API keys cannot manage keys, authorize purchases, or change billing. Browser session Bearer credentials remain supported for compatibility; they expire after 30 days and are revoked by browser sign-out. Invalid credentials return 401 even if a valid cookie is also sent.
 
 Bearer requests can omit Origin. If Origin is supplied, it must be allowlisted.
 Browser clients continue using the session cookie and must send a trusted Origin
-for mutations. Bearer authentication is limited to lifecycle and SSH issuance;
+for mutations. Bearer authentication is limited to lifecycle, images, and SSH issuance;
 the browser WebSocket terminal remains cookie-authenticated with a trusted Origin.
 
 Keep credentials in a secret store or protected local file, never in a repository,
-URL, transcript, or log. This is the full login session credential; treat it as
-account access. For example, run the following in **bash** to create a temporary
+URL, transcript, or log. Treat API keys as account access. For example, run the following in **bash** to create a temporary
 header file without putting the value in shell history or curl's argument list:
 
 ```bash
@@ -32,10 +29,10 @@ API_URL=https://api.mainbrella.com
 AUTH_FILE=$(mktemp)
 chmod 600 "$AUTH_FILE"
 trap 'rm -f "$AUTH_FILE"' EXIT
-read -r -s -p 'Mainbrella session value: ' MAINBRELLA_SESSION
+read -r -s -p 'Mainbrella API key: ' MAINBRELLA_API_KEY
 printf '\n'
-printf 'Authorization: Bearer %s\n' "$MAINBRELLA_SESSION" > "$AUTH_FILE"
-unset MAINBRELLA_SESSION
+printf 'Authorization: Bearer %s\n' "$MAINBRELLA_API_KEY" > "$AUTH_FILE"
+unset MAINBRELLA_API_KEY
 
 # Check status and allowance before starting.
 curl --fail-with-body --silent --show-error --header "@$AUTH_FILE" "$API_URL/containers"

@@ -4,6 +4,7 @@ import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
+  "/api-keys": ["get", "post", "delete"],
   "/health": ["get"], "/state": ["get"],
   "/auth/google": ["post"], "/auth/email": ["post"], "/auth/me": ["get"], "/auth/logout": ["post"],
   "/auth/app/google": ["post"], "/auth/app/email": ["post"], "/auth/app/apple": ["post"],
@@ -63,7 +64,7 @@ test("schema describes optional container bodies, multipart image source, and We
   assert.ok(paths["/containers/terminal"].get.responses[101]);
   assert.ok(paths["/ssh/connect"].get.responses[101]);
   assert.deepEqual(paths["/subscription/checkout"].post.security, [{ cookieAuth: [] }]);
-  assert.deepEqual(paths["/containers"].post.security, [{ cookieAuth: [] }, { sessionBearer: [] }]);
+  assert.deepEqual(paths["/containers"].post.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
 });
 
 test("Swagger and ReDoc are available without service bindings", async () => {
