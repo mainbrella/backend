@@ -8,8 +8,7 @@
     "enabled": true
   },
   "vars": {
-    "GOOGLE_CLIENT_ID": "1012970891673-v92hm6ub74bc4be4jmr3pdvk6c78qifa.apps.googleusercontent.com",
-    "IAP_APP_APPLE_ID": "6803508836"
+    "GOOGLE_CLIENT_ID": "1012970891673-v92hm6ub74bc4be4jmr3pdvk6c78qifa.apps.googleusercontent.com"
   },
   "d1_databases": [
     {

@@ -10,7 +10,6 @@ import { handleEmailLogin, handleGoogleLogin } from "./auth-login";
 import { handleNativeEmailLogin, handleNativeGoogleLogin } from "./auth-login";
 import { handleAppAnonymous, handleAppDelete, handleAppLogout, handleAppMe, handleAppRefresh } from "./auth-app";
 import { handleNativeAppleLogin } from "./auth-apple";
-import { handleLegacyAppExchange } from "./auth-legacy";
 
 export async function handleAuthRequest(request: Request, env: Env): Promise<Response> {
   const corsHeaders = authCorsHeaders(request);
@@ -43,9 +42,6 @@ export async function handleAuthRequest(request: Request, env: Env): Promise<Res
   }
   if (pathname === "/auth/app/apple" && request.method === "POST") {
     return handleNativeAppleLogin(request, env, corsHeaders);
-  }
-  if (pathname === "/auth/app/legacy-exchange" && request.method === "POST") {
-    return handleLegacyAppExchange(request, env, corsHeaders);
   }
   if (pathname === "/auth/app/me" && request.method === "GET") {
     return handleAppMe(request, env, corsHeaders);

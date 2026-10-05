@@ -32,14 +32,15 @@ test("state rejects non-GET requests", async () => {
   assert.equal(response.headers.get("allow"), "GET");
 });
 
-test("IOP tracking requires an authenticated session", async () => {
-  const response = await handleRequest(
-    new Request("https://api.groupicorn.com/iop/tracked-programs"),
-    {} as Env,
-  );
-
-  assert.equal(response.status, 401);
-  assert.deepEqual(await response.json(), { error: "unauthorized" });
+test("routes from omitted source features return not found", async () => {
+  for (const path of ["/iop/tracked-programs", "/directory/locations", "/herds", "/iap/apple/notifications"]) {
+    const response = await handleRequest(
+      new Request(`https://api.groupicorn.com${path}`),
+      {} as Env,
+    );
+    assert.equal(response.status, 404, path);
+    assert.deepEqual(await response.json(), { error: "not_found" }, path);
+  }
 });
 
 test("auth preflight allows the web origin", async () => {
