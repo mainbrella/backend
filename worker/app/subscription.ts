@@ -23,6 +23,18 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
   }
   try {
     const user = await currentUser(env, request);
+    if (!user && path === "/subscription/checkout") {
+      const origin = request.headers.get("Origin")!;
+      const session = await stripeRequest<CheckoutSession>(env, "/checkout/sessions", new URLSearchParams({
+        mode: "subscription",
+        "line_items[0][price]": PRO_PRICE_ID, "line_items[0][quantity]": "1",
+        "metadata[checkout_type]": "guest", "subscription_data[metadata][checkout_type]": "guest",
+        success_url: `${origin}/?subscription_return=1#pricing`,
+        cancel_url: `${origin}/?subscription_cancelled=1#pricing`,
+      }));
+      if (!session.url) throw new Error("billing_unavailable");
+      return authJson({ url: session.url }, 200, cors);
+    }
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
     if (!env.STRIPE_SECRET_KEY) return authJson({ error: "billing_unavailable" }, 503, cors);
     let record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
