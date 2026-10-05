@@ -1,4 +1,5 @@
 import { PLAN_LIMITS, NO_PLAN_LIMITS, requestEntitlement, validEntitlement } from "./plan-policy.js";
+import { IMAGE_CATALOG, availableCatalog } from './image-catalog.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
 const INSTANCE = "lite";
@@ -127,13 +128,16 @@ export class UserContainerController {
           name: "Small container",
           instance: INSTANCE,
           status: "running",
-          ...(metadata.imageId ? { imageId: metadata.imageId, imageName: metadata.imageName } : {}),
+          ...(metadata.imageName ? { imageName: metadata.imageName } : {}),
+          ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
+          ...(metadata.catalogId ? { catalogId: metadata.catalogId } : {}),
           createdAt: new Date(metadata.createdAt).toISOString(),
           expiresAt: new Date(metadata.expiresAt).toISOString(),
         }]
       : [];
     return {
       containers,
+      imageCatalog: availableCatalog(this.container.images),
       plan: this.entitlement?.plan ?? null,
       active: this.entitlement?.active ?? false,
       limits: this.entitlement?.active ? PLAN_LIMITS[this.entitlement.plan] : NO_PLAN_LIMITS,
@@ -219,11 +223,13 @@ export class UserContainerController {
     // for quota purposes, which avoids races and accidental extra starts.
     usage[month] = (usage[month] ?? 0) + 1;
     await this.ctx.storage.put(USAGE_KEY, usage);
+    const catalogImage = IMAGE_CATALOG.find(entry => entry.key === imageKey);
     // A slot generation remains unique even across a same-millisecond recreate
     // or a backward wall-clock correction, so old access cannot target a new VM.
     const createdAt = Math.max(now, (previousMetadata?.createdAt ?? -1) + 1);
     const metadata = {
       createdAt,
+      ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,
       expiresAt: Math.min(now + limits.maxSessionMs, this.entitlement.validUntil),

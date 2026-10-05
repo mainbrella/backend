@@ -1,4 +1,4 @@
-name: Custom image checks
+name: Image checks
 
 on:
   pull_request:

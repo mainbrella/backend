@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { assembleImageMap, imageBuildApi } from './custom-images.mjs';
 import { validateImage } from './terminal-image.mjs';
+import { validateCatalogImages } from './catalog-images.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const repository = 'mainbrella/backend';
@@ -19,16 +20,22 @@ if (args.some(arg => !['--dry-run'].includes(arg))) {
 }
 
 let image;
+let catalog;
 try {
   const release = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/tags/terminal-image`], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
   const asset = release.assets.find(asset => asset.name === 'terminal-image.json');
   if (!asset) throw new Error('missing image manifest');
   const manifest = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${asset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
   image = validateImage(manifest, config.account_id, dockerfileHash);
+  const catalogAsset = release.assets.find(asset => asset.name === 'catalog-images.json');
+  if (!catalogAsset) throw new Error('Catalog images have not been published. Run the Build MainBrella images workflow first.');
+  const catalogManifest = JSON.parse(execFileSync('gh', ['api', `repos/${repository}/releases/assets/${catalogAsset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }));
+  catalog = validateCatalogImages(catalogManifest, config.account_id, root);
+  if (catalog.terminal.image !== image) throw new Error('Catalog and terminal manifests differ. Run the Build MainBrella images workflow first.');
 } catch (error) {
   console.error(error.code === 'ENOENT' ? 'Install GitHub CLI (gh) and run gh auth login.' :
-    `Cannot use the published terminal image: ${error.message.startsWith('Image ') ? error.message : 'release unavailable; check gh auth status and the Build terminal image workflow.'}`);
-  console.error(`Run the Build terminal image workflow at https://github.com/${repository}/actions, then retry.`);
+    `Cannot use the published images: ${/^(Image |Catalog |Incomplete |Invalid )/.test(error.message) ? error.message : 'release unavailable; check gh auth status and the Build MainBrella images workflow.'}`);
+  console.error(`Run the Build MainBrella images workflow at https://github.com/${repository}/actions, then retry.`);
   process.exit(1);
 }
 // Read the authoritative map under a deployment lease. Never silently deploy an
@@ -56,7 +63,7 @@ try {
   }
   const response = await imageBuildApi('/manifest');
   if (!response.ok) throw new Error('Custom image manifest unavailable');
-  config.containers[0].images = assembleImageMap(image, await response.json(), config.account_id);
+  config.containers[0].images = assembleImageMap(image, await response.json(), config.account_id, catalog);
   // Keep relative Worker paths rooted in backend, without modifying tracked config.
   writeFileSync(temporaryConfig, JSON.stringify(config, null, 2));
   console.log(`Deploying terminal image ${image}`);

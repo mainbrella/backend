@@ -1,10 +1,12 @@
+import { CUSTOM_IMAGE_CAPACITY } from '../containers/image-catalog.js';
+
 // Validate manifests before placing them in a trusted Worker deployment.
 export function validateCustomImages(manifest, accountId) {
   if (!manifest || typeof manifest.images !== 'object' || Array.isArray(manifest.images) || manifest.images === null) {
     throw new Error('Invalid custom image manifest');
   }
   const entries = Object.entries(manifest.images);
-  if (entries.length > 99) throw new Error('Custom image capacity exceeded');
+  if (entries.length > CUSTOM_IMAGE_CAPACITY) throw new Error('Custom image capacity exceeded');
   for (const [key, value] of entries) {
     if (!/^custom_[a-f0-9]{32}$/.test(key)) throw new Error('Invalid custom image key');
     const compact = key.slice(7);
@@ -16,8 +18,8 @@ export function validateCustomImages(manifest, accountId) {
   return Object.fromEntries(entries.map(([key, value]) => [key, { image: value.image }]));
 }
 
-export function assembleImageMap(terminal, manifest, accountId) {
-  return { terminal: { image: terminal }, ...validateCustomImages(manifest, accountId) };
+export function assembleImageMap(terminal, manifest, accountId, catalog = {}) {
+  return { terminal: { image: terminal }, ...catalog, ...validateCustomImages(manifest, accountId) };
 }
 
 export async function imageBuildApi(path, method = 'GET', body) {

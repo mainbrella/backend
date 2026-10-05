@@ -5,18 +5,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { IMAGE_CATALOG } from '../containers/image-catalog.js';
 
-function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret } = {}) {
+function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret, invalidCatalog = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'terminal-deploy-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const dir of ['scripts', 'containers', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
-  for (const file of ['deploy-containers.mjs', 'terminal-image.mjs', 'custom-images.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  for (const dir of ['scripts', 'containers', 'containers/catalog', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
+  for (const file of ['deploy-containers.mjs', 'terminal-image.mjs', 'custom-images.mjs', 'catalog-images.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
   const dockerfile = 'FROM test\n';
   writeFileSync(join(root, 'containers/Dockerfile'), dockerfile);
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ account_id: 'account', main: 'containers/user-container.js', containers: [{ images: { terminal: { dockerfile: './containers/Dockerfile' } } }] }));
   const image = `registry.cloudflare.com/account/mainbrella-terminal@sha256:${'a'.repeat(64)}`;
   const manifest = { image, dockerfileHash: outdated ? 'old' : createHash('sha256').update(dockerfile).digest('hex') };
-  writeFileSync(join(root, 'bin/gh'), `#!${process.execPath}\nconsole.log(process.argv.includes('-H') ? ${JSON.stringify(JSON.stringify(manifest))} : '{"assets":[{"id":1,"name":"terminal-image.json"}]}');\n`, { mode: 0o755 });
+  const catalog = { images: {} };
+  for (const entry of IMAGE_CATALOG) {
+    if (entry.key !== 'terminal') writeFileSync(join(root, entry.dockerfile), dockerfile);
+    catalog.images[entry.key] = { image: `registry.cloudflare.com/account/${entry.repository}@sha256:${'a'.repeat(64)}`, dockerfileHash: createHash('sha256').update(dockerfile).digest('hex') };
+  }
+  if (invalidCatalog) catalog.images.python.image = 'docker.io/python:latest';
+  writeFileSync(join(root, 'bin/gh'), `#!${process.execPath}\nconsole.log(process.argv.includes('-H') ? (process.argv.includes('repos/mainbrella/backend/releases/assets/2') ? ${JSON.stringify(JSON.stringify(catalog))} : ${JSON.stringify(JSON.stringify(manifest))}) : '{"assets":[{"id":1,"name":"terminal-image.json"},{"id":2,"name":"catalog-images.json"}]}');\n`, { mode: 0o755 });
   writeFileSync(join(root, 'node_modules/wrangler/bin/wrangler.js'), `const fs = require('node:fs'); const args = process.argv.slice(2); fs.writeFileSync('result.json', JSON.stringify({args, config: JSON.parse(fs.readFileSync(args[args.indexOf('--config')+1]))})); process.exit(${exitCode});`);
   writeFileSync(join(root, 'fetch.mjs'), `globalThis.fetch = async (url, options) => {
     if (options.headers.Authorization !== 'Bearer ' + 's'.repeat(32)) throw new Error('Wrong image-build credential');
@@ -28,7 +36,7 @@ function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, a
   };`);
   if (localSecret !== undefined) writeFileSync(join(root, '.env'), `IMAGE_BUILD_SECRET="${localSecret}"\n`);
   const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : [])], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
-  return { root, image, run };
+  return { root, image, run, catalog };
 }
 
 test('deployment replaces Dockerfile with published digest and cleans up config', t => {
@@ -63,7 +71,7 @@ test('live manifest images reach Wrangler alongside the terminal digest', t => {
   const f = fixture(t, { custom: { images: { [key]: { image } } }, dryRun: false });
   assert.equal(f.run().status, 0);
   assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'result.json'))).config.containers[0].images,
-    { terminal: { image: f.image }, [key]: { image } });
+    { ...Object.fromEntries(Object.entries(f.catalog.images).map(([key, entry]) => [key, { image: entry.image }])), [key]: { image } });
   assert.equal(readFileSync(join(f.root, 'locks.log'), 'utf8'), 'POST\nDELETE\n');
 });
 
@@ -92,4 +100,12 @@ test('explicit environment secret takes precedence over .env', t => {
   const f = fixture(t, { localSecret: 'different-local-secret'.repeat(3) });
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('untrusted or incomplete catalog images prevent deployment', t => {
+  const f = fixture(t, { invalidCatalog: true });
+  const result = f.run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Invalid python catalog image reference/);
+  assert.equal(readdirSync(f.root).includes('result.json'), false);
 });

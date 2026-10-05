@@ -18,7 +18,7 @@ const account = '2b7a9be82bb64187230703b024e25157';
 async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock']) {
+  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity']) {
     db.exec(readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8'));
   }
   db.prepare("INSERT INTO users (id, email) VALUES ('owner', 'owner@test.com'), ('other', 'other@test.com')").run();
@@ -214,4 +214,27 @@ test('manifest reconciliation expires abandoned publishing images', async t => {
   assert.deepEqual(await (await f.internal('/manifest', 'GET')).json(), { images: {} });
   assert.equal(f.db.prepare('SELECT status FROM container_images WHERE id = ?').get(image.id)!.status, 'failed');
   assert.equal((await f.internal(`/${image.id}/status`, 'POST', { status: 'ready' })).status, 409);
+});
+
+test('catalog IDs select approved published images without reserving a custom build', async t => {
+  const f = await fixture(t);
+  const digest = `registry.cloudflare.com/${account}/mainbrella-python@sha256:${'e'.repeat(64)}`;
+  f.container.images = { terminal: 'terminal-image', python: digest };
+  const status = await (await f.user('/containers')).json() as { imageCatalog: { id: string; name: string }[] };
+  assert.deepEqual(status.imageCatalog.map(image => image.id), ['node', 'python']);
+  const missing = await f.user('/containers', 'POST', JSON.stringify({ catalogId: 'rust' }));
+  assert.equal(missing.status, 409);
+  assert.equal(f.starts.length, 0);
+  const unknown = await f.user('/containers', 'POST', JSON.stringify({ catalogId: 'registry.cloudflare.com/attacker/image' }));
+  assert.equal(unknown.status, 404);
+  assert.equal((await f.user('/containers', 'POST', JSON.stringify({ catalogId: 'python', imageId: crypto.randomUUID() }))).status, 400);
+  const launched = await f.user('/containers', 'POST', JSON.stringify({ catalogId: 'python', imageKey: 'terminal', image: 'attacker' }));
+  assert.equal(launched.status, 200);
+  const result = await launched.json() as { containers: { catalogId: string; imageName: string }[]; usage: { starts: number } };
+  assert.equal(result.containers[0].catalogId, 'python');
+  assert.equal(result.containers[0].imageName, 'Python 3.14');
+  assert.equal(result.usage.starts, 1);
+  assert.equal(f.starts[0].image, digest);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM container_images').get()!.count, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM container_image_usage').get()!.count, 0);
 });

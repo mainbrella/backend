@@ -4,6 +4,7 @@ import { containerUser } from './container-auth';
 import { resolveBillingState } from '../lib/entitlements';
 import { accountResponse, containerError, syncAccountEntitlement, type ContainerImageSelection } from '../lib/container-service';
 import { validContainerId } from '../../containers/container-account-core.js';
+import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -38,8 +39,14 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     }
     let selection: ContainerImageSelection | undefined;
     if (request.method === 'POST' && request.body) {
-      const body = await request.json().catch(() => null) as { imageId?: unknown } | null;
+      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown } | null;
       if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
+      if (body.catalogId !== undefined) {
+        if (body.imageId !== undefined || typeof body.catalogId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);
+        const image = IMAGE_CATALOG.find(image => image.id === body.catalogId);
+        if (!image) return authJson({ error: 'image_not_found' }, 404, cors);
+        selection = { imageKey: image.key, imageName: image.name };
+      }
       if (body.imageId !== undefined) {
         if (typeof body.imageId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);
         const image = await ownedImage(env, user.id, body.imageId);

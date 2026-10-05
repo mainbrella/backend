@@ -1,4 +1,5 @@
 import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement } from './plan-policy.js';
+import { IMAGE_CATALOG } from './image-catalog.js';
 
 const KEY = 'containerAccount';
 export const validContainerId = (id) => id === 'small' || /^c(?:[1-9]\d{0,2})$/.test(id) && Number(id.slice(1)) < 500;
@@ -45,6 +46,7 @@ export class ContainerAccountController {
     // the slot's entitlement check, while its historical usage remains intact.
     state = { userId, slots: ['small'], usage: {}, pending: {}, reservations: {}, nextReservationId: 0, entitlement };
     const legacy = await this.machine(state, 'small', 'GET', entitlement);
+    state.imageCatalog = legacy.imageCatalog ?? [];
     if (legacy.usage?.month && Number.isSafeInteger(legacy.usage.starts)) state.usage[legacy.usage.month] = legacy.usage.starts;
     if (!legacy.containers?.length) state.slots = [];
     await this.ctx.storage.put(KEY, state);
@@ -83,6 +85,10 @@ export class ContainerAccountController {
       if (state.slots.length) throw new Error('container_reconciliation_failed');
       return [];
     }
+    if (!state.slots.length) {
+      const machine = await this.machine(state, 'small', 'GET', entitlement);
+      state.imageCatalog = machine.imageCatalog ?? [];
+    }
     const results = [];
     let unreadable = [];
     for (let offset = 0; offset < state.slots.length; offset += 20) {
@@ -96,6 +102,7 @@ export class ContainerAccountController {
         }
         delete state.pending[id];
         const data = await this.machine(state, id, 'GET', entitlement);
+        state.imageCatalog = data.imageCatalog ?? [];
         if (!data.containers?.[0]) {
           // Fence delayed boot dispatches before releasing an apparently empty
           // slot, including recovery after an interrupted provisioning request.
@@ -136,7 +143,7 @@ export class ContainerAccountController {
     const month = new Date(this.now()).toISOString().slice(0, 7);
     return { plan: state.entitlement.plan, active: state.entitlement.active,
       limits: state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS,
-      usage: { month, starts: state.usage[month] ?? 0 }, containers };
+      usage: { month, starts: state.usage[month] ?? 0 }, containers, imageCatalog: state.imageCatalog ?? [] };
   }
   async fetch(request) {
     const url = new URL(request.url);
@@ -160,6 +167,10 @@ export class ContainerAccountController {
           if (!validEntitlement(entitlement, this.now())) {
             await this.reconcile(state, { active: false, plan: null, validUntil: null, checkedAt: entitlement.checkedAt });
             return this.respond({ error: 'subscription_required' }, 402);
+          }
+          const catalogImage = IMAGE_CATALOG.find(image => image.key === selection?.imageKey);
+          if (catalogImage && !(state.imageCatalog ?? []).some(image => image.id === catalogImage.id)) {
+            return this.respond({ error: 'image_not_available' }, 409);
           }
           const limits = PLAN_LIMITS[entitlement.plan];
           if (state.slots.length >= limits.maxContainers) return this.respond({ error: 'container_limit_exceeded' }, 409);
