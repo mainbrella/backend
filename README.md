@@ -2,7 +2,7 @@
 
 The cookie-authenticated `/containers` API maps each account server-side to
 ``USER_CONTAINER.idFromName(`user:${user.id}`)`` in the private
-`mainbrella-containers` Worker (`../reference`). Container creation and quota
+`mainbrella-containers` Worker (`containers/`). Container creation and quota
 reservation remain exclusively in `POST /containers`.
 
 ## Browser terminal
@@ -30,7 +30,9 @@ uses binary UTF-8 stdin, raw binary stdout, JSON `{cols, rows}` resizing and
 Disconnect terminates only the attached tmux client. The existing idle/hard
 expiration alarm still destroys the container and closes terminal sockets.
 
-Deploy `../reference` and its bash/tmux image first, then this API and `../web`.
+Run `npm run deploy` here to deploy the container Worker and its bash/tmux image
+first, then the API. Deploy `../web` afterward. Docker must be running for the
+container image build.
 Existing old-image containers need to be stopped and recreated. This path does
 not need SSH tokens or any additional secrets. `/containers/ssh`, its token
 migration/table, and the existing SSH gateway remain unchanged.
@@ -40,6 +42,8 @@ migration/table, and the existing SSH gateway remain unchanged.
 ```sh
 npm ci
 npm run type-check
+npm run check:containers
+npm run test:containers
 npx tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts
 npx tsx --test worker/app/terminal.test.ts worker/app/containers.test.ts worker/app/ssh.test.ts
 ```
@@ -49,3 +53,29 @@ migrations absent from this checkout (`003_iop_program_tracking.sql`,
 `011_native_app_auth.sql`, and related legacy migrations). Those fixtures need
 their original migrations restored to run. Terminal/container/SSH tests are
 independent of those files.
+
+## Production deployment
+
+All production backend code lives here. `containers/` contains the private
+container Worker, lifecycle controller, terminal bridge, Dockerfile, and tests.
+`wrangler.containers.jsonc` deploys `mainbrella-containers`; `wrangler.jsonc`
+deploys `mainbrella-api`. The API's cross-Worker binding, `UserContainer` class,
+account, and storage identity are unchanged by this move. `../reference` is
+benchmark and historical material only; production builds do not read it.
+
+```sh
+npm run deploy             # Containers and image first, then API; stops on failure
+npm run deploy:containers  # Container Worker and image only (requires Docker)
+npm run deploy:api         # API only
+```
+
+Container limits remain one running container per account, ten reserved starts
+per UTC month, a one-hour hard deadline, and a ten-minute idle timeout. The
+container image includes Node 24, bash, and tmux, with outbound internet enabled.
+Deploying an image does not replace running containers; stop and recreate old
+containers to use the updated image.
+
+Developer SSH keys are configured in `wrangler.containers.jsonc`. Connect with
+`npx wrangler containers ssh <INSTANCE_ID> --config wrangler.containers.jsonc`.
+Private keys stay local. Status polling and SSH attachment do not renew the idle
+lease; terminal input/output does.

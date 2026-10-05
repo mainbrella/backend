@@ -9,8 +9,13 @@
     "db:migrate:remote": "wrangler d1 migrations apply delta --remote",
     "generate-types": "wrangler types",
     "type-check": "npm run generate-types && tsc --noEmit",
-    "deploy": "wrangler deploy",
-    "test": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts"
+    "deploy": "npm run deploy:containers && npm run deploy:api",
+    "test": "npm run test:containers && npm run test:api",
+    "deploy:containers": "wrangler deploy --config wrangler.containers.jsonc",
+    "deploy:api": "wrangler deploy --config wrangler.jsonc",
+    "test:containers": "node --test containers/*.test.mjs",
+    "test:api": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts",
+    "check:containers": "node --check containers/user-container.js && node --check containers/user-container-core.js && node --check containers/terminal.js"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",

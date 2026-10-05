@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-containers",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "main": "containers/user-container.js",
+  "compatibility_date": "2026-10-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "containers": [
+    {
+      "class_name": "UserContainer",
+      "scheduling_policy": "durable_object",
+      "images": { "terminal": { "dockerfile": "./containers/Dockerfile" } },
+      "ssh": {
+        "enabled": true
+      },
+      "authorized_keys": [
+        {
+          "name": "mainbrella-development",
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII+g7oppMO2kayd7vNyw9KdQc6E4+ukHUjSarwFT/5kd"
+        }
+      ]
+    }
+  ],
+  "exports": {
+    "UserContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "enabled": true
+  }
+}
