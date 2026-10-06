@@ -38,7 +38,7 @@ const endpointMethods: Record<string, string[]> = {
   "/images": ["get", "post"], "/images/{id}": ["get", "delete"], "/images/{id}/logs": ["get"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
-  "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
+  "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
 };
 
 async function document() {
@@ -46,6 +46,17 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test("admin users schema documents restricted cookie access and safe user fields", async () => {
+  const { paths } = await document();
+  const operation = paths["/admin/users"].get;
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+  assert.equal(operation.operationId, "listAdminUsers");
+  assert.match(operation.description, /oneone@gmail\.com/);
+  assert.match(operation.description, /created_at descending/);
+  for (const status of [200, 401, 403, 405, 503]) assert.ok(operation.responses[status]);
+  assert.ok(operation.responses[200].content["application/json"].schema.properties.users);
+});
 
 test('workspace schemas describe capture budgets, usage and nonrefundable deletion', async () => {
   const {paths}=await document();

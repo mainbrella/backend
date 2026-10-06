@@ -1,6 +1,7 @@
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
+import { registerAdminRoutes } from "./openapi-admin";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
 import { registerCommandRoutes } from "./openapi-commands";
@@ -44,6 +45,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     api.registry.registerComponent("securitySchemes", name, scheme);
   }
   registerOperationsRoutes(api, handler);
+  registerAdminRoutes(api, handler);
   registerCapabilityRoutes(api, handler);
   registerActivityRoutes(api, handler);
   registerExecutionRoutes(api, handler);

@@ -1,4 +1,4 @@
-import { authCorsHeaders, authJson, currentUser } from "./auth-core";
+import { authCorsHeaders, authJson, currentUser, type AuthUser } from "./auth-core";
 
 const ADMIN_EMAIL = "oneone@gmail.com";
 const PAGE_SIZE = 25;
@@ -43,6 +43,12 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     if (!env.DB) return authJson({ error: "database_unavailable" }, 503, corsHeaders);
 
     const url = new URL(request.url);
+    if (url.pathname === "/admin/users") {
+      const rows = await env.DB.prepare(
+        "SELECT id, email, name, dob, created_at FROM users ORDER BY created_at DESC, id DESC",
+      ).all<Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at">>();
+      return authJson({ users: rows.results || [] }, 200, corsHeaders);
+    }
     if (url.pathname === "/admin/tables") {
       return authJson({ tables: TABLES.map(({ id, label, group, columns }) => ({ id, label, group, columns })) }, 200, corsHeaders);
     }
