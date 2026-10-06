@@ -53,10 +53,12 @@ for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
     assert.equal(response.status, 200);
     const customer = f.calls.find(c => c.url.pathname === '/v1/customers')!;
     assert.equal(customer.params.get('metadata[app_user_id]'), TEST_USER);
+    assert.equal(customer.params.get('email'), 'test@example.com');
     const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
     assert.equal(checkout.params.get('line_items[0][price]'), PLAN_PRICES[plan]);
     assert.equal(checkout.params.get('line_items[0][quantity]'), '1');
     assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
+    assert.equal(checkout.params.has('customer_email'), false);
     assert.equal(checkout.params.get('client_reference_id'), TEST_USER);
     assert.equal(checkout.params.has('subscription_data[trial_period_days]'), false);
     assert.equal((f.sqlite.prepare('SELECT checkout_session_id FROM pro_billing').get() as any).checkout_session_id, 'cs_new');

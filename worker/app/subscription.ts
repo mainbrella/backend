@@ -115,6 +115,8 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     const plan = body!.plan as Plan;
     if (!record) {
       const params = new URLSearchParams({ "metadata[app_user_id]": user.id });
+      // Checkout inherits this email from the Customer. Stripe fixes it for the
+      // session, so the client must not call updateEmail or override it on confirm.
       if (user.email) params.set("email", user.email);
       if (user.name) params.set("name", user.name);
       const customer = await stripeRequest<{ id: string }>(env, "/customers", params, `mainbrella-customer-${user.id}`);
