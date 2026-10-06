@@ -101,9 +101,10 @@ Creation is never retried automatically. After a lost response, list and revoke
 the unwanted grant before creating another link. A `preview_reconciliation_required`
 error exposes `error.preview_id`; retry `sandbox.previews.revoke(error.preview_id)`.
 Revocation closes active connections. Stopping or replacing the generation
-invalidates its links. Application cookies are stripped; cookie sessions, external
-Host semantics and absolute redirect rewriting are unsupported. Public previews
-remain disabled pending isolated-domain configuration and live qualification.
+invalidates its links. Application cookies are stripped; cookie sessions and
+absolute redirect rewriting are unsupported. Host and forwarded host/protocol
+reflect the validated HTTPS preview origin; the caller's Origin is preserved.
+Public previews remain disabled pending completion of live qualification.
 
 ## Workload observations and webhooks
 

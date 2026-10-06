@@ -480,10 +480,12 @@ connections may remain active until their lease/grant expires. Other failures
 return `previews_unavailable`; excess grants return 429 `preview_limit`.
 
 The gateway runs on a separate registrable domain and has no account database
-or login/billing routes. Cookies, Authorization, platform/forwarding headers
-and Referer are stripped; response cookies are stripped too. Application
-responses disable caching and set a no-referrer policy. Cookie sessions,
-external Host semantics and absolute redirect rewriting are not supported.
+or login/billing routes. Cookies, Authorization, client-supplied platform/forwarding
+headers and Referer are stripped; response cookies are stripped too. The runtime
+sets Host, X-Forwarded-Host and X-Forwarded-Proto from the validated preview origin,
+preserving the caller's Origin for application security checks. Application
+responses disable caching and set a no-referrer policy. Cookie sessions and
+absolute redirect rewriting are not supported.
 Framework compatibility, CSP and service workers still require live
 qualification. Operators can read `docs/preview-ingress.md` in the backend checkout.
 

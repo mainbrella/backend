@@ -13,10 +13,11 @@ handshake verified the certificate for `*.mainbrella.dev` and `mainbrella.dev`.
 The prepared transport verifier passed against a temporarily enabled API and
 gateway using one Lite generation, with confirmed cleanup. Network Error Logging
 was disabled by the operator, and public responses no longer contain reporting
-headers. Issuance was disabled again after the run: the current API version is
+headers. Issuance was disabled again after the transport run: its API version was
 `4af68011-cff8-47f7-ba56-903a4ffe8053`, and the gateway version is
 `086b5312-9d9e-4e9e-b9a9-77964669e21f`. Real-framework/browser, second-account,
-replacement-generation and full CDN logging qualification remain pending.
+replacement-generation qualification remains pending. The operator logging review
+and subsequent framework qualification are recorded below.
 JavaScript/Python SDK
 helpers and capability-gated dashboard controls are implemented locally.
 `/capabilities` reports support only when explicitly enabled with a valid domain
@@ -79,11 +80,17 @@ change. Successful response headers renew idle activity;
 WebSocket traffic renews it at most once per second. Quiet sockets do not renew
 it. Existing terminal and managed execution flows keep their own limits.
 
-The primitive strips platform headers, Authorization, cookies and forwarding
-headers before reaching the application. It strips Set-Cookie from responses,
+The primitive strips platform headers, Authorization, cookies and caller-supplied
+forwarding headers before reaching the application. The gateway attests the
+validated public origin using `x-preview-origin`; after validating the token and
+origin, the runtime sets Host, X-Forwarded-Host and X-Forwarded-Proto from it.
+Caller Origin is preserved, so foreign-origin framework requests stay rejected.
+The attestation is stripped before reaching the guest. Missing attestation retains
+legacy forwarding for deployment compatibility; invalid attestation is rejected.
+The primitive strips Set-Cookie from responses,
 disables caching and sets a no-referrer policy. It preserves redirects without
-following them. Cookie-based application sessions, external Host semantics and
-redirect rewriting remain gateway work. Do not promise them from this primitive.
+following them. Cookie-based application sessions and absolute redirect rewriting
+remain unsupported.
 
 ## Implemented gateway and account API
 
@@ -192,8 +199,8 @@ Before enabling:
 
 Application cookies remain disabled. Do not enable them without defining
 host-only handling and rejecting parent-domain cookies that could cross preview
-origins. The app currently sees the private upstream Host; external Host semantics
-and absolute redirect rewriting are unsupported. Relative redirects are passed
+origins. The app sees the validated public preview Host and HTTPS forwarded
+protocol. Absolute redirect rewriting is unsupported. Relative redirects are passed
 through without following them. Preserve and qualify WebSocket Origin behavior
 with a real framework; do not bypass its checks or weaken the account site's
 origin policy. CSP and service workers remain live qualification items.
@@ -366,7 +373,7 @@ stay in the ignored backend `.env`; the primary key is `MAINBRELLA_API_KEY` and
 the second account key is `MAINBRELLA_API_KEY2`. Do not include either in reports
 or upload them into the guest.
 
-The proposed next batch needs approval before deployment or paid starts:
+The operator approved this bounded batch:
 
 - Temporarily enable the existing API and gateway preview flags; preserve the
   runtime/image map and record deployed versions. Restore disabled issuance on
@@ -405,7 +412,16 @@ local macOS dependencies/build are not reused on Linux. Use
 
 The existing one-start `verify:previews` fixture is already qualified for its
 transport scope. It is not the framework/isolation runner and need not be
-repeated just to spend another start. The next batch remains unexecuted.
+repeated just to spend another start. The first Medium start built the fixture and
+passed second-account management isolation, but Next.js Server Actions rejected
+the private upstream host. That generation was stopped and both enablement flags
+restored to false. The runtime/gateway fix attests the validated public origin;
+local tests against the actual Next.js server reproduce the old 500, verify a
+same-origin 303 after the fix, and retain foreign-origin rejection. One approved
+start remains for full framework and replacement-generation qualification.
+For the development fixture, configure `allowedDevOrigins` with exactly the
+current preview hostname via `MAINBRELLA_PREVIEW_HOST`; do not allow wildcard
+origins. This is separate from production Server Action validation.
 
 ## Qualification gates
 
