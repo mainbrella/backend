@@ -1,6 +1,7 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  WORKSPACE_PERSISTENCE_ENABLED?: string;
   NETWORK_INTERNET_CONTROL_ENABLED?: string;
   WORKLOAD_WEBHOOKS_ENABLED?: string;
   WEBHOOK_ALLOWED_HOSTS?: string;

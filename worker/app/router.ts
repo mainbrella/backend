@@ -18,6 +18,8 @@ import { handlePreviewRequest } from './previews';
 import { handleStatusRequest } from './status';
 import { handleObservationRequest } from './observations';
 import { handleWebhookRequest } from './webhooks';
+import { handleWorkspacesRequest } from './workspaces';
+import { handleWorkspaceExportRequest } from './workspace-export';
 
 async function handleLegacyRequest(
   request: Request,
@@ -25,6 +27,8 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);
+  if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
   if (['/containers/events', '/containers/metrics'].includes(url.pathname)) return handleObservationRequest(request, env);

@@ -6,6 +6,7 @@ import { accountResponse, containerError, syncAccountEntitlement, type Container
 import { validContainerId, validIdempotencyKey } from '../../containers/container-account-core.js';
 import { machineSize } from '../../containers/plan-policy.js';
 import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
+import { validWorkspaceId } from '../../containers/workspace-contract.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -42,8 +43,13 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     }
     let selection: ContainerImageSelection | undefined;
     if (request.method === 'POST' && request.body) {
-      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown } | null;
+      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown; workspaceId?: unknown } | null;
       if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
+      if(body.workspaceId!==undefined){
+        if(!validWorkspaceId(body.workspaceId) || body.catalogId!==undefined || body.imageId!==undefined)return authJson({error:'invalid_request'},400,cors);
+        if(env.WORKSPACE_PERSISTENCE_ENABLED!=='true')return authJson({error:'persistence_unavailable'},503,cors);
+        selection={workspaceId:body.workspaceId as string};
+      }
       if (body.size !== undefined && !machineSize(body.size)) return authJson({ error: 'invalid_size' }, 400, cors);
       if (body.internet !== undefined && typeof body.internet !== 'boolean') return authJson({ error: 'invalid_internet_policy' }, 400, cors);
       if (body.internet === false && env.NETWORK_INTERNET_CONTROL_ENABLED !== 'true') return authJson({ error: 'network_policy_unavailable' }, 503, cors);
@@ -67,7 +73,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection, idempotencyKey);
     const data = await response.json() as { error?: string };
     if (response.status === 503 && data.error === 'network_policy_unavailable') return authJson(data, 503, cors);
-    if ([400, 402, 409, 429].includes(response.status)) return authJson(data, response.status, cors);
+    if ([400, 402, 404, 409, 410, 429].includes(response.status) || response.status===503&&data.error==='persistence_unavailable') return authJson(data, response.status, cors);
     if (!response.ok) throw new Error('machine_request_failed');
     return authJson(data, response.status, cors);
   } catch (error) {

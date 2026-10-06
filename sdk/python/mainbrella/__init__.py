@@ -67,6 +67,7 @@ class Mainbrella:
         self.base_url = f"{url.scheme}://{url.netloc}"
         self.timeout = timeout
         self._transport = transport
+        self.workspaces = _Workspaces(self)
 
     def request(self, path, method="GET", body=None, headers=None, binary=False, timeout=None):
         if not path.startswith("/") or path.startswith("//") or urlsplit(path).scheme:
@@ -109,11 +110,17 @@ class Mainbrella:
     def connect(self, container_id, created_at):
         return Sandbox(self, container_id, created_at)
 
-    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None, internet=None):
+    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None, internet=None, workspace_id=None):
         key = idempotency_key or str(uuid.uuid4())
         if catalog_id and image_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or wait_timeout <= 0 or poll_interval <= 0:
             raise MainbrellaError("invalid_creation_options")
         body = {"imageId": image_id} if image_id else {"catalogId": catalog_id} if catalog_id else {}
+        if workspace_id is not None:
+            if catalog_id or image_id or not isinstance(workspace_id, str) or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', workspace_id):
+                raise MainbrellaError('invalid_creation_options')
+            if self.capabilities().get('persistence', {}).get('snapshots') is not True:
+                raise MainbrellaError('persistence_unavailable', 503, idempotency_key=key)
+            body['workspaceId'] = workspace_id
         if size is not None:
             if size not in ('lite', 'small', 'medium', 'large', 'xl'):
                 raise MainbrellaError('invalid_creation_options')
@@ -139,18 +146,52 @@ class Mainbrella:
                         raise MainbrellaError("invalid_creation_response")
                     if internet is False and selected.get('internet') is not False:
                         raise MainbrellaError('network_policy_unconfirmed', 409)
+                    if workspace_id is not None and selected.get('workspaceId') != workspace_id:
+                        raise MainbrellaError('workspace_restore_unconfirmed', 409)
                     sandbox = self.connect(selected["id"], selected["createdAt"])
                     sandbox.creation_id = creation["id"]
                     sandbox.image_digest = selected.get("imageDigest")
                     sandbox.instance = selected.get("instance")
                     sandbox.internet = selected.get('internet')
+                    sandbox.workspace_id = selected.get('workspaceId')
                     return sandbox
             except MainbrellaError as error:
-                if error.code == 'network_policy_unavailable' or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
+                if error.code in ('network_policy_unavailable', 'persistence_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
                     error.idempotency_key = key
                     raise
             time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
         raise MainbrellaError("creation_ambiguous", idempotency_key=key)
+
+
+class _Workspaces:
+    def __init__(self, client):
+        self.client = client
+
+    def _path(self, workspace_id):
+        if not isinstance(workspace_id, str) or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', workspace_id):
+            raise MainbrellaError('invalid_workspace_identity')
+        return '/workspaces/' + workspace_id
+
+    def list(self):
+        return self.client.request('/workspaces')
+
+    def get(self, workspace_id):
+        return self.client.request(self._path(workspace_id))
+
+    def update(self, workspace_id, name=None, archived=None):
+        body = {}
+        if name is not None:
+            body['name'] = name
+        if archived is not None:
+            body['archived'] = archived
+        return self.client.request(self._path(workspace_id), 'PATCH', body)
+
+    def delete(self, workspace_id):
+        return self.client.request(self._path(workspace_id), 'DELETE')
+
+    def restore(self, workspace_id, **options):
+        self._path(workspace_id)
+        return self.client.create(workspace_id=workspace_id, **options)
 
 
 class _Files:
@@ -415,6 +456,19 @@ class Sandbox:
                 c.get("id") == self.id and c.get("createdAt") == self.created_at for c in result["containers"]):
             raise MainbrellaError("cleanup_unconfirmed")
         return result
+
+    def save_workspace(self, name, stop=False, idempotency_key=None):
+        key = idempotency_key or str(uuid.uuid4())
+        if not isinstance(name, str) or not 1 <= len(name) <= 80 or type(stop) is not bool or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', key):
+            raise MainbrellaError('invalid_workspace_options')
+        try:
+            return self.client.request('/workspaces', 'POST', {'id': self.id, 'createdAt': self.created_at, 'name': name, 'stop': stop}, {'Idempotency-Key': key})
+        except MainbrellaError as error:
+            error.idempotency_key = key
+            raise
+
+    def export_workspace(self):
+        return self.client.request(self._path('/containers/export'), binary=True)
 
     def __enter__(self):
         return self

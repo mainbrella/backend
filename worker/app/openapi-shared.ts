@@ -23,6 +23,7 @@ export function errors(...statuses: number[]): Record<string, ResponseConfig> {
     400: "Invalid request.", 401: "Authentication required or credential invalid.",
     402: "Paid access required.", 403: "Origin or permission denied.", 404: "Not found.",
     405: "Method not allowed.", 409: "Conflicts with current state.", 413: "Request too large.",
+    410: "Saved workspace has expired.",
     426: "WebSocket upgrade required.", 429: "Rate, quota, or connection limit exceeded.",
     500: "Internal error.", 502: "Provider request failed.", 503: "Service unavailable.",
   };

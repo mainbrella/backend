@@ -1,6 +1,8 @@
 import { PLAN_LIMITS, NO_PLAN_LIMITS, requestEntitlement, validEntitlement, machineSize } from "./plan-policy.js";
 import { IMAGE_CATALOG, availableCatalog } from './image-catalog.js';
 import { WorkloadObservations } from './observations.js';
+import { captureWorkspace } from './workspaces.js';
+import { validWorkspaceId } from './workspace-contract.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
 const METADATA_KEY = "builderMachine";
@@ -34,12 +36,22 @@ export class UserContainerController {
   }
 
   async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if(path==='/workspaces/snapshot-v1') return captureWorkspace(this,request);
     return this.serialized(async () => {
       const url = new URL(request.url);
-      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true });
+      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1 });
+      if(path==='/workspaces/restore-preflight-v1' && request.method==='POST') {
+        let body;try{body=await request.json();}catch{return this.respond({error:'invalid_request'},400);}
+        if(!body || body.expiresAt<=this.now())return this.respond({error:'workspace_expired'},410);
+        if(!body.imageKey || typeof body.imageDigest!=='string' || this.container.images[body.imageKey]!==body.imageDigest)return this.respond({error:'workspace_image_incompatible'},409);
+        return this.respond({compatible:true});
+      }
       if (url.pathname.startsWith('/observations/')) return this.observations.fetch(request);
       const networkStart = url.pathname === '/container/network-v1';
-      if (url.pathname !== '/container' && !networkStart) return this.respond({ error: "Not found" }, 404);
+      const workspaceStart = url.pathname === '/container/workspace-v1';
+      if (url.pathname !== '/container' && !networkStart && !workspaceStart) return this.respond({ error: "Not found" }, 404);
+      if(workspaceStart && request.method!=='POST')return this.respond({error:'method_not_allowed'},405);
       if (networkStart && request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       const rawReservation = request.headers.get('x-mainbrella-reservation');
       const reservationId = rawReservation === null ? null : Number(rawReservation);
@@ -105,10 +117,13 @@ export class UserContainerController {
         if (!entitlement.active) return this.respond({ error: "subscription_required" }, 402);
         try {
           const selection = request.body ? await request.json() : {};
+          if(workspaceStart && (!validWorkspaceId(selection?.workspaceId) || !selection?.containerSnapshot?.id))return this.respond({error:'invalid_request'},400);
+          if(!workspaceStart && selection?.containerSnapshot)return this.respond({error:'invalid_request'},400);
           if (networkStart && selection?.internet !== false) return this.respond({ error: 'invalid_internet_policy' }, 400);
           const result = await this.start(selection);
           return result instanceof Response ? result : this.respond(result);
         } catch (error) {
+          if(workspaceStart){console.error('workspace_restore_failed');return this.respond({error:'workspace_restore_failed'},409);}
           console.error("User container start failed", error);
           return this.respond({ error: error.message || "Machine start failed" }, 500);
         }
@@ -145,6 +160,7 @@ export class UserContainerController {
           ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
           ...(metadata.catalogId ? { catalogId: metadata.catalogId } : {}),
           ...(metadata.imageDigest ? { imageDigest: metadata.imageDigest } : {}),
+          ...(metadata.workspaceId ? { workspaceId: metadata.workspaceId } : {}),
           createdAt: new Date(metadata.createdAt).toISOString(),
           expiresAt: new Date(metadata.expiresAt).toISOString(),
         }]
@@ -247,6 +263,8 @@ export class UserContainerController {
     const imageKey = selection.imageKey || "terminal";
     const image = Object.hasOwn(this.container.images, imageKey) ? this.container.images[imageKey] : undefined;
     if (!image) return this.respond({ error: "image_not_available" }, 409);
+    if(selection.workspaceId && (!Number.isSafeInteger(selection.workspaceExpiresAt) || selection.workspaceExpiresAt<=this.now()))return this.respond({error:'workspace_expired'},410);
+    if(selection.workspaceId && selection.imageDigest!==image)return this.respond({error:'workspace_image_incompatible'},409);
 
     const usage = (await this.ctx.storage.get(USAGE_KEY)) ?? {};
     const previousMetadata = await this.ctx.storage.get(METADATA_KEY);
@@ -270,6 +288,8 @@ export class UserContainerController {
       internet: selection.internet ?? true,
       reservationId: (await this.ctx.storage.get('machineReservation'))?.accepted,
       imageDigest: image,
+      imageKey,
+      ...(selection.workspaceId?{workspaceId:selection.workspaceId}:{}),
       ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,
@@ -287,7 +307,7 @@ export class UserContainerController {
         return this.respond({ error: 'subscription_required' }, 402);
       }
       this.container.start({
-        image,
+        ...(selection.workspaceId ? {containerSnapshot:{id:selection.containerSnapshot.id}} : {image}),
         instance: size.instance,
         entrypoint: ["sleep", "infinity"],
         enableInternet: metadata.internet,

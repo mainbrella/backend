@@ -7,6 +7,7 @@ import { accessFilesystem } from './filesystem.js';
 import { ManagedExecutions } from './executions.js';
 import { ContainerPreviews } from './previews.js';
 import { WorkloadWebhooks } from './webhooks.js';
+import { exportWorkspace } from './workspace-export.js';
 
 export class UserContainer extends DurableObject {
   constructor(ctx, env) {
@@ -39,6 +40,8 @@ export class UserContainer extends DurableObject {
   fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/features') return this.controller.fetch(request);
+    if (path === '/workspaces/export-v1') return exportWorkspace(this.controller,request,this.commands);
+    if (path.startsWith('/workspaces/')) return this.controller.fetch(request);
     if (path.startsWith('/observations/webhook')) return this.webhooks.fetch(request);
     if (path === '/previews') return this.previews.manage(request);
     if (path === '/preview' || path.startsWith('/preview/')) return this.previews.forward(request);

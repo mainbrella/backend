@@ -25,6 +25,7 @@
     "qualify:outbox": "node scripts/qualify-webhook-outbox.mjs",
     "verify:job3": "node scripts/verify-job3.mjs",
     "benchmark:api": "node scripts/benchmark-api.mjs",
+    "benchmark:sizes": "node scripts/benchmark-sizes.mjs",
     "status:canary": "node scripts/status-canary.mjs",
     "deploy:containers": "node scripts/deploy-containers.mjs",
     "deploy:api": "wrangler deploy --config wrangler.jsonc",

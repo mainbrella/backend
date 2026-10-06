@@ -1,6 +1,7 @@
 import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement, MACHINE_SIZES, machineSize } from './plan-policy.js';
 import { IMAGE_CATALOG } from './image-catalog.js';
 import { readFileBytes } from './file-contract.js';
+import { AccountWorkspaces } from './workspaces.js';
 
 const KEY = 'containerAccount';
 const CREATION_PREFIX = 'creation:';
@@ -15,6 +16,7 @@ export class ContainerAccountController {
   constructor(ctx, machineFor, now = () => Date.now()) {
     Object.assign(this, { ctx, machineFor, now });
     this.tail = Promise.resolve();
+    this.workspaces = new AccountWorkspaces(this);
   }
   async serialized(fn) {
     const previous = this.tail;
@@ -27,15 +29,17 @@ export class ContainerAccountController {
   async machine(state, id, method, entitlement, reservationId = state.reservations?.[id], selection) {
     // A versioned private start path prevents a runtime downgrade between
     // discovery and boot from silently ignoring the internet-off selection.
-    const path = method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
+    const path = method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
     const response = await this.machineFor(state.userId, id).fetch(new Request(`https://internal${path}`, {
       method, headers: { ...entitlementHeaders(entitlement), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
     }));
     if (!response.ok) {
       if (path === '/container/network-v1' && response.status === 404) throw new Error('network_policy_unavailable');
+      if (path === '/container/workspace-v1' && response.status === 404) throw new Error('persistence_unavailable');
       const data = await response.json().catch(() => null);
       if (data?.error === 'compute_allowance_exhausted') throw new Error('compute_allowance_exhausted');
+      if (['workspace_expired','workspace_image_incompatible','workspace_restore_failed'].includes(data?.error)) throw new Error(data.error);
       throw new Error(data?.error === 'container_start_canceled' ? 'container_not_running'
         : data?.error === 'subscription_required' ? 'subscription_required'
         : data?.error === 'image_not_available' ? 'image_not_available' : 'container_request_failed');
@@ -142,6 +146,8 @@ export class ContainerAccountController {
       alarmAt = Math.min(state.entitlement.validUntil, ...Object.values(state.pending).map(at => at + 90_000));
     }
     if (state.nextCreationExpiry) alarmAt = Math.min(alarmAt ?? Infinity, state.nextCreationExpiry);
+    const workspaceAlarm = await this.workspaces.nextAlarm();
+    if (Number.isFinite(workspaceAlarm)) alarmAt = Math.min(alarmAt ?? Infinity, workspaceAlarm);
     if (alarmAt) await this.ctx.storage.setAlarm(alarmAt);
     else await this.ctx.storage.deleteAlarm();
   }
@@ -258,6 +264,7 @@ export class ContainerAccountController {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === '/workspaces') return this.workspaces.fetch(request);
     if (url.pathname !== '/containers') return this.respond({ error: 'not_found' }, 404);
     if (!['GET', 'POST', 'DELETE', 'PUT'].includes(request.method)) return this.respond({ error: 'method_not_allowed' }, 405);
     const userId = request.headers.get('x-mainbrella-user');
@@ -270,11 +277,12 @@ export class ContainerAccountController {
     if (idempotencyKey !== null && !validIdempotencyKey(idempotencyKey)) return this.respond({ error: 'invalid_idempotency_key' }, 400);
     let reservation;
     try {
-      const selection = request.method === 'POST' && request.body ? await request.json() : undefined;
-      const size = machineSize(selection?.size ?? 'lite');
+      let selection = request.method === 'POST' && request.body ? await request.json() : undefined;
+      let size = machineSize(selection?.size ?? 'lite');
       if (!size) return this.respond({ error: 'invalid_size' }, 400);
       if (selection?.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
-      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id, ...(selection?.internet === false ? [false] : [])]);
+      const fingerprint = selection?.workspaceId ? JSON.stringify(['workspace', selection.workspaceId, selection.size ?? null, selection.internet ?? null])
+        : JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id, ...(selection?.internet === false ? [false] : [])]);
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
         await this.pruneCreations(state);
@@ -295,6 +303,10 @@ export class ContainerAccountController {
             }
           }
           const catalogImage = IMAGE_CATALOG.find(image => image.key === selection?.imageKey);
+          if (selection?.workspaceId) {
+            selection = await this.workspaces.restoreSelection(state, selection);
+            size = machineSize(selection.size);
+          }
           if (catalogImage && !(state.imageCatalog ?? []).some(image => image.id === catalogImage.id)) {
             return this.respond({ error: 'image_not_available' }, 409);
           }
@@ -311,6 +323,14 @@ export class ContainerAccountController {
             startAt + Math.floor(remaining / size.computeUnits));
           if (endAt <= startAt) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
           const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));
+          if (selection?.workspaceId) {
+            const response = await this.machineFor(state.userId, slot).fetch(new Request('https://internal/workspaces/restore-preflight-v1', {
+              method:'POST',body:JSON.stringify({imageKey:selection.imageKey,imageDigest:selection.imageDigest,expiresAt:selection.workspaceExpiresAt}) }));
+            if (!response.ok) {
+              const data = await response.json().catch(()=>null);
+              return this.respond({error:data?.error==='workspace_image_incompatible'?'workspace_image_incompatible':data?.error==='workspace_expired'?'workspace_expired':'persistence_unavailable'}, data?.error==='workspace_expired'?410:data?.error==='workspace_image_incompatible'?409:503);
+            }
+          }
           if (selection?.internet === false) {
             try {
               const signal = AbortSignal.timeout(5000);
@@ -374,7 +394,10 @@ export class ContainerAccountController {
       if (error.message === 'image_not_available') return this.respond({ error: error.message }, 409);
       if (error.message === 'compute_allowance_exhausted') return this.respond({ error: error.message }, 429);
       if (error.message === 'subscription_required') return this.respond({ error: error.message }, 402);
-      if (error.message === 'network_policy_unavailable') return this.respond({ error: error.message }, 503);
+      if (['network_policy_unavailable','persistence_unavailable'].includes(error.message)) return this.respond({ error: error.message }, 503);
+      if (error.message === 'workspace_expired') return this.respond({error:error.message},410);
+      if (error.message === 'workspace_not_found') return this.respond({error:error.message},404);
+      if (['workspace_not_ready','workspace_policy_conflict','workspace_image_incompatible','workspace_restore_failed'].includes(error.message)) return this.respond({error:error.message},409);
       return this.respond({ error: 'containers_unavailable' }, 503);
     }
   }
@@ -382,6 +405,7 @@ export class ContainerAccountController {
     return this.serialized(async () => {
       const state = await this.ctx.storage.get(KEY);
       if (!state) return;
+      await this.workspaces.prune();
       await this.pruneCreations(state);
       const entitlement = validEntitlement(state.entitlement, this.now()) ? state.entitlement : { active: false, plan: null, validUntil: null, checkedAt: state.entitlement.checkedAt };
       await this.reconcile(state, entitlement);

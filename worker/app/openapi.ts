@@ -12,6 +12,7 @@ import { registerPreviewRoutes } from './openapi-previews';
 import { registerStatusRoutes } from './openapi-status';
 import { registerObservationRoutes } from './openapi-observations';
 import { registerWebhookRoutes } from './openapi-webhooks';
+import { registerWorkspaceRoutes } from './openapi-workspaces';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerOperationsRoutes } from "./openapi-operations";
@@ -48,6 +49,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerStatusRoutes(api, handler);
   registerObservationRoutes(api, handler);
   registerWebhookRoutes(api, handler);
+  registerWorkspaceRoutes(api, handler);
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);

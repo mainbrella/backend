@@ -1,6 +1,7 @@
 export type MachineSize = 'lite' | 'small' | 'medium' | 'large' | 'xl';
 export interface Size { id: MachineSize; name: string; instance: string; cpuVcpu: number; memoryMiB: number; diskGB: number; computeUnits: number }
 export interface ContainerIdentity { id: string; createdAt: string }
+export interface Workspace {id:string;name:string;createdAt:string;expiresAt:number;source:ContainerIdentity;size:MachineSize;internet:boolean;imageDigest:string;imageId?:string;imageName?:string;catalogId?:string;bytes:number|null;archived:boolean;status:'saving'|'ready'|'failed'|'expired'|'deleted';stopRequested:boolean;stopCompleted:boolean}
 export interface FileEntry { name: string; path: string; type: 'file' | 'directory' | 'symlink' | 'fifo' | 'socket' | 'character' | 'block' | 'other'; size: number; mode: string; uid: number; gid: number; modifiedAt: string; linkTarget?: string }
 export interface DirectoryPage { path: string; entries: FileEntry[]; nextOffset: number | null }
 export interface ExecutionOptions { timeoutMs?: number; idempotencyKey?: string; stdin?: boolean; cwd?: string; env?: Record<string, string>; pty?: { cols: number; rows: number } }
@@ -31,9 +32,12 @@ export class MainbrellaError extends Error { code: string; status: number; idemp
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
+  workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number}|null;usage:{saved:number;reservedBytes:number}}>;
+    get(id:string):Promise<Workspace>;update(id:string,options:{name?:string;archived?:boolean}):Promise<Workspace>;delete(id:string):Promise<{deleted:true}>;
+    restore(id:string,options?:{idempotencyKey?:string;waitTimeoutMs?:number;pollIntervalMs?:number}):Promise<Sandbox>};
   request<T = unknown>(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string>; binary?: boolean; stream?: boolean; signal?: AbortSignal }): Promise<T>;
   capabilities(): Promise<Capabilities>; list(): Promise<AccountState>; connect(value: ContainerIdentity): Sandbox;
-  create(options?: { catalogId?: string; imageId?: string; size?: MachineSize; internet?: boolean; idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<Sandbox>;
+  create(options?: { catalogId?: string; imageId?: string; workspaceId?:string; size?: MachineSize; internet?: boolean; idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<Sandbox>;
 }
 export class Sandbox implements ContainerIdentity {
   internet?: boolean;
@@ -52,6 +56,9 @@ export class Sandbox implements ContainerIdentity {
     start(command: string | string[], options?: ExecutionOptions): Promise<Execution>;
     list(): Promise<{ executions: Omit<ExecutionRecord, 'stdout' | 'stderr'>[] }>; attach(id: string): Execution };
   kill(): Promise<AccountState>;
+  workspaceId?:string;
+  saveWorkspace(name:string,options?:{stop?:boolean;idempotencyKey?:string}):Promise<Workspace>;
+  exportWorkspace():Promise<Uint8Array>;
   webhook: { get(): Promise<{webhook: WebhookConfig | null}>; configure(url: string, options?: {replayFromCursor?: number}): Promise<{webhook: WebhookConfig; signingSecret: string}>;
     remove(): Promise<{removed: true}>; deliveries(): Promise<{deliveries: WebhookDelivery[]}>; retry(eventId: string): Promise<WebhookDelivery> };
   events(options?: {cursor?: number; limit?: number}): Promise<LifecyclePage>;

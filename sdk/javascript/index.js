@@ -43,6 +43,16 @@ export class Mainbrella {
     this.#fetch = fetcher;
     this.baseUrl = apiOrigin(baseUrl);
     this.timeoutMs = timeoutMs;
+    const workspacePath = id => {
+      if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id??''))throw new MainbrellaError('invalid_workspace_identity');
+      return `/workspaces/${id}`;
+    };
+    this.workspaces = {
+      list:()=>this.request('/workspaces'), get:id=>this.request(workspacePath(id)),
+      update:(id,options)=>this.request(workspacePath(id),{method:'PATCH',body:options}),
+      delete:id=>this.request(workspacePath(id),{method:'DELETE'}),
+      restore:(id,options={})=>{workspacePath(id);return this.create({...options,workspaceId:id});},
+    };
   }
   async request(path, { method = 'GET', body, headers = {}, binary = false, stream = false, signal } = {}) {
     if (!path.startsWith('/') || path.startsWith('//')) throw new MainbrellaError('invalid_api_path');
@@ -71,16 +81,17 @@ export class Mainbrella {
   capabilities() { return this.request('/capabilities'); }
   list() { return this.request('/containers'); }
   connect(value) { return new Sandbox(this, value); }
-  async create({ catalogId, imageId, size, internet, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
-    if (catalogId && imageId || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
+  async create({ catalogId, imageId, size, internet, workspaceId, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
+    if (catalogId && imageId || workspaceId && (catalogId || imageId || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(workspaceId)) || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
       || !Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
       throw new MainbrellaError('invalid_creation_options');
     }
     const deadline = Date.now() + waitTimeoutMs;
+    if(workspaceId && (await this.capabilities())?.persistence?.snapshots!==true)throw new MainbrellaError('persistence_unavailable',503,{idempotencyKey});
     if (size !== undefined && !['lite', 'small', 'medium', 'large', 'xl'].includes(size)) throw new MainbrellaError('invalid_creation_options');
     if (internet !== undefined && typeof internet !== 'boolean') throw new MainbrellaError('invalid_creation_options');
     if (internet === false && (await this.capabilities())?.networking?.internetControl !== true) throw new MainbrellaError('network_policy_unavailable', 503, { idempotencyKey });
-    const body = { ...(imageId ? { imageId } : catalogId ? { catalogId } : {}), ...(size !== undefined ? { size } : {}), ...(internet !== undefined ? { internet } : {}) };
+    const body = { ...(workspaceId?{workspaceId}:imageId ? { imageId } : catalogId ? { catalogId } : {}), ...(size !== undefined ? { size } : {}), ...(internet !== undefined ? { internet } : {}) };
     while (Date.now() < deadline) {
       try {
         const data = await this.request('/containers', { method: 'POST', body,
@@ -91,12 +102,13 @@ export class Mainbrella {
           const selected = data.containers?.find(c => c.id === creation.containerId && c.createdAt === creation.createdAt && c.status === 'running');
           if (!selected) throw new MainbrellaError('invalid_creation_response');
           if (internet === false && selected.internet !== false) throw new MainbrellaError('network_policy_unconfirmed', 409);
+          if(workspaceId && selected.workspaceId!==workspaceId)throw new MainbrellaError('workspace_restore_unconfirmed',409);
           const sandbox = this.connect(selected);
           sandbox.creationId = creation.id;
           return sandbox;
         }
       } catch (error) {
-        if (!(error instanceof MainbrellaError) || error.code === 'network_policy_unavailable' || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
+        if (!(error instanceof MainbrellaError) || ['network_policy_unavailable','persistence_unavailable'].includes(error.code) || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
           error.idempotencyKey = idempotencyKey;
           throw error;
         }
@@ -113,7 +125,7 @@ export class Sandbox {
     this.client = client;
     Object.assign(this, identity(value));
     if (typeof value.internet === 'boolean') this.internet = value.internet;
-    for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance']) if (typeof value[name] === 'string') this[name] = value[name];
+    for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance','workspaceId']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
       read: path => this.client.request(this.path('/containers/files', { path }), { binary: true }),
       write: (path, bytes) => {
@@ -174,6 +186,12 @@ export class Sandbox {
     };
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
+  async saveWorkspace(name,{stop=false,idempotencyKey=crypto.randomUUID()}={}) {
+    if(typeof name!=='string'||!name.length||name.length>80||typeof stop!=='boolean'||!/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey))throw new MainbrellaError('invalid_workspace_options');
+    try{return await this.client.request('/workspaces',{method:'POST',body:{id:this.id,createdAt:this.createdAt,name,stop},headers:{'Idempotency-Key':idempotencyKey}});}
+    catch(error){error.idempotencyKey=idempotencyKey;throw error;}
+  }
+  exportWorkspace(){return this.client.request(this.path('/containers/export'),{binary:true});}
   events({ cursor, limit } = {}) {
     return this.client.request(this.path('/containers/events', { ...(cursor !== undefined ? { cursor: String(cursor) } : {}), ...(limit !== undefined ? { limit: String(limit) } : {}) }));
   }
