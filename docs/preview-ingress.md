@@ -1,30 +1,35 @@
 # Protected preview ingress
 
-The local implementation supplies the private runtime, an isolated gateway,
-a separate routing-index schema and authenticated account API endpoints.
-Public previews remain disabled in the local configuration. Routing database
-bindings are present in the API and gateway configs. Read-only metadata checks
-on October 6, 2026 UTC verified the remote routing migration, table constraints
-and expiry index. `mainbrella.dev` is configured as the isolated preview domain
-in both local configs, with its HTTPS wildcard Worker route and both enablement
-flags false. Both domains are active in the configured Cloudflare account.
-Public Cloudflare/Google DNS checks verified wildcard resolution, and a TLS
-handshake verified the certificate for `*.mainbrella.dev` and `mainbrella.dev`.
-The prepared transport verifier passed against a temporarily enabled API and
-gateway using one Lite generation, with confirmed cleanup. Network Error Logging
-was disabled by the operator, and public responses no longer contain reporting
-headers. Issuance was disabled again after the transport run: its API version was
-`4af68011-cff8-47f7-ba56-903a4ffe8053`, and the gateway version is
-`086b5312-9d9e-4e9e-b9a9-77964669e21f`. Subsequent Medium runs passed second-account
-and replacement-generation isolation, but full framework/browser qualification
-remains incomplete. These version IDs describe the transport checkpoint, not
-the latest framework deployments. The operator logging review
-and subsequent framework qualification are recorded below.
-JavaScript/Python SDK
-helpers and capability-gated dashboard controls are implemented locally.
-`/capabilities` reports support only when explicitly enabled with a valid domain
-and both bindings. The deployed transport evidence is recorded below; a passing
-transport probe alone does not qualify the feature for public release.
+The private runtime, isolated gateway and authenticated account endpoints are
+live, with preview issuance enabled on `mainbrella.dev`. Wildcard DNS/TLS,
+routing schema, operator configurable-logging review and the earlier one-Lite
+transport probe passed. The October 6 UTC follow-up passed 46 checks with one
+additional primary-account Medium Node generation, including Next.js browser
+workflows at 390×844, 768×1024, 1280×800 and 1440×900, development WebSockets/hot
+reload, cross-account and replacement-generation isolation, and denial after
+stop. The report records `releaseQualified: true` and confirmed cleanup.
+
+Current deployed versions:
+
+- API: `b966bff2-9ad0-4263-bdc3-72765fb076c8`
+- Private runtime: `582003e9-0346-4f49-8425-5e752e96e480`
+- Gateway: `6ea1bc44-2aa1-404b-89d7-074a876e35ce`
+
+Both enablement flags are true. Public `/capabilities` confirms support; the
+final account checks confirm zero running containers, primary starts increased
+from 16 to 17, and secondary starts stayed at zero. The generation was stopped
+78 seconds after its creation request, within the approved 30-minute cap.
+JavaScript/Python SDK helpers and capability-gated dashboard controls are
+implemented locally; the deployed authenticated dashboard remains a separate
+integration check. Cookie sessions and absolute redirect rewriting remain
+unsupported. Historical checkpoints below describe earlier rollout states.
+
+Evidence is local and ignored by Git:
+[framework-final.json](../.wrangler/preview-framework-preparation/live-2026-10-06T03-37-54-654Z/framework-final.json),
+[final-rollout.json](../.wrangler/preview-framework-preparation/live-2026-10-06T03-37-54-654Z/final-rollout.json),
+and [final-state.json](../.wrangler/preview-framework-preparation/live-2026-10-06T03-37-54-654Z/final-state.json).
+The final runner records three cumulative starts across the framework batches;
+`startsAlreadyRequested: 2` and `maxNewStarts: 1` identify this follow-up's scope.
 
 ## Provider boundary
 
@@ -152,8 +157,8 @@ to preserve the payload, including preventing automatic analytics injection.
 [Cloudflare documents this restriction](https://developers.cloudflare.com/web-analytics/faq/).
 A private disposable HTML edge probe observed no external requests with these
 directives; the earlier browser failure recorded two external requests despite
-zero page errors and zero failed HTTP responses. The production header change
-still requires deployment and a real framework/browser run. This does not
+zero page errors and zero failed HTTP responses. The production header change was deployed and all four live browser viewports
+passed without external requests. This does not
 prevent an application from deliberately loading its own external resources.
 Operator/CDN logging policy is a deployment qualification item. Listing never
 returns tokens or hashes. Sharing a URL deliberately grants access to its app;
@@ -173,15 +178,15 @@ applies. See [Cloudflare's NEL documentation](https://developers.cloudflare.com/
 
 ## Configuration and rollout
 
-`wrangler.previews.jsonc` is deliberately disabled, with workers.dev and
-development preview URLs off. Its staged route is `https://*.mainbrella.dev/*`
+`wrangler.previews.jsonc` enables the qualified gateway, with workers.dev and
+development preview URLs off. Its route is `https://*.mainbrella.dev/*`
 in zone `e6597a41a75e1abb92f4bc5e5758c460`. Local API and gateway configurations
 include the separate routing database binding, matching `PREVIEW_DOMAIN` values
-of `mainbrella.dev` and `PREVIEWS_ENABLED: "false"`. `npm run check:previews` bundles
-this disabled gateway without deploying it. `npm run deploy` does not publish
-or enable the preview gateway.
+of `mainbrella.dev` and `PREVIEWS_ENABLED: "true"`. `npm run check:previews` bundles
+the gateway without deploying it. `npm run deploy` does not publish the preview
+gateway; deploy it separately with its own configuration.
 
-Before enabling:
+For a new rollout or requalification:
 
 1. Choose and establish ownership of a **separate registrable domain**, with
    wildcard DNS, Worker routing and wildcard TLS. Never use a hostname under
@@ -436,11 +441,12 @@ check with two external requests, zero page errors and zero failed HTTP response
 Both generations were confirmed stopped; the two-start budget is exhausted.
 The evidence is in
 [framework-recovery-2.json](../.wrangler/preview-framework-preparation/live-2026-10-06T03-37-54-654Z/framework-recovery-2.json).
-The pending work is to deploy the no-transform response change and qualify the
+The follow-up scope was to deploy the no-transform response change and qualify the
 full browser workflow at all four sizes, plus development WebSockets/hot reload
-and post-stop denial. A proposed follow-up needs one additional Medium Node start,
+and post-stop denial. The approved follow-up used one additional Medium Node start,
 at most 30 minutes, on the primary account and no starts on the secondary account.
-Agree that additional budget before enabling/deploying and running the follow-up.
+The completed follow-up and current deployed versions are recorded at the top
+of this runbook. Future paid runs require a new bounded budget.
 The private follow-up runner is prepared at
 `.wrangler/preview-framework-preparation/run-final.mjs`. It requires
 `--max-new-starts=1`, verifies the prior reports and unchanged verification inputs,
@@ -461,8 +467,8 @@ starts. `worker/app/previews.test.ts` covers account ownership, API keys, genera
 input limits and routing failure/reconciliation. `worker/preview-gateway.test.ts`
 covers exact hosts, expiry, hash routing, path/query/binary forwarding, aborts,
 WebSocket/stream passthrough and bounded cleanup. These checks use mocks, not
-provider transports. The prepared deployed transport run passed; the public
-feature still requires the remaining framework/browser and isolation checks.
+provider transports. The deployed transport and final framework/browser/isolation runs passed.
+Repeat affected checks when changing the runtime, gateway or routing policy.
 Use a dedicated account and a real Next.js or similar app listening on port 3000.
 Verify HTTP/assets, WebSockets, expiry, revocation of active transports, wrong
 tokens, port restrictions, cross-account isolation and generation replacement.

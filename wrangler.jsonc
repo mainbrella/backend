@@ -16,7 +16,7 @@
 		]
 	},
 	"vars": {
-		"PREVIEWS_ENABLED": "false",
+		"PREVIEWS_ENABLED": "true",
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
 	},

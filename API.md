@@ -422,8 +422,8 @@ Each account may redeem one trial ever. Retrying the same valid redemption retur
 identifies the contract. Execution/file limits come from the runtime's shared
 constants. Unsupported persistence, filesystem watchers and network
 policy features are explicit. `previews.supported` requires explicit enablement,
-an isolated preview domain, a routing database and the runtime binding. It remains
-false in the checked-in configuration. Preview links use opaque bearer tokens,
+an isolated preview domain, a routing database and the runtime binding. It is
+enabled in the qualified production configuration. Preview links use opaque bearer tokens,
 so `previews.signedUrls` remains false. `images.customBuilds` reflects configured build
 credentials; it does not establish build-service health. Resources currently
 advertise all five machine sizes. Regions are not selectable.
@@ -435,8 +435,8 @@ Capability discovery does not contact Stripe or reserve a start.
 
 ## Protected application previews
 
-These endpoints are implemented locally; public previews remain disabled until
-the isolated gateway/domain is configured and qualified. Check
+Protected previews are enabled on the isolated `mainbrella.dev` gateway after
+live transport, Next.js/browser and account/generation isolation qualification. Check
 `/capabilities` and use previews only when `previews.supported` is true.
 
 Start the application's HTTP server in an owned container first. Then use

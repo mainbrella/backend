@@ -9,8 +9,9 @@ exclusive to `POST /containers`; client ownership, plan, resource and lease
 headers are never forwarded.
 
 The [preview ingress design and private runtime contract](docs/preview-ingress.md)
-cover the local runtime, gateway, account endpoints and SDK/dashboard integration.
-Previews remain disabled pending isolated-domain rollout and transport qualification.
+cover the runtime, gateway, account endpoints and SDK/dashboard integration.
+Previews are enabled on `mainbrella.dev`; live transport, Next.js/browser,
+development WebSocket/hot reload and account/generation isolation checks passed.
 
 ## Browser terminal
 
@@ -397,11 +398,11 @@ foreground commands, filesystem metadata/mutations, managed argv/cwd/env, stdin,
 
 Protected application previews now have a private runtime, isolated gateway and
 authenticated `/containers/previews` API, with hash-only routing in a separate
-database. They remain disabled until an isolated domain/database is configured
-and qualified. `npm run check:previews` bundles the disabled gateway without
+database. They are enabled on the qualified isolated `mainbrella.dev` gateway.
+`npm run check:previews` bundles the gateway without
 deployment. The default deploy command does not publish it. See
 [the ingress handoff](docs/preview-ingress.md) for configuration, sharing semantics,
-failure reconciliation and live release gates. SDK helpers and capability-gated dashboard controls exist locally; isolated-domain qualification remains.
+failure reconciliation and recorded live evidence. SDK helpers and capability-gated dashboard controls exist locally; verify the deployed dashboard controls separately.
 `npm run verify:previews` supplies a one-start transport probe with recovery
 checkpoints; follow the handoff's required arguments and explicit budget. Its
 success does not satisfy the remaining framework, isolation and deployment gates.

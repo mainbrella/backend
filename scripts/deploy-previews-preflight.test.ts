@@ -100,13 +100,13 @@ test('missing migration, constraints, expiry index and malformed remote evidence
   }
 });
 
-test('checked-in staged configuration validates isolation while keeping issuance disabled', () => {
+test('checked-in qualified configuration validates isolation with issuance enabled', () => {
   const f = fixture();
   f.options.api = JSON.parse(read('wrangler.jsonc'));
   f.options.gateway = JSON.parse(read('wrangler.previews.jsonc'));
   f.options.containers = JSON.parse(read('wrangler.containers.jsonc'));
   const result = previewPreflight({ ...f.options, local: true });
-  assert.equal(result.issuanceEnabled, false);
+  assert.equal(result.issuanceEnabled, true);
   assert.equal(result.releaseQualified, false);
   assert.equal(f.calls.length, 0);
 });

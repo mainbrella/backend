@@ -92,7 +92,8 @@ pagination, symlinks and mutation reconciliation. Recursive deletion is explicit
 moves never overwrite, and root cannot be mutated. Watchers remain unsupported.
 
 For an application preview, first check `previews.supported` in `/capabilities`.
-Public previews are disabled in the checked-in configuration. When enabled,
+Protected previews are enabled on `mainbrella.dev` after live qualification.
+When capability discovery confirms support,
 start the server on an eligible application port, then POST
 `/containers/previews?id=<id>&createdAt=<generation>` with `{"port":3000}`.
 The returned URL is a bearer credential: share only as requested and keep it out

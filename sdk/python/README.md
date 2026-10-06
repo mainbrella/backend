@@ -104,7 +104,8 @@ Revocation closes active connections. Stopping or replacing the generation
 invalidates its links. Application cookies are stripped; cookie sessions and
 absolute redirect rewriting are unsupported. Host and forwarded host/protocol
 reflect the validated HTTPS preview origin; the caller's Origin is preserved.
-Public previews remain disabled pending completion of live qualification.
+Protected previews are enabled on `mainbrella.dev` after live qualification;
+check `previews.supported` in `/capabilities` before using them.
 
 ## Workload observations and webhooks
 
