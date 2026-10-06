@@ -19,3 +19,22 @@ The customer API was qualified on 2026-10-06 UTC with exactly two measured start
 The original verifier reported a cleanup failure because deleting the already replaced source returned the expected fenced HTTP 409. Issuance was immediately disabled (`3b7f3438-f0ca-41ed-a24d-b5b8a2d0892f`). Reconciliation confirmed both exact generations absent, the account empty, the saved workspace deleted and the start delta still exactly two. The verifier now accepts a cleanup 409 only after an authenticated list confirms that exact generation absent; its regression tests also reject a still-present generation. The original failed report is preserved alongside separate reconciliation evidence in `.wrangler/workspaces-qualification-20261006-release/`. No qualification rerun or additional start was used. Snapshot issuance is enabled following that reconciled qualification. Live dashboard save/restore and an installed Python SDK workspace workflow have not been qualified by this run.
 
 Backups are customer downloads, not a managed offsite backup service. Physical provider snapshots follow provider retention; public delete revokes new admission and releases quota without guaranteeing immediate provider erasure. Image changes can make snapshots incompatible, so image rollout must retain needed digests or require customer export before replacement. Workspaces are subject to current plan limits; retained metadata remains accessible during billing outages.
+
+## Installed SDK workspace qualification
+
+On October 6, 2026, clean registry installations of `@mainbrella/sdk@0.1.0`
+and `mainbrella==0.1.0` each passed a production save/stop, restore and portable
+export workflow. The checks exercised the public SDK save and restore helpers,
+same-key save replay, list/get/rename, cross-account denial, binary bytes,
+symlink/mode/mtime preservation and stale-generation fencing. Both exported
+archives were inspected independently on the host and retained as private evidence.
+
+The JavaScript run used two Lite Node starts and Python used two Lite Python
+starts. Account usage increased from 61 to 65; both exact generations from each
+run are absent, both temporary workspaces are deleted, and pre-existing workspace
+metadata was preserved. Evidence is in
+`.wrangler/workspace-clients-20261006/javascript.json` and `python.json`, with
+the corresponding `*-workspace.tar.gz` exports. These checks consumed four of
+the approved six starts. Dashboard verification is a separate pending check
+requiring an authenticated browser session; the two remaining starts are reserved
+for it. No backend deployment or capability change was needed.

@@ -136,6 +136,16 @@ against production; the separate two-start workspace API qualification and the
 local SDK workspace contract tests are separate evidence, not an equivalent SDK
 deployed workspace test.
 
+The subsequent October 6 registry-installed workspace qualification closes that
+SDK-specific gap: both published 0.1.0 packages passed save/stop, same-key save
+replay, restore, binary and filesystem metadata preservation, ownership denial,
+stale-generation fencing, and independently inspected portable exports. Each
+language consumed exactly two additional starts and confirmed generation and
+workspace cleanup. Evidence is in
+`.wrangler/workspace-clients-20261006/javascript.json` and `python.json`;
+see `docs/workspaces.md`. These runs were separately authorized within a
+six-start client qualification budget and do not replace the original release gate.
+
 The Python wheel and source archive above were published unchanged. PyPI metadata
 and fresh downloads match both SHA-256 checksums, declare Python 3.10+ and
 `GPL-3.0-only`, and have no runtime dependencies. A fresh `pip install

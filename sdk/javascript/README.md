@@ -137,7 +137,7 @@ The same local npm archive installs the dependency-free `mainbrella` command. Se
 
 `create` and `start` require an explicit stable idempotency key. Errors include it after an ambiguous response. Repeat the same options within retention; never issue a new key to resolve uncertainty. Every workload action requires both container ID and exact generation. There is no bulk-stop command. `job` controls inspect/cancel/stream/signal/resize/send input to known execution IDs; `jobs` lists retained managed jobs. Results are JSON and streamed events are newline-delimited JSON. `run` returns the guest exit code (124 on timeout, 125 on truncated output); API/CLI errors exit 1 and emit sanitized JSON on stderr.
 
-`file read --path /guest/file --output /local/new-file` creates a new local file without overwriting. `file write --path /guest/file --source /local/file` transfers binary bytes up to 1 MiB. `job input --source /local/chunk` accepts up to 64 KiB. CLI input writes never retry automatically. Registry publication and live qualification remain pending.
+`file read --path /guest/file --output /local/new-file` creates a new local file without overwriting. `file write --path /guest/file --source /local/file` transfers binary bytes up to 1 MiB. `job input --source /local/chunk` accepts up to 64 KiB. CLI input writes never retry automatically. The CLI is included in the published npm package; check deployed capabilities before using optional features.
 
 ## Workload observations and webhooks
 
