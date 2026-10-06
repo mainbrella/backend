@@ -405,6 +405,9 @@ failure reconciliation and live release gates. SDK helpers and capability-gated 
 `npm run verify:previews` supplies a one-start transport probe with recovery
 checkpoints; follow the handoff's required arguments and explicit budget. Its
 success does not satisfy the remaining framework, isolation and deployment gates.
+`npm run previews:preflight` checks the staged isolation/routing configuration and
+remote routing schema with no writes or starts; `-- --local` checks configuration
+only. Run it separately from the account deployment preflight before preview rollout.
 
 `npm run verify:agent` exercises create, execution, files, streaming and cleanup,
 consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs

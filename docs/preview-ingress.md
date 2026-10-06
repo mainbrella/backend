@@ -3,11 +3,14 @@
 The local implementation supplies the private runtime, an isolated gateway,
 a separate routing-index schema and authenticated account API endpoints.
 Public previews remain disabled in the local configuration. Routing database
-bindings are present in the API and gateway configs; migration and deployment
-are unverified, and no preview domain is configured. JavaScript/Python SDK
+bindings are present in the API and gateway configs. Read-only metadata checks
+on October 6, 2026 UTC verified the remote routing migration, table constraints
+and expiry index; Worker deployment remains unqualified, and no preview domain
+is configured. JavaScript/Python SDK
 helpers and capability-gated dashboard controls are implemented locally.
-`/capabilities` reports support only when explicitly enabled with a valid domain and both bindings. No deployment, provider experiment
-or paid start was performed.
+`/capabilities` reports support only when explicitly enabled with a valid domain
+and both bindings. No deployment, provider transport experiment or paid start
+was performed during this preparation.
 
 ## Provider boundary
 
@@ -168,6 +171,34 @@ and absolute redirect rewriting are unsupported. Relative redirects are passed
 through without following them. Preserve and qualify WebSocket Origin behavior
 with a real framework; do not bypass its checks or weaken the account site's
 origin policy. CSP and service workers remain live qualification items.
+
+### Read-only rollout preflight
+
+After staging matching domains, explicit enablement flags and the wildcard
+gateway route, run `npm run previews:preflight -- --local` to check configuration
+without remote requests. Keep both flags `false` during staging. After applying
+the routing migration, run `npm run previews:preflight` before publishing the
+gateway or advertising preview support from the API. Repeat it after changing
+either configuration, including the enablement flags. The general
+`deploy:preflight` checks the account database and compatibility predecessor;
+it does not replace this separate preview check.
+
+The preview preflight verifies matching pinned accounts and runtime bindings,
+database isolation, matching routing migration settings, disabled development
+URLs/public runtime routes, request signals, the exact isolated wildcard route,
+disabled gateway logging and the cleanup schedule. Its default mode uses only
+remote schema/migration SELECTs on `PREVIEW_ROUTES`: it checks the applied
+`001_preview_routes.sql`, table constraints and expiry index without reading
+routing rows, token hashes or account data. It makes no database writes, deploys
+no Workers and consumes no starts. Configuration or schema failures stop it
+before rollout; the current unconfigured checkout fails before remote reads.
+
+A pass still reports `releaseQualified: false`. Configuration checks do not
+establish domain ownership, registrable-domain isolation, DNS/wildcard TLS,
+provider/CDN logging settings or that deployed Workers match these files.
+Retain those operator reviews and the bounded transport/framework/isolation
+evidence separately. `--local` additionally leaves remote schema verification
+pending.
 
 ## SDK and dashboard integration
 
