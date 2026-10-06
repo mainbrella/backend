@@ -51,7 +51,7 @@ test('gateway forwards paths, queries, methods, binary bodies and abort signals 
   const abort = new AbortController();
   const request = new Request(`https://${token}.${domain}/assets/file.bin?x=1&x=2`, { method: 'POST', body: new Uint8Array([0, 255, 1]),
     signal: abort.signal, headers: { authorization: 'Bearer account-secret', cookie: 'mainbrella_session=account-secret',
-      'x-preview-created-at': 'attacker', 'x-preview-token': 'attacker', 'x-mainbrella-user': 'victim',
+      'x-preview-created-at': 'attacker', 'x-preview-token': 'attacker', 'x-preview-origin': 'https://attacker.example', 'x-mainbrella-user': 'victim',
       'cf-connecting-ip': 'secret', 'x-forwarded-host': 'api.mainbrella.com', forwarded: 'secret',
       referer: `https://${token}.${domain}/secret`, 'content-type': 'application/octet-stream',
       origin: `https://${token}.${domain}` } });
@@ -65,6 +65,7 @@ test('gateway forwards paths, queries, methods, binary bodies and abort signals 
   assert.equal(internal.redirect, 'manual');
   assert.equal(internal.headers.get('x-preview-created-at'), generation);
   assert.equal(internal.headers.get('x-preview-token'), token);
+  assert.equal(internal.headers.get('x-preview-origin'), `https://${token}.${domain}`);
   for (const key of ['authorization', 'cookie', 'x-mainbrella-user', 'cf-connecting-ip', 'x-forwarded-host', 'forwarded', 'referer']) {
     assert.equal(internal.headers.get(key), null, key);
   }

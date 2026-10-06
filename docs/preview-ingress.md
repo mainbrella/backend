@@ -348,6 +348,65 @@ recorded separately. Both API and gateway were restored to disabled issuance
 after the test. The next live run needs a separately bounded budget and a second
 account credential for the remaining framework/isolation gates.
 
+## October 5 operator logging review and next qualification batch
+
+The operator's Cloudflare dashboard screenshot of `mainbrella-previews` showed
+Logs, Traces and Logpush disabled, no export destinations, and no connected Tail
+Worker. The displayed `observability.enabled: false` agrees with the tracked
+gateway configuration. The operator separately confirmed Network Error Logging
+off for `mainbrella.dev`, domain Logpush not enabled, and no HTTP Requests export
+jobs. This completes the operator review of configurable logging for the current
+gateway/zone. Cloudflare's internal retention is a separate provider policy; this
+review does not establish that the provider retains no request metadata. Repeat
+the review after changing logging/export settings or adding integrations.
+
+Authenticated account reads confirmed that both supplied test keys have active
+Builder entitlements and neither account has a running container. Credentials
+stay in the ignored backend `.env`; the primary key is `MAINBRELLA_API_KEY` and
+the second account key is `MAINBRELLA_API_KEY2`. Do not include either in reports
+or upload them into the guest.
+
+The proposed next batch needs approval before deployment or paid starts:
+
+- Temporarily enable the existing API and gateway preview flags; preserve the
+  runtime/image map and record deployed versions. Restore disabled issuance on
+  failure or incomplete evidence.
+- Use at most two sequential **Medium** Node generations on the primary account,
+  with at most 30 minutes of runtime per generation. Medium provides 1 vCPU and
+  6 GiB RAM for framework install/build work. No starts on the second account.
+  This caps requested runtime at 10 compute-unit-hours, separate from the two
+  starts. An interrupted runner still requires reconciliation; the Builder
+  provider/session lease may last up to one hour without confirmed cleanup.
+- Run a pinned, minimal Next.js application on port 3000; inspect HTML, static
+  assets, client hydration, nested navigation/refresh, API requests, development
+  WebSocket Origin behavior, CSP and service-worker behavior. Record any
+  framework limitations rather than weakening its origin checks.
+- With the active second account, attempt primary-generation preview list,
+  issuance and revocation. Confirm denial and continued primary-account access.
+- Stop the first exact generation, recreate the same slot once, and check old
+  URLs and old-generation management requests stay denied while a fresh preview
+  works. Check both a forged grant ID and the known first-generation grant ID.
+- Retain recovery keys and exact generations before every creation. Abort on
+  failed checks; no new-key retries, size escalation or additional starts.
+  Confirm each created generation absent before proceeding or concluding.
+
+The pinned fixture is prepared privately under
+`.wrangler/preview-framework-preparation/nextjs/` with Next.js 16.3.8 and React
+19.3.0, an exact npm lockfile, and no application credentials or external
+telemetry. A production build and eleven local HTTP checks passed: readiness,
+root HTML, CSP, framework asset discovery/delivery, nested routing, API POST,
+service-worker script delivery, server-action discovery/redirect/result. The
+local server was stopped. These checks do not establish browser execution or
+gateway/provider behavior. The private `local-check.json` records source hashes;
+`nextjs-source.tar.gz` contains only those source files and fits the existing
+1 MiB transfer limit. Upload source, run `npm ci` and build in the guest so the
+local macOS dependencies/build are not reused on Linux. Use
+`NEXT_TELEMETRY_DISABLED=1` for install/build/server execution.
+
+The existing one-start `verify:previews` fixture is already qualified for its
+transport scope. It is not the framework/isolation runner and need not be
+repeated just to spend another start. The next batch remains unexecuted.
+
 ## Qualification gates
 
 `node --test containers/previews.test.mjs` exercises the runtime guard with no

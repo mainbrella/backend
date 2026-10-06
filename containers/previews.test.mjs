@@ -135,6 +135,46 @@ test('HTTP preserves application path, body and redirect, strips platform creden
   assert.equal((await f.forward(grant)).status, 403);
 });
 
+test('gateway-attested origin restores app host semantics without trusting client forwarding headers or rewriting Origin', async () => {
+  const f = fixture();
+  const grant = await f.issue();
+  const host = `${grant.token}.preview.example`;
+  const origin = `https://${host}`;
+  const response = await f.forward(grant, { method: 'POST', body: 'action', headers: {
+    'x-preview-origin': origin, host: 'api.mainbrella.com', 'x-forwarded-host': 'attacker.example',
+    'x-forwarded-proto': 'http', origin: 'https://other.example', authorization: 'account-secret', cookie: 'account-secret',
+  } });
+  assert.equal(response.status, 200);
+  await response.text();
+  const request = f.calls[0].request;
+  assert.equal(request.headers.get('host'), host);
+  assert.equal(request.headers.get('x-forwarded-host'), host);
+  assert.equal(request.headers.get('x-forwarded-proto'), 'https');
+  assert.equal(request.headers.get('origin'), 'https://other.example');
+  for (const name of ['x-preview-origin', 'x-preview-token', 'x-preview-created-at', 'authorization', 'cookie']) {
+    assert.equal(request.headers.get(name), null, name);
+  }
+  assert.equal(response.headers.get('set-cookie'), null);
+  assert.equal(f.previews.active.size, 0);
+});
+
+test('malformed or token-mismatched app origins fail before contacting the guest', async () => {
+  const f = fixture();
+  const grant = await f.issue();
+  const host = `${grant.token}.preview.example`;
+  for (const origin of ['', 'https://api.mainbrella.com', `http://${host}`, `https://${host}/`,
+    `https://${host}:8443`, `https://${host}?secret=x`, `https://user@${host}`,
+    `https://${'a'.repeat(48)}.preview.example`, `https://${grant.token}.mainbrella.com`,
+    `https://${grant.token}.apps.mainbrella.com`, `https://${grant.token}.localhost`,
+    `https://${grant.token}.-preview.example`, `https://${grant.token}.preview.example.`]) {
+    assert.equal((await f.forward(grant, { headers: { 'x-preview-origin': origin } })).status, 403, origin);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.previews.active.size, 0);
+  // Legacy private requests remain compatible during runtime-first rollout.
+  assert.equal((await f.forward(grant)).status, 200);
+});
+
 test('expiry, revocation and loss of paid access fail closed; revoked grants release capacity', async () => {
   const f = fixture();
   const grant = await f.issue({ port: 3000, ttlSeconds: 60 });

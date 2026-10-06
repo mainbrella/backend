@@ -34,6 +34,7 @@ export async function handlePreviewGateway(request: Request, env: PreviewRouting
     }
     headers.set('x-preview-created-at', route.created_at);
     headers.set('x-preview-token', token);
+    headers.set('x-preview-origin', url.origin);
     const target = new URL('https://internal');
     target.pathname = `/preview${url.pathname}`;
     target.search = url.search;

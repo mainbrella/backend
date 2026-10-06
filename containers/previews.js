@@ -1,5 +1,5 @@
 import { DEFAULT_PREVIEW_TTL_SECONDS, MAX_PREVIEW_CONNECTIONS, MAX_PREVIEW_GRANTS,
-  MAX_PREVIEW_FRAME_BYTES, PREVIEW_CONNECT_TIMEOUT_MS, validPreviewId, validPreviewOptions, validPreviewToken } from './preview-contract.js';
+  MAX_PREVIEW_FRAME_BYTES, PREVIEW_CONNECT_TIMEOUT_MS, validPreviewId, validPreviewOptions, validPreviewOrigin, validPreviewToken } from './preview-contract.js';
 
 const STORAGE_KEY = 'previewGrants';
 const randomHex = length => [...crypto.getRandomValues(new Uint8Array(length))].map(byte => byte.toString(16).padStart(2, '0')).join('');
@@ -127,6 +127,10 @@ export class ContainerPreviews {
     const url = new URL(request.url);
     const token = request.headers.get('x-preview-token');
     if (!validPreviewToken(token)) return c.respond({ error: 'preview_unavailable' }, 403);
+    const origin = request.headers.get('x-preview-origin');
+    // Missing origin keeps older gateways compatible during runtime-first
+    // rollout. A present but invalid attestation always fails closed.
+    if (origin !== null && !validPreviewOrigin(origin, token)) return c.respond({ error: 'preview_unavailable' }, 403);
     const tokenHash = await hash(token);
     const admission = await c.serialized(async () => {
       const metadata = await this.metadata(request.headers.get('x-preview-created-at'));
@@ -141,6 +145,12 @@ export class ContainerPreviews {
         if (name.startsWith('x-preview-') || name.startsWith('x-mainbrella-')
           || name.startsWith('x-exec-') || name.startsWith('x-terminal-') || name.startsWith('x-ssh-')
           || ['authorization', 'cookie', 'host', 'forwarded', 'x-forwarded-host', 'x-forwarded-for', 'x-forwarded-proto'].includes(name)) headers.delete(name);
+      }
+      if (origin !== null) {
+        const host = new URL(origin).host;
+        headers.set('host', host);
+        headers.set('x-forwarded-host', host);
+        headers.set('x-forwarded-proto', 'https');
       }
       const target = new URL('http://container');
       target.pathname = url.pathname.slice('/preview'.length) || '/';
@@ -180,8 +190,8 @@ export class ContainerPreviews {
       const headers = new Headers(response.headers);
       headers.set('cache-control', 'no-store');
       headers.set('referrer-policy', 'no-referrer');
-      // Cookie semantics and host/redirect rewriting belong to the future
-      // isolated gateway. Until then this private primitive is cookie-free.
+      // Cookie-based application sessions remain unsupported. Forwarding the
+      // attested app origin must never propagate account cookies to the guest.
       headers.delete('set-cookie');
       if (response.status === 101) {
         if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !response.webSocket) throw new Error('bad_upgrade');
