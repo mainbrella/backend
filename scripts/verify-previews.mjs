@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -117,6 +117,19 @@ export async function verifyPreviews(client, {
     requireCheck(typeof appSource === 'string' && Buffer.byteLength(appSource) < 16 * 1024);
     const discovery = await request(new URL('/capabilities', client.baseUrl));
     requireCheck(discovery.ok && (await discovery.json()).previews?.supported === true);
+    // Check the deployed edge before spending a start or issuing a bearer URL.
+    // A random, unissued token exercises wildcard DNS/TLS and the gateway route.
+    // Cloudflare can add reporting headers after the Worker returns its response.
+    await stage('edge');
+    const edge = await request(new URL(`https://${randomBytes(24).toString('hex')}.${previewDomain}/`));
+    try {
+      requireCheck(edge.status === 404 && edge.headers.get('referrer-policy') === 'no-referrer'
+        && edge.headers.get('cache-control')?.includes('no-store')
+        && !['nel', 'report-to', 'reporting-endpoints'].some(name => edge.headers.has(name)));
+    } finally { await edge.body?.cancel().catch(() => {}); }
+    report.checks.gatewayDnsTls = true;
+    report.checks.browserReportingDisabled = true;
+    await stage('preflight');
     const before = await deploymentPreflight(client);
     report.apiVersion = before.apiVersion; report.preexisting = before.existing;
     report.creationKey = randomUUID(); report.cleanup = 'reconcile_manually'; await stage('create');

@@ -45,7 +45,7 @@ test('preview URL validation rejects account origins, redirects, port/generation
   }
 });
 
-async function fixture(t, { fail, preexisting = false, earlyExpiry = false, earlyStream = false, starting = false, checkpointFailure } = {}) {
+async function fixture(t, { fail, edgeHeaders, preexisting = false, earlyExpiry = false, earlyStream = false, starting = false, checkpointFailure } = {}) {
   const app = createPreviewApp();
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   t.after(() => app.close());
@@ -112,7 +112,12 @@ async function fixture(t, { fail, preexisting = false, earlyExpiry = false, earl
       return Response.json(fail === 'capabilities' ? { previews: { supported: false } } : capabilities);
     }
     const entry = lookup(url);
-    if (!entry || entry.revoked || entry.grant.expiresAt <= clock) return new Response('Unavailable', { status: 404 });
+    if (!entry) {
+      if (fail === 'edgeTls') throw new Error(key);
+      return new Response('Unavailable', { status: fail === 'edgeRouting' ? 522 : 404,
+        headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', ...edgeHeaders } });
+    }
+    if (entry.revoked || entry.grant.expiresAt <= clock) return new Response('Unavailable', { status: 404 });
     if (!owned) return new Response('Unavailable', { status: 403 });
     const headers = new Headers(options.headers); for (const name of ['authorization', 'cookie', 'referer']) headers.delete(name);
     if (fail === 'http') return new Response(key);
@@ -161,13 +166,33 @@ test('one-start verifier exercises real HTTP/binary/WebSocket fixture and labels
   const f = await fixture(t);
   const report = await verifyPreviews(f.client, f.options);
   assert.equal(report.ok, true, JSON.stringify(report)); assert.equal(report.cleanup, 'completed'); assert.equal(report.releaseQualified, false);
-  assert.deepEqual(Object.keys(report.checks), ['application', 'httpAssetsBinary', 'credentialStripping', 'relativeRedirect',
+  assert.deepEqual(Object.keys(report.checks), ['gatewayDnsTls', 'browserReportingDisabled', 'application', 'httpAssetsBinary', 'credentialStripping', 'relativeRedirect',
     'metadataOnly', 'controlPortRejected', 'gatewayIsolation', 'websocketEcho', 'activeRevocation', 'activeExpiry', 'activeStop', 'stoppedAccess']);
   assert.equal(f.calls.filter(c => c === 'create').length, 1); assert.equal(f.calls.filter(c => c === 'kill').length, 1);
   assert.deepEqual(report.preexisting, [existing]); assert.deepEqual(report.container, { id: identity.id, createdAt: identity.createdAt });
   const evidence = JSON.stringify(f.snapshots);
   assert.equal(evidence.includes(key), false);
   for (const token of f.grants.keys()) assert.equal(evidence.includes(token), false);
+});
+
+test('edge TLS/routing failures and browser reporting headers prevent paid starts and grant issuance', async t => {
+  for (const options of [{ fail: 'edgeTls' }, { fail: 'edgeRouting' },
+    { edgeHeaders: { NEL: '{"report_to":"cf-nel","max_age":604800}' } },
+    { edgeHeaders: { 'Report-To': '{"group":"cf-nel"}' } },
+    { edgeHeaders: { 'Reporting-Endpoints': 'default="https://collector.example"' } },
+    { edgeHeaders: { 'referrer-policy': 'unsafe-url' } },
+    { edgeHeaders: { 'cache-control': 'public, max-age=3600' } }]) {
+    const f = await fixture(t, options);
+    const report = await verifyPreviews(f.client, f.options);
+    assert.equal(report.ok, false);
+    assert.equal(report.error, 'edge_failed');
+    assert.equal(report.cleanup, 'not_needed');
+    assert.equal(report.creationKey, undefined);
+    assert.equal(f.calls.includes('create'), false);
+    assert.equal(f.calls.includes('issue'), false);
+    assert.equal(f.calls.includes('kill'), false);
+    assert.equal(JSON.stringify(report).includes(key), false);
+  }
 });
 
 test('disabled previews and ambiguous/pre-existing creation never stop guessed ownership', async t => {

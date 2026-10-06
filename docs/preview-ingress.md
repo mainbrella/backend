@@ -5,12 +5,23 @@ a separate routing-index schema and authenticated account API endpoints.
 Public previews remain disabled in the local configuration. Routing database
 bindings are present in the API and gateway configs. Read-only metadata checks
 on October 6, 2026 UTC verified the remote routing migration, table constraints
-and expiry index; Worker deployment remains unqualified, and no preview domain
-is configured. JavaScript/Python SDK
+and expiry index. `mainbrella.dev` is configured as the isolated preview domain
+in both local configs, with its HTTPS wildcard Worker route and both enablement
+flags false. Both domains are active in the configured Cloudflare account.
+Public Cloudflare/Google DNS checks verified wildcard resolution, and a TLS
+handshake verified the certificate for `*.mainbrella.dev` and `mainbrella.dev`.
+The prepared transport verifier passed against a temporarily enabled API and
+gateway using one Lite generation, with confirmed cleanup. Network Error Logging
+was disabled by the operator, and public responses no longer contain reporting
+headers. Issuance was disabled again after the run: the current API version is
+`4af68011-cff8-47f7-ba56-903a4ffe8053`, and the gateway version is
+`086b5312-9d9e-4e9e-b9a9-77964669e21f`. Real-framework/browser, second-account,
+replacement-generation and full CDN logging qualification remain pending.
+JavaScript/Python SDK
 helpers and capability-gated dashboard controls are implemented locally.
 `/capabilities` reports support only when explicitly enabled with a valid domain
-and both bindings. No deployment, provider transport experiment or paid start
-was performed during this preparation.
+and both bindings. The deployed transport evidence is recorded below; a passing
+transport probe alone does not qualify the feature for public release.
 
 ## Provider boundary
 
@@ -23,7 +34,8 @@ connection returns an error and never creates or restarts a container.
 
 Sources checked October 5, 2026: [Durable Object container API](https://developers.cloudflare.com/durable-objects/api/container/)
 and [WebSocket forwarding example](https://developers.cloudflare.com/containers/examples/websocket/).
-Local tests use fake Fetchers and sockets; they do not establish provider behavior.
+Local tests use fake Fetchers and sockets; deployed provider transport evidence
+comes from the bounded verification run below.
 
 ## Implemented private runtime contract
 
@@ -129,11 +141,25 @@ Operator/CDN logging policy is a deployment qualification item. Listing never
 returns tokens or hashes. Sharing a URL deliberately grants access to its app;
 only the account owner can issue/list/revoke it.
 
+The initial deployed `mainbrella.dev` route added `NEL` and `Report-To`
+headers even with gateway observability disabled. Browser network-error reports
+can include the requested URL, whose hostname would contain a bearer token.
+Disable Network Error Logging for this zone using its dashboard setting or
+`PATCH /zones/e6597a41a75e1abb92f4bc5e5758c460/settings/nel` with
+`{"value":"off"}` and a credential with Zone Settings Edit permission. Verify
+the public response no longer advertises reporting before issuing real grants.
+The operator disabled NEL before the October 6 run, and the verifier and final
+public checks confirmed those reporting headers are absent.
+This resolves browser reporting only; the remaining CDN/Worker log review still
+applies. See [Cloudflare's NEL documentation](https://developers.cloudflare.com/network-error-logging/).
+
 ## Configuration and rollout
 
-`wrangler.previews.jsonc` is deliberately disabled, with no public routes,
-workers.dev or preview URL. Local API and gateway configurations include the
-separate routing database binding; the API enablement/domain variables remain absent. `npm run check:previews` bundles
+`wrangler.previews.jsonc` is deliberately disabled, with workers.dev and
+development preview URLs off. Its staged route is `https://*.mainbrella.dev/*`
+in zone `e6597a41a75e1abb92f4bc5e5758c460`. Local API and gateway configurations
+include the separate routing database binding, matching `PREVIEW_DOMAIN` values
+of `mainbrella.dev` and `PREVIEWS_ENABLED: "false"`. `npm run check:previews` bundles
 this disabled gateway without deploying it. `npm run deploy` does not publish
 or enable the preview gateway.
 
@@ -191,7 +217,9 @@ remote schema/migration SELECTs on `PREVIEW_ROUTES`: it checks the applied
 `001_preview_routes.sql`, table constraints and expiry index without reading
 routing rows, token hashes or account data. It makes no database writes, deploys
 no Workers and consumes no starts. Configuration or schema failures stop it
-before rollout; the current unconfigured checkout fails before remote reads.
+before rollout. Local and remote preflights passed for the staged
+`mainbrella.dev` configuration with issuance disabled; the general deployment
+compatibility preflight and published-image container dry-run also passed.
 
 A pass still reports `releaseQualified: false`. Configuration checks do not
 establish domain ownership, registrable-domain isolation, DNS/wildcard TLS,
@@ -244,8 +272,12 @@ npm run verify:previews -- \
   --gateway-revision=GATEWAY_COMMIT_SHA
 ```
 
-The runner checks public capabilities without credentials, then authenticated
-account allowance and the catalog. It checkpoints a creation key before admission
+The runner checks public capabilities without credentials, then probes a random
+unissued hostname on the preview domain before any paid start. DNS/TLS must work
+and the gateway must return a no-store/no-referrer 404 without `NEL`, `Report-To`
+or `Reporting-Endpoints` headers. Failure stops without creation or grant
+issuance. This edge check does not replace the full CDN logging review. It then
+checks authenticated account allowance and the catalog and checkpoints a creation key before admission
 and rejects an identity already present in the account. It uploads the
 dependency-free `scripts/preview-app.mjs` fixture, starts a four-minute managed
 job on port 3000 and waits for readiness, including the initial `starting` state.
@@ -291,6 +323,30 @@ cross-account isolation with a second account, replacement-generation checks
 within a separately agreed start budget, and domain/TLS/CDN logging review.
 Retain that evidence alongside this report before enabling public claims.
 
+## October 6, 2026 deployed transport result
+
+The verifier passed against `mainbrella.dev` using one new Lite generation and
+the Node catalog image. The test account had no pre-existing containers. API
+version `3712dd18-9306-4859-b981-1ff02331f200` and gateway version
+`9d63ffbd-ccaa-4b44-8ee5-c9cccdb65f3f` were temporarily enabled; the existing
+runtime version was `8fda2eef-9aa9-4163-a48a-d2e5d8b6f58e`.
+
+All fourteen recorded checks passed: wildcard DNS/TLS, absence of browser
+reporting headers, application readiness, HTTP/assets/binary data, credential
+stripping, relative redirects, metadata-only listing, control-port rejection,
+gateway isolation, WebSocket echo, active revocation, active expiry, active stop
+and denial after stop. The account read confirmed the exact test generation
+absent. The verifier's `cleanup` is `completed`, and `releaseQualified` remains
+false.
+
+Evidence: [preview-verification.json](../.wrangler/preview-qualification-2026-10-06T03-14-00-127Z/preview-verification.json)
+and [rollout.json](../.wrangler/preview-rollout-20261006/rollout.json). These files
+are local, private and ignored by Git. They record verifier/source hashes,+deployment metadata and recovery identities without API keys or bearer URLs.
+The source revision is operator supplied; actual deployed version IDs are
+recorded separately. Both API and gateway were restored to disabled issuance
+after the test. The next live run needs a separately bounded budget and a second
+account credential for the remaining framework/isolation gates.
+
 ## Qualification gates
 
 `node --test containers/previews.test.mjs` exercises the runtime guard with no
@@ -298,7 +354,8 @@ starts. `worker/app/previews.test.ts` covers account ownership, API keys, genera
 input limits and routing failure/reconciliation. `worker/preview-gateway.test.ts`
 covers exact hosts, expiry, hash routing, path/query/binary forwarding, aborts,
 WebSocket/stream passthrough and bounded cleanup. These checks use mocks, not
-provider transports. The public feature still requires an agreed bounded deployed run.
+provider transports. The prepared deployed transport run passed; the public
+feature still requires the remaining framework/browser and isolation checks.
 Use a dedicated account and a real Next.js or similar app listening on port 3000.
 Verify HTTP/assets, WebSockets, expiry, revocation of active transports, wrong
 tokens, port restrictions, cross-account isolation and generation replacement.

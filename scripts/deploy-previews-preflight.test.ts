@@ -100,10 +100,13 @@ test('missing migration, constraints, expiry index and malformed remote evidence
   }
 });
 
-test('checked-in disabled configuration has no domain and blocks rollout before remote reads', () => {
+test('checked-in staged configuration validates isolation while keeping issuance disabled', () => {
   const f = fixture();
   f.options.api = JSON.parse(read('wrangler.jsonc'));
   f.options.gateway = JSON.parse(read('wrangler.previews.jsonc'));
-  assert.throws(() => previewPreflight(f.options), /PREVIEW_DOMAIN/);
+  f.options.containers = JSON.parse(read('wrangler.containers.jsonc'));
+  const result = previewPreflight({ ...f.options, local: true });
+  assert.equal(result.issuanceEnabled, false);
+  assert.equal(result.releaseQualified, false);
   assert.equal(f.calls.length, 0);
 });
