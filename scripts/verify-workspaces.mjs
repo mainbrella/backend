@@ -42,7 +42,14 @@ export async function verifyWorkspaces(client,secondary,{checkpoint=async()=>{},
     await client.workspaces.delete(workspace.id);await expected(()=>client.request('/containers',{method:'POST',body:{workspaceId:workspace.id},headers:{'Idempotency-Key':randomUUID()}}),404);report.checks.deletedRestore=true;
   }catch(error){report.error=typeof error.code==='string'?error.code:/^[a-z_]+$/.test(error.message)?error.message:'verification_failed';}
   finally{
-    clearTimeout(timer);for(const sandbox of owned)try{await sandbox.kill();}catch{report.cleanupError=true;}
+    clearTimeout(timer);for(const sandbox of owned)try{await sandbox.kill();}catch(error){
+      // Restoring replaces the stopped source generation. Its fenced DELETE
+      // legitimately rejects; confirm that exact generation is absent before
+      // treating this as completed cleanup.
+      let absent=false;
+      if(error.status===409)try{const current=await client.list();absent=Array.isArray(current.containers)&&!current.containers.some(c=>c.id===sandbox.id&&c.createdAt===sandbox.createdAt);}catch{}
+      if(!absent)report.cleanupError=true;
+    }
     if(workspace)try{await client.workspaces.delete(workspace.id);}catch{report.cleanupError=true;}
     const after=await client.list();report.afterStarts=after.usage.starts;report.remaining=after.containers.map(({id,createdAt})=>({id,createdAt}));
     report.cleanup=!report.cleanupError&&!report.remaining.length&&report.generations.every(g=>g.container)?'completed':'reconcile_manually';
