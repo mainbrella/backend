@@ -18,6 +18,7 @@
     "sdk:qualify:deployed": "node scripts/qualify-sdk-deployed.mjs",
     "docs:package": "node scripts/build-agent-reference.mjs",
     "verify:agent": "node scripts/verify-agent.mjs",
+    "verify:previews": "node scripts/verify-previews.mjs",
     "benchmark:api": "node scripts/benchmark-api.mjs",
     "status:canary": "node scripts/status-canary.mjs",
     "deploy:containers": "node scripts/deploy-containers.mjs",
