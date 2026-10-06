@@ -10,7 +10,7 @@ These changes live in the backend repository. Frontend work can proceed independ
 | `/containers/executions` | Start shell/argv jobs, inspect/list, write stdin, signal, resize PTYs and reconnect. See [API.md](../API.md) for authenticated request shapes. |
 | `/containers/previews` | Locally implemented issue/list/revoke for owned generations. Gate controls on `previews.supported`; the isolated gateway/domain is disabled pending configuration and qualification. URL is a bearer credential returned once. |
 | Container `imageDigest` | Optional image identity recorded at generation creation. Do not manufacture it when an older response lacks it. |
-| `sdk/javascript`, `sdk/python` | Local, unpublished SDKs with create, command, binary-file and cleanup support. Installation examples are in their READMEs. |
+| `sdk/javascript`, `sdk/python` | Python 0.1.0 is published on PyPI; JavaScript 0.1.0 remains unpublished. Both support lifecycle, execution, files, and saved workspaces. Installation examples are in their READMEs. |
 | Benchmark JSON | Raw samples, failures, cleanup results, environment metadata and methodology. Publish measured results from an actual run. |
 
 Missing observations and observations older than 15 minutes are `unknown`. An auth observation with scope `control_plane` proves the database check succeeded; it does not prove a customer can log in. The scheduled collector checks website/API reachability and database access. Provisioning, SSH, image builds and billing need separate probes. Incident text is public plain text and should be rendered as text.

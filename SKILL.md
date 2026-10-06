@@ -11,10 +11,10 @@ The installable archive also includes an [indexed reference tree](references/ind
 for individual API topics and the JavaScript/Python SDK instructions. Read only
 the relevant topic when the full contract is unnecessary.
 Use `https://api.mainbrella.com` unless the user specifies another environment.
-Mainbrella uses REST for lifecycle, foreground command execution, and file transfer. No published
-SDK is available. Do not install invented SDK packages.
-Local SDKs exist under `sdk/javascript` and `sdk/python` when this backend checkout
-is available. Install from those paths only; see their READMEs for the actual API.
+Mainbrella uses REST for lifecycle, foreground command execution, and file transfer.
+The Python SDK is published as `mainbrella` 0.1.0: `pip install mainbrella==0.1.0`.
+The JavaScript SDK remains unpublished; install from `sdk/javascript` when the
+backend checkout is available. See the SDK references for the actual APIs.
 Use public `GET /capabilities` to discover deployment support before choosing an
 execution mode. Obtain account allowances and deployed images from `/containers`.
 
@@ -102,8 +102,8 @@ for metadata and DELETE with `previewId` to revoke. A lost creation response
 requires listing/revoking before issuing another link; a 503
 `preview_reconciliation_required` includes the ID to retry revocation.
 Cookies and account credentials are stripped from app traffic. See API.md for
-limits and framework restrictions. Local SDKs provide `sandbox.previews.create`,
-`list` and `revoke`; they remain unpublished.
+limits and framework restrictions. The SDKs provide `sandbox.previews.create`,
+`list` and `revoke`; consult their references for installation instructions.
 
 ## Verify
 

@@ -35,7 +35,7 @@ for (const [name, content] of Object.entries({ 'API.md': documents['API.md'], 'S
   await writeFile(join(skillDir, name), content);
 }
 await copyFile(join(root, 'LICENSE'), join(skillDir, 'LICENSE'));
-const full = `# Mainbrella full agent reference\n\nGenerated from the backend's authoritative API, skill and SDK instructions. SDKs are unpublished; deployment capabilities must be checked independently.\n\n${Object.entries(documents).map(([name, content]) => `<!-- Source: https://mainbrella.com/${name} -->\n\n${content}`).join('\n\n')}\n`;
+const full = `# Mainbrella full agent reference\n\nGenerated from the backend's authoritative API, skill and SDK instructions. Read the SDK references for installation and publication status; deployment capabilities must be checked independently.\n\n${Object.entries(documents).map(([name, content]) => `<!-- Source: https://mainbrella.com/${name} -->\n\n${content}`).join('\n\n')}\n`;
 await writeFile(join(output, 'llms-full.txt'), full);
 const files = { ...documents, ...references, 'llms-full.txt': full };
 const manifest = { version, source: 'mainbrella/backend', licenseSha256: createHash('sha256').update(await readFile(join(root, 'LICENSE'))).digest('hex'), files: Object.fromEntries(Object.entries(files).map(([name, value]) =>
