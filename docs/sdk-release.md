@@ -194,3 +194,35 @@ qualify an unsupported deployment feature.
 
 Metadata follows [npm's package metadata format](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
 and [PyPA's project metadata guidance](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/).
+
+## GitHub OIDC staging
+
+`.github/workflows/sdk-npm-release.yml` prepares token-free staging of the exact
+0.1.0 candidate. It runs manually on `main` using a GitHub-hosted runner, grants
+`id-token: write` only to the staging job, and checks the pinned archive SHA-256
+before submission. The archive is retained in the draft GitHub release
+`sdk-v0.1.0-candidate`; downloading that asset was verified against the same hash.
+The workflow does not rebuild SDKs, use npm tokens, consume sandbox starts, or
+approve a stage. Its workflow syntax passes actionlint.
+
+Once npm has created the package (including a staging placeholder), configure
+its Settings → Trusted publishing → GitHub Actions with these exact fields:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `mainbrella` |
+| Repository | `backend` |
+| Workflow filename | `sdk-npm-release.yml` |
+| Environment | Leave blank; this workflow does not use a GitHub environment. |
+| Allowed actions | Stage publishing only; leave direct publish and dist-tag management disabled. |
+
+After confirming that OIDC staging works, use Publishing access → Require
+two-factor authentication and disallow tokens. Browser approval remains required
+for each staged version. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+
+Do not dispatch the workflow if 0.1.0 is already staged or published. For the next
+release, qualify the new candidate, store its exact archive in a new draft release,
+and review the workflow's pinned tag, filename and checksum before dispatch.
+Trusted publishing setup requires npm package administration in the signed-in
+browser; configuring a connection alone does not verify it. This connection has
+not yet been configured or exercised against npm.

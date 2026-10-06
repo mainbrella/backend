@@ -1,0 +1,30 @@
+name: Stage qualified JavaScript SDK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install npm with staged publishing support
+        run: npm install --global npm@11.21.0
+      - name: Download the exact qualified 0.1.0 candidate
+        run: |
+          gh release download sdk-v0.1.0-candidate --repo mainbrella/backend --pattern mainbrella-sdk-0.1.0.tgz
+          echo '4916a82ed535ac11432e3605be4f1741b1bde0a597122a6d5337628c353074a6  mainbrella-sdk-0.1.0.tgz' | sha256sum --check --strict
+      - name: Stage with npm trusted publishing
+        run: npm stage publish ./mainbrella-sdk-0.1.0.tgz --access public --tag latest
