@@ -52,7 +52,7 @@ test('unsafe isolation, routing, logging and lifecycle configuration fails befor
     (o: any) => { o.gateway.account_id = 'other'; },
     (o: any) => { o.containers.name = o.api.name; },
     (o: any) => { o.gateway.durable_objects.bindings[0].script_name = o.api.name; },
-    (o: any) => { o.api.durable_objects.bindings.push(o.api.durable_objects.bindings[1]); },
+    (o: any) => { o.api.durable_objects.bindings.push(o.api.durable_objects.bindings.find((binding: any) => binding.name === 'USER_CONTAINER')); },
     (o: any) => { o.gateway.d1_databases.push(o.api.d1_databases[0]); },
     (o: any) => { o.gateway.services = [{ binding: 'ACCOUNT_API', service: o.api.name }]; },
     (o: any) => { o.gateway.env = { production: {} }; },

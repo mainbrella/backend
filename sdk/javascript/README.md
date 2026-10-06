@@ -174,3 +174,18 @@ const offline = await client.create({ internet: false, idempotencyKey: "offline-
 The CLI accepts `create --idempotency-key offline-workspace --internet false`.
 
 The CLI also supports generation-bound `file list/stat/mkdir/remove/move/chmod`. Directory removal is nonrecursive unless `--recursive` is explicit; move refuses replacement. Permission modes use four octal digits (`0640`). Listing accepts `--limit` up to 1000 and `--offset` up to 1000000.
+
+## Saved workspaces
+
+Check `(await client.capabilities()).persistence.snapshots` before using save/restore. Save explicitly; ordinary stop discards changes.
+
+```js
+const saveKey = crypto.randomUUID(); // Persist this key and body before sending.
+const saved = await sandbox.saveWorkspace('Project files', { stop: true, idempotencyKey: saveKey });
+const restored = await client.workspaces.restore(saved.id, { idempotencyKey: crypto.randomUUID() });
+const archive = await restored.exportWorkspace(); // /workspace gzip tar, at most 16 MiB compressed.
+await restored.kill();
+await client.workspaces.delete(saved.id);
+```
+
+`client.workspaces.list()`, `.get(id)` and `.update(id, {name, archived})` manage saved metadata. Retry an ambiguous save with its original body and key (`error.idempotencyKey`). Restore consumes one start, requires the saved image digest, size and internet policy, and restores filesystem bytes with a fresh generation. RAM, processes and previews do not resume. Plan quotas and expiry apply; archive retains quota, while deletion revokes future restores without immediately erasing provider-held bytes.

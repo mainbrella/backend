@@ -6,6 +6,7 @@ import { entitlementHeaders } from './plan-policy.js';
 
 class Storage {
   values=new Map();alarm=null;
+  async transaction(callback){return callback(this);}
   async get(k){return structuredClone(this.values.get(k));}
   async put(k,v){if(typeof k==='object')for(const [key,value]of Object.entries(k))this.values.set(key,structuredClone(value));else this.values.set(k,structuredClone(v));}
   async delete(k){if(Array.isArray(k))return k.reduce((n,key)=>n+Number(this.values.delete(key)),0);return this.values.delete(k);}
@@ -63,7 +64,7 @@ test('ownership, archived policy, resource/network selection, image compatibilit
   f.setTime(saved.expiresAt);assert.equal((await f.start({workspaceId:saved.id})).status,410);
   assert.equal((await f.call('/workspaces?workspaceId='+saved.id)).data.status,'expired');
   assert.equal((await f.call('/containers')).data.usage.starts,1);
-  assert.equal((await f.accountFor('owner').ctx.storage.get('workspaceIndex')).records[0].handle,undefined);
+  assert.equal((await f.accountFor('owner').workspaces.index()).records[0].handle,undefined);
 });
 test('quotas include archives, deletion releases quota and remains available during billing loss',async()=>{
   const f=fixture(),source=(await f.start()).data.containers[0];
@@ -96,4 +97,16 @@ test('completed stop with a lost response reconciles without stopping the replac
   assert.equal((await f.save(source,{stop:true},'stop-lost')).status,503);
   await f.start();const replacement=machine.runtime.starts.length;
   assert.equal((await f.save(source,{stop:true},'stop-lost')).data.stopCompleted,true);assert.equal(machine.runtime.running,true);assert.equal(machine.runtime.starts.length,replacement);
+});
+
+test('retained workspace receipts are stored in bounded chunks and legacy indexes migrate',async()=>{
+  const f=fixture(),account=f.accountFor('owner'),storage=account.ctx.storage,now=f.now();
+  const records=Array.from({length:3000},(_,i)=>({id:String(i),expiresAt:now+86400_000,name:'x'.repeat(80),fingerprint:'x'.repeat(400),deleted:true,deletedAt:now}));
+  await storage.put('workspaceIndex',{records,usage:{'2026-10':3000}});
+  const originalPut=storage.put.bind(storage);storage.put=async(k,v)=>{assert.ok(Buffer.byteLength(JSON.stringify(v))<128*1024);return originalPut(k,v);};
+  await account.workspaces.prune();
+  assert.equal((await storage.get('workspaceIndex')).records,undefined);
+  assert.equal((await account.workspaces.index()).records.length,3000);
+  f.setTime(now+86400_000);await account.workspaces.prune();assert.equal((await account.workspaces.index()).records.length,0);
+  assert.equal((await storage.list({prefix:'workspaceIndex:'})).size,0);
 });

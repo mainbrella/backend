@@ -343,3 +343,21 @@ test('internet-off creation requires discovery, rejects ignored policy and does 
   } });
   await assert.rejects(unavailable.create({ internet: false, waitTimeoutMs: 1000 }), { code: 'network_policy_unavailable' }); assert.equal(posts, 1);
 });
+
+test('workspace save retains recovery identity on lost response and export preserves bytes',async()=>{
+  const calls=[];let lost=true;
+  const client=new Mainbrella({apiKey,fetch:async(url,options)=>{
+    calls.push({path:new URL(url).pathname,options});
+    if(new URL(url).pathname==='/workspaces'){if(lost){lost=false;throw new Error('lost');}return Response.json({id:'d688d42a-25ef-4c13-9b28-21a0fde6e163'});}
+    return new Response(new Uint8Array([0,255,128]));
+  }});const sandbox=client.connect({id:'small',createdAt});
+  await assert.rejects(sandbox.saveWorkspace('Saved files',{stop:true,idempotencyKey:'save-recovery'}),error=>error.idempotencyKey==='save-recovery');
+  await sandbox.saveWorkspace('Saved files',{stop:true,idempotencyKey:'save-recovery'});
+  assert.equal(calls[0].options.body,calls[1].options.body);assert.equal(calls[1].options.headers['Idempotency-Key'],'save-recovery');
+  assert.deepEqual(await sandbox.exportWorkspace(),new Uint8Array([0,255,128]));
+});
+test('workspace restore fails closed on disabled discovery before any start',async()=>{
+  const calls=[];const client=new Mainbrella({apiKey,fetch:async(url)=>{calls.push(new URL(url).pathname);return Response.json({persistence:{snapshots:false}});}});
+  await assert.rejects(client.workspaces.restore('d688d42a-25ef-4c13-9b28-21a0fde6e163',{idempotencyKey:'restore-recovery'}),error=>error.code==='persistence_unavailable'&&error.idempotencyKey==='restore-recovery');
+  assert.deepEqual(calls,['/capabilities']);assert.throws(()=>client.workspaces.get('other'),/invalid_workspace_identity/);
+});

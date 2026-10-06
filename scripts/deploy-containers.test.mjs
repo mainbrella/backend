@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { IMAGE_CATALOG } from '../containers/image-catalog.js';
 
-function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret, invalidCatalog = false } = {}) {
+function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret, invalidCatalog = false, withoutActivity = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'terminal-deploy-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'containers/catalog', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
@@ -15,7 +15,11 @@ function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, a
   copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
   const dockerfile = 'FROM test\n';
   writeFileSync(join(root, 'containers/Dockerfile'), dockerfile);
-  writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ account_id: 'account', main: 'containers/user-container.js', containers: [{ images: { terminal: { dockerfile: './containers/Dockerfile' } } }] }));
+  writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ account_id: 'account', main: 'containers/user-container.js',
+    durable_objects: { bindings: [
+      { name: 'ACCOUNT_ACTIVITY', class_name: 'AccountActivity', script_name: 'mainbrella-api' },
+      { name: 'OTHER', class_name: 'Other' },
+    ] }, containers: [{ images: { terminal: { dockerfile: './containers/Dockerfile' } } }] }));
   const image = `registry.cloudflare.com/account/mainbrella-terminal@sha256:${'a'.repeat(64)}`;
   const manifest = { image, dockerfileHash: outdated ? 'old' : createHash('sha256').update(dockerfile).digest('hex') };
   const catalog = { images: {} };
@@ -35,7 +39,7 @@ function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, a
     return Response.json(${JSON.stringify(custom)}, { status: ${apiStatus} });
   };`);
   if (localSecret !== undefined) writeFileSync(join(root, '.env'), `IMAGE_BUILD_SECRET="${localSecret}"\n`);
-  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : [])], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
+  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : []), ...(withoutActivity ? ['--without-activity'] : [])], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
   return { root, image, run, catalog };
 }
 
@@ -46,8 +50,21 @@ test('deployment replaces Dockerfile with published digest and cleans up config'
   const deployed = JSON.parse(readFileSync(join(f.root, 'result.json')));
   assert.deepEqual(deployed.config.containers[0].images.terminal, { image: f.image });
   assert.ok(deployed.args.includes('--dry-run'));
+  assert.ok(deployed.config.durable_objects.bindings.some(binding => binding.name === 'ACCOUNT_ACTIVITY'));
   assert.equal(readdirSync(f.root).some(name => name.startsWith('.wrangler-containers-')), false);
   assert.ok(JSON.parse(readFileSync(join(f.root, 'wrangler.containers.jsonc'))).containers[0].images.terminal.dockerfile);
+});
+test('activity bootstrap omits only the activity binding and preserves the tracked config and image lease', t => {
+  const f = fixture(t, { withoutActivity: true, dryRun: false });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  const deployed = JSON.parse(readFileSync(join(f.root, 'result.json')));
+  assert.deepEqual(deployed.config.durable_objects.bindings, [{ name: 'OTHER', class_name: 'Other' }]);
+  assert.equal(deployed.args.includes('--without-activity'), false);
+  assert.deepEqual(deployed.config.containers[0].images.terminal, { image: f.image });
+  assert.ok(JSON.parse(readFileSync(join(f.root, 'wrangler.containers.jsonc'))).durable_objects.bindings.some(binding => binding.name === 'ACCOUNT_ACTIVITY'));
+  assert.equal(readFileSync(join(f.root, 'locks.log'), 'utf8'), 'POST\nDELETE\n');
+  assert.equal(readdirSync(f.root).some(name => name.startsWith('.wrangler-containers-')), false);
 });
 test('outdated image prevents deployment', t => {
   const f = fixture(t, { outdated: true });

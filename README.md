@@ -78,6 +78,7 @@ npm run deploy:preflight   # Read deployment compatibility metadata; no starts
 npm run deploy             # Preflight, containers, then API; stops on failure
 npm run deploy:containers  # Container Worker with the CI-published image
 npm run deploy:api         # API only
+npm run deploy:bootstrap-activity # One-time recovery for missing AccountActivity export (10061)
 ```
 
 Apply migrations before deploying the API, including 006 (billing webhook

@@ -11,6 +11,7 @@
     "generate-types": "wrangler types",
     "type-check": "npm run generate-types && tsc --noEmit",
     "deploy": "npm run deploy:preflight && npm run deploy:containers && npm run deploy:api",
+    "deploy:bootstrap-activity": "npm run deploy:preflight && npm run deploy:containers -- --without-activity && npm run deploy:api && npm run deploy:containers",
     "deploy:preflight": "node scripts/deploy-preflight.mjs",
     "previews:preflight": "tsx scripts/deploy-previews-preflight.ts",
     "test": "npm run test:containers && npm run test:api && npm run test:sdk",

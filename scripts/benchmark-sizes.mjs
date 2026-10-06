@@ -51,7 +51,7 @@ export async function benchmarkSizes(client, { maxStarts = 17, checkpoint = asyn
   check(before.limits.maxContainers >= Math.max(1,concurrencySamples) && before.limits.maxConcurrentComputeUnits >= Math.max(28,concurrencySamples*6), 'insufficient_capacity');
   const report = { formatVersion: 1, startedAt: new Date().toISOString(), ok: false, releaseQualified: false, maxStarts, startsRequested: previous?.startsRequested??0,
     apiOrigin: client.baseUrl, apiVersion: capabilities.apiVersion, before: previous?.before??{ starts: before.usage.starts, computeUnitHours: before.usage.computeUnitHours },
-    methodology: 'One fresh generation per language/size; two simultaneous Small Node generations. Empty workload caches. Public API startup includes admission/readiness/polling. Provider image/cache placement is unknown; no cold-cache claim. Single samples do not establish p95. Ten-minute wall deadline per generation. Failures retained. Resource costs are upper bounds assuming fully active allocated CPU, excluding other services.',
+    methodology: `One fresh generation per selected language/size; ${concurrencySamples} simultaneous Small Node generations. Empty workload caches. Public API startup includes admission/readiness/polling. Provider image/cache placement is unknown; no cold-cache claim. Single samples do not establish p95. Ten-minute wall deadline per generation. Failures retained. Resource costs are upper bounds assuming fully active allocated CPU, excluding other services.`,
     generations: structuredClone(previous?.generations??[]), externalStarts, economics: sizeEconomics(), cleanup: 'not_needed' };
   const save = () => checkpoint(structuredClone(report));
   runPhase ??= async (sandbox, phase, remainingMs, sample) => {
@@ -114,8 +114,8 @@ export async function benchmarkSizes(client, { maxStarts = 17, checkpoint = asyn
 
 if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const args={}; for(const arg of process.argv.slice(2)) {const match=/^--(output|max-starts|resume|external-starts)=(.+)$/.exec(arg);check(match&&!Object.hasOwn(args,match[1]),'invalid_arguments');args[match[1]]=match[2];}
-    check(args.output && Number(args['max-starts'])===17,'explicit_budget_required');
+    const args={}; for(const arg of process.argv.slice(2)) {const match=/^--(output|max-starts|resume|external-starts|corrected)=(.+)$/.exec(arg);check(match&&!Object.hasOwn(args,match[1]),'invalid_arguments');args[match[1]]=match[2];}
+    check(args.output && Number(args['max-starts'])===(args.corrected==='true'?11:17) && (!args.corrected || args.corrected==='true'),'explicit_budget_required');
     const output=resolve(args.output);await mkdir(output,{mode:0o700});
     const env={...parseEnv(await readFile(join(root,'.env'),'utf8')),...process.env};
     const client=new Mainbrella({apiKey:env.MAINBRELLA_API_KEY,baseUrl:env.MAINBRELLA_API_URL});
@@ -126,7 +126,8 @@ if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).
     const checkpoint=async report=>{const path=join(output,'benchmark.json');await writeFile(path+'.tmp',JSON.stringify({...report,revision,sources,previousEvidence},null,2)+'\n',{mode:0o600});await rename(path+'.tmp',path);};
     // Concurrent samples serialize report writes so atomic renames cannot race.
     let tail=Promise.resolve(); const save=report=>tail=tail.then(()=>checkpoint(report));
-    const report=await benchmarkSizes(client,{maxStarts:17,checkpoint:save,previous,externalStarts:Number(args['external-starts']??0)});
+    const matrix=args.corrected==='true'?MACHINE_SIZES.flatMap(size=>['node','rust',...(size.id==='lite'?['python']:[])].map(catalogId=>({size:size.id,catalogId}))):undefined;
+    const report=await benchmarkSizes(client,{maxStarts:Number(args['max-starts']),matrix,concurrencySamples:args.corrected==='true'?0:2,checkpoint:save,previous,externalStarts:Number(args['external-starts']??0)});
     console.log(JSON.stringify({output,summary:report.summary,cleanup:report.cleanup,ok:report.ok}));if(!report.ok)process.exitCode=1;
   }catch(error){console.error(`Benchmark stopped: ${/^[a-z_]+$/.test(error.message)?error.message:'check_private_report'}. Inspect recovery keys before rerunning.`);process.exitCode=1;}
 }

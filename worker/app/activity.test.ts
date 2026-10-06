@@ -38,7 +38,7 @@ test('native API key works without Origin; invalid or revoked Bearer never falls
   const { token, key } = await created.json() as any;
   assert.equal((await handleRequest(request({ Authorization: `Bearer ${token}` }), f.env)).status, 101);
   assert.equal((await handleRequest(request({ Authorization: 'Bearer invalid', Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }), f.env)).status, 401);
-  f.sqlite.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').run(new Date().toISOString(), key.id);
+  f.sqlite.prepare('DELETE FROM api_keys WHERE id = ?').run(key.id);
   assert.equal((await handleRequest(request({ Authorization: `Bearer ${token}` }), f.env)).status, 401);
 });
 

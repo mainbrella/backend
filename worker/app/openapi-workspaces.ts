@@ -8,7 +8,7 @@ export const workspaceSchema=z.object({id:z.string().uuid(),name:z.string().min(
   size:sizeSchema,internet:z.boolean(),imageDigest:z.string(),imageId:z.string().optional(),imageName:z.string().optional(),catalogId:z.string().optional(),bytes:z.number().int().nonnegative().nullable(),
   archived:z.boolean(),status:z.enum(['saving','ready','failed','expired','deleted']),stopRequested:z.boolean(),stopCompleted:z.boolean()}).openapi('Workspace');
 const headers=z.object({Origin:z.string().optional()});
-const responseErrors=errors(400,401,402,403,404,405,409,410,429,503);
+const responseErrors=errors(400,401,402,403,404,405,409,410,413,429,503);
 export function registerWorkspaceRoutes(api:OpenAPIApi,handler:LegacyHandler):void {
   register(api,'get','/containers/export',{operationId:'exportWorkspaceFiles',tags:['Containers'],summary:'Download a portable gzip tar archive of /workspace',security:containerSecurity,
     description:`Requires owned running generation and paid access. Export is limited to ${MAX_WORKSPACE_EXPORT_BYTES} compressed bytes and 60 seconds. Quiesce writers first; concurrent writes may fail the export. Mounted filesystems are excluded. Restore a saved workspace before exporting it. Archives preserve file permissions and symlinks; the provider snapshot handle is never exported.`,

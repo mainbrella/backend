@@ -91,6 +91,34 @@ the account database or an account-site hostname.
 
 ## Unsupported predecessor / bootstrap
 
+### Missing AccountActivity export (Cloudflare error 10061)
+
+If container publication fails with `Cannot create binding for class
+'AccountActivity' that is not exported by script 'mainbrella-api'`, the deployed
+API has not yet introduced the activity Durable Object. The local API exports it,
+but Cloudflare needs that export deployed before another Worker can bind to it.
+
+For an accepted predecessor that passes compatibility preflight, run:
+
+```sh
+npm run deploy:bootstrap-activity
+```
+
+This runs preflight, deploys the current containers without `ACCOUNT_ACTIVITY`,
+deploys the API to provision its export, then redeploys containers with the binding
+restored. It preserves the required runtime-before-API order, image validation,
+authoritative image map and deployment leases. The tracked config is unchanged.
+Container activity notifications are skipped during the intermediate stage;
+changes during that interval are not replayed. Finish all three publications
+before qualifying activity streams or publishing web integrations.
+
+The command stops on failure. If API publication fails, retry the bootstrap
+command after correcting the failure. If only the final container publication
+fails, run `npm run deploy:containers` to restore notifications. Subsequent
+releases use the normal `npm run deploy` command.
+
+### Older API contracts
+
 Do not reverse the current order to bypass a failed preflight. The original
 paid-entitlement and image-manifest releases had API-first bootstrap requirements;
 the current API also requires a managed-execution and size-aware runtime.

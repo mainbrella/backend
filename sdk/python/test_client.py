@@ -10,6 +10,18 @@ GENERATION = "2026-10-05T12:00:00.000Z"
 
 
 class ClientTests(unittest.TestCase):
+    def test_workspace_restore_fails_closed_without_start(self):
+        calls = []
+        def transport(url, method, headers, body, timeout):
+            calls.append(urlsplit(url).path)
+            return 200, b'{"persistence":{"snapshots":false}}'
+        client = Mainbrella(KEY, transport=transport)
+        with self.assertRaises(MainbrellaError) as caught:
+            client.workspaces.restore("d688d42a-25ef-4c13-9b28-21a0fde6e163", idempotency_key="restore-recovery")
+        self.assertEqual(caught.exception.code, "persistence_unavailable")
+        self.assertEqual(caught.exception.idempotency_key, "restore-recovery")
+        self.assertEqual(calls, ["/capabilities"])
+
     def test_internet_off_fails_closed_and_preserves_explicit_boolean(self):
         calls = []
         def unsupported(url, method, headers, body, timeout):

@@ -137,3 +137,19 @@ Internet defaults to enabled. Offline creation is immutable for that generation 
 ```python
 offline = client.create(internet=False, idempotency_key="offline-workspace")
 ```
+
+## Saved workspaces
+
+Check `client.capabilities()["persistence"]["snapshots"]` before save/restore. Ordinary stop discards changes; save explicitly.
+
+```python
+import uuid
+save_key = str(uuid.uuid4())  # Persist the key and request body before sending.
+saved = sandbox.save_workspace("Project files", stop=True, idempotency_key=save_key)
+restored = client.workspaces.restore(saved["id"], idempotency_key=str(uuid.uuid4()))
+archive = restored.export_workspace()  # /workspace gzip tar, at most 16 MiB compressed.
+restored.kill()
+client.workspaces.delete(saved["id"])
+```
+
+`client.workspaces.list()`, `.get(id)` and `.update(id, name=…, archived=True)` manage metadata. Retry an ambiguous save with the original body and key (`error.idempotency_key`). Restore consumes one start and requires the saved image digest, size and internet policy. Filesystem bytes return in a fresh generation; RAM, processes and previews do not resume. Quotas and expiry apply. Archive retains quota; deletion revokes future restores without immediately erasing provider-held bytes.

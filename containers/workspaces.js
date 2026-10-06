@@ -9,13 +9,31 @@ const fail=(code,status)=>Response.json({error:code},{status,headers:{'Cache-Con
 // never cross the public boundary. Capture intent precedes any provider call.
 export class AccountWorkspaces {
   constructor(account){this.account=account;}
-  async index(){return await this.account.ctx.storage.get(KEY) ?? {records:[],usage:{}};}
+  async index(){
+    const stored=await this.account.ctx.storage.get(KEY);
+    if(!stored)return {records:[],usage:{}};
+    if(stored.records)return stored; // Migrate the initial single-value format.
+    const chunks=await Promise.all(Array.from({length:stored.chunks},(_,i)=>this.account.ctx.storage.get(`${KEY}:${i}`)));
+    return {records:chunks.flatMap(chunk=>chunk??[]),usage:stored.usage};
+  }
+  async persist(index){
+    // A busy account can retain thousands of 24-hour operation receipts. Keep
+    // each storage value small and commit chunks plus their index atomically.
+    const storage=this.account.ctx.storage;
+    await storage.transaction(async tx=>{
+      const previous=await tx.get(KEY),chunks=Math.ceil(index.records.length/32);
+      for(let i=0;i<chunks;i++)await tx.put(`${KEY}:${i}`,index.records.slice(i*32,(i+1)*32));
+      await tx.put(KEY,{chunks,usage:index.usage});
+      for(let i=chunks;i<(previous?.chunks??0);i++)await tx.delete(`${KEY}:${i}`);
+    });
+  }
   async prune(){
+    if(!await this.account.ctx.storage.get(KEY))return {records:[],usage:{}};
     const index=await this.index(),now=this.account.now();
     index.records=index.records.filter(record=> (record.deleted ? record.deletedAt + WORKSPACE_OPERATION_RETENTION_MS : record.expiresAt+WORKSPACE_OPERATION_RETENTION_MS)>now);
     for(const record of index.records)if(record.expiresAt<=now || record.deleted){delete record.handle;record.reservedBytes=0;}
     const month=new Date(now).toISOString().slice(0,7);index.usage={[month]:index.usage[month]??0};
-    await this.account.ctx.storage.put(KEY,index);
+    await this.persist(index);
     return index;
   }
   async nextAlarm(){const index=await this.index(),now=this.account.now();return Math.min(Infinity,...index.records.map(r=>r.deleted?r.deletedAt+WORKSPACE_OPERATION_RETENTION_MS:r.expiresAt>now?r.expiresAt:r.expiresAt+WORKSPACE_OPERATION_RETENTION_MS));}
@@ -56,7 +74,7 @@ export class AccountWorkspaces {
         const record=index.records.find(r=>r.id===id);if(!record)return fail('workspace_not_found',404);
         if(request.method==='DELETE'){record.deleted=true;record.deletedAt??=now;delete record.handle;record.reservedBytes=0;}
         else {if(record.deleted)return fail('workspace_not_found',404);Object.assign(record,body);}
-        await account.ctx.storage.put(KEY,index);await account.saveState(state);
+        await this.persist(index);await account.saveState(state);
         return request.method==='DELETE'?account.respond({deleted:true}):account.respond(publicWorkspace(record,now));
       }
       const fingerprint=JSON.stringify([body.id,body.createdAt,body.name,body.stop??false]);
@@ -70,10 +88,11 @@ export class AccountWorkspaces {
       if(!validEntitlement(state.entitlement,now))return fail('subscription_required',402);
       const source=containers.find(c=>c.id===body.id && c.createdAt===body.createdAt && c.status==='running');
       if(record?.handle && record.stop && !source){
-        record.stopCompleted=true;await account.ctx.storage.put(KEY,index);await account.saveState(state);
+        record.stopCompleted=true;await this.persist(index);await account.saveState(state);
         return account.respond(publicWorkspace(record,now));
       }
       if(!source)return fail('container_not_running',409);
+      if(typeof source.imageDigest!=='string'||!source.imageDigest)return fail('workspace_image_incompatible',409);
       const runtime=account.machineFor(userId,body.id);
       if(!record){
         const features=await runtime.fetch(new Request('https://internal/features'));
@@ -86,20 +105,20 @@ export class AccountWorkspaces {
           size:source.size,internet:source.internet??true,imageDigest:source.imageDigest,imageId:source.imageId,imageName:source.imageName,catalogId:source.catalogId,
           operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false};
         index.records.push(record);index.usage[month]=(index.usage[month]??0)+1;
-        await account.ctx.storage.put(KEY,index);await account.saveState(state);
+        await this.persist(index);await account.saveState(state);
       }
       if(!record.handle){
         const response=await runtime.fetch(new Request('https://internal/workspaces/snapshot-v1',{method:'POST',headers:{...entitlementHeaders(state.entitlement),'Content-Type':'application/json'},body:JSON.stringify({id:record.id,createdAt:body.createdAt,expiresAt:record.expiresAt})}));
         const capture=await response.json();if(!response.ok)return fail(capture.error==='container_not_running'?'container_not_running':'workspace_save_unavailable',response.status===409?409:503);
-        if(!capture.handle?.id || !Number.isSafeInteger(capture.handle.size) || capture.handle.size<0 || capture.handle.size>record.reservedBytes || capture.imageDigest!==record.imageDigest)return fail('workspace_save_unavailable',503);
-        record.handle=capture.handle;record.bytes=capture.handle.size;record.imageKey=capture.imageKey;
-        await account.ctx.storage.put(KEY,index);
+        if(typeof capture.handle?.id!=='string' || capture.handle.id.length>1024 || !capture.handle.id || !Number.isSafeInteger(capture.handle.size) || capture.handle.size<0 || capture.handle.size>record.reservedBytes || capture.imageDigest!==record.imageDigest)return fail('workspace_save_unavailable',503);
+        record.handle={id:capture.handle.id,size:capture.handle.size};record.bytes=capture.handle.size;record.imageKey=capture.imageKey;
+        await this.persist(index);
       }
       if(record.stop){
         // Snapshot is durable before stop. Reservation fencing protects replacements.
         const stopped=await account.machine(state,body.id,'DELETE',state.entitlement);
         account.settleLease(state,body.id,stopped.lastRun?.stoppedAt??account.now());delete state.pending[body.id];record.stopCompleted=true;
-        await account.ctx.storage.put(KEY,index);await account.reconcile(state,state.entitlement);
+        await this.persist(index);await account.reconcile(state,state.entitlement);
       }
       await account.saveState(state);return account.respond(publicWorkspace(record,account.now()),201);
     });}catch{return fail('workspaces_unavailable',503);}

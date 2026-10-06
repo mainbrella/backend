@@ -14,10 +14,17 @@ const config = JSON.parse(readFileSync(join(root, 'wrangler.containers.jsonc'), 
 const dockerfileHash = createHash('sha256').update(readFileSync(join(root, 'containers/Dockerfile'))).digest('hex');
 const args = process.argv.slice(2);
 // Keep deployment arguments from replacing the generated config or account.
-if (args.some(arg => !['--dry-run'].includes(arg))) {
-  console.error('Only --dry-run is supported. Use npm run deploy:containers.');
+if (args.some(arg => !['--dry-run', '--without-activity'].includes(arg))) {
+  console.error('Only --dry-run and --without-activity are supported. Use npm run deploy:containers.');
   process.exit(1);
 }
+// Bootstrap the runtime before the API exports AccountActivity. Activity delivery
+// already tolerates a missing binding; the final deployment restores it.
+if (args.includes('--without-activity')) {
+  config.durable_objects.bindings = config.durable_objects.bindings.filter(binding => binding.name !== 'ACCOUNT_ACTIVITY');
+  console.log('Activity delivery omitted for bootstrap. Finish with API, then normal container deployment.');
+}
+const wranglerArgs = args.filter(arg => arg !== '--without-activity');
 
 let image;
 let catalog;
@@ -67,7 +74,7 @@ try {
   // Keep relative Worker paths rooted in backend, without modifying tracked config.
   writeFileSync(temporaryConfig, JSON.stringify(config, null, 2));
   console.log(`Deploying terminal image ${image}`);
-  const result = spawnSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy', '--config', temporaryConfig, ...args], { cwd: root, stdio: 'inherit', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
+  const result = spawnSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy', '--config', temporaryConfig, ...wranglerArgs], { cwd: root, stdio: 'inherit', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
 } catch (error) {

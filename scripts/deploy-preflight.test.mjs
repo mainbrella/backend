@@ -98,4 +98,5 @@ test('lock route must reject GET after authenticating; redirects, missing routes
 test('default deploy stops on preflight failure and preserves containers-before-API order', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)));
   assert.equal(pkg.scripts.deploy, 'npm run deploy:preflight && npm run deploy:containers && npm run deploy:api');
+  assert.equal(pkg.scripts['deploy:bootstrap-activity'], 'npm run deploy:preflight && npm run deploy:containers -- --without-activity && npm run deploy:api && npm run deploy:containers');
 });
