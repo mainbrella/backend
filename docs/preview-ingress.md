@@ -103,7 +103,9 @@ remain unsupported.
 
 ## Implemented gateway and account API
 
-`worker/preview-gateway.ts` serves only preview application traffic. It has no
+`worker/preview-gateway.ts` serves preview application traffic and redirects the
+exact preview apex to `https://mainbrella.com` with status 308, preserving the path
+and query. The apex redirect works even when previews are disabled. It has no
 login, billing or account database bindings. A separate D1 routing database maps
 SHA-256(token) to the owner-resolved private DO address, grant ID, generation and
 expiry. There are no raw tokens in storage and no cached routing reads. The runtime
@@ -181,12 +183,18 @@ applies. See [Cloudflare's NEL documentation](https://developers.cloudflare.com/
 ## Configuration and rollout
 
 `wrangler.previews.jsonc` enables the qualified gateway, with workers.dev and
-development preview URLs off. Its route is `https://*.mainbrella.dev/*`
+development preview URLs off. The `mainbrella.dev` apex custom domain provisions
+DNS/TLS for the redirect. Its preview route is `https://*.mainbrella.dev/*`
 in zone `e6597a41a75e1abb92f4bc5e5758c460`. Local API and gateway configurations
 include the separate routing database binding, matching `PREVIEW_DOMAIN` values
 of `mainbrella.dev` and `PREVIEWS_ENABLED: "true"`. `npm run check:previews` bundles
 the gateway without deploying it. `npm run deploy` does not publish the preview
 gateway; deploy it separately with its own configuration.
+
+The apex redirect was deployed on October 6, 2026 in gateway version
+`75ed26f7-e9dd-4bbb-aad3-943a56a6fe69`. Cloudflare and Google public DNS resolve
+the apex; live HTTPS checks returned 308 for `/` and preserved paths and queries.
+An unissued preview subdomain continued to return 404.
 
 For a new rollout or requalification:
 

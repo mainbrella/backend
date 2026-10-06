@@ -22,6 +22,7 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": false },
   "routes": [
+    { "pattern": "mainbrella.dev", "custom_domain": true },
     { "pattern": "https://*.mainbrella.dev/*", "zone_id": "e6597a41a75e1abb92f4bc5e5758c460" }
   ]
 }

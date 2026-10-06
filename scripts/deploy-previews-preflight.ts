@@ -56,10 +56,13 @@ export function previewConfiguration(api: Config, gateway: Config, containers: C
   requireCheck(gateway.observability?.enabled === false && gateway.observability?.logs?.enabled !== true
     && gateway.observability?.traces?.enabled !== true && !gateway.logpush && !gateway.tail_consumers?.length,
   'Disable gateway observability, Logpush and tail consumers to avoid bearer-host logging.');
-  requireCheck(gateway.routes?.length === 1 && typeof gateway.routes[0] === 'object'
-    && !gateway.routes[0].custom_domain
-    && [`*.${domain}/*`, `https://*.${domain}/*`].includes(gateway.routes[0].pattern),
-  'Configure exactly one wildcard Worker route on the isolated preview domain.');
+  const routes = gateway.routes ?? [];
+  const wildcardRoutes = routes.filter((route: Config) => route && typeof route === 'object' && !route.custom_domain
+    && [`*.${domain}/*`, `https://*.${domain}/*`].includes(route.pattern));
+  const apexRoutes = routes.filter((route: Config) => route && typeof route === 'object'
+    && route.custom_domain === true && route.pattern === domain);
+  requireCheck(wildcardRoutes.length === 1 && apexRoutes.length <= 1 && routes.length === 1 + apexRoutes.length,
+  'Configure exactly one wildcard Worker route and optionally the exact apex custom domain for its redirect.');
   requireCheck(gateway.triggers?.crons?.length === 1 && gateway.triggers.crons[0] === '*/5 * * * *',
     'Configure the five-minute routing cleanup schedule.');
   return { domain, issuanceEnabled: enabled === 'true' };

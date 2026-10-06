@@ -26,6 +26,22 @@ async function fixture(t: TestContext) {
   return { sqlite, env, calls, names, setResponse(value: Response) { response = value; } };
 }
 
+test('gateway redirects only the exact apex without requiring preview bindings', async () => {
+  const env = { PREVIEW_DOMAIN: 'mainbrella.dev', PREVIEWS_ENABLED: 'false' };
+  for (const [path, target] of [['/', 'https://mainbrella.com/'],
+    ['/docs/getting-started?x=1&x=2', 'https://mainbrella.com/docs/getting-started?x=1&x=2'],
+    ['//evil.example/path', 'https://mainbrella.com//evil.example/path']]) {
+    const response = await handlePreviewGateway(new Request(`https://mainbrella.dev${path}`), env);
+    assert.equal(response.status, 308);
+    assert.equal(response.headers.get('location'), target);
+  }
+  for (const url of ['https://www.mainbrella.dev/', `https://${token}.mainbrella.dev/`,
+    'https://mainbrella.dev.evil.example/', 'http://mainbrella.dev/', 'https://mainbrella.dev:8443/']) {
+    assert.equal((await handlePreviewGateway(new Request(url), env)).status, 404, url);
+  }
+  assert.equal((await handlePreviewGateway(new Request('https://mainbrella.dev/', { headers: { host: 'other.example' } }), env)).status, 404);
+});
+
 test('gateway requires explicit isolated configuration and exact HTTPS bearer host', async t => {
   const f = await fixture(t);
   for (const invalid of ['', 'mainbrella.com', 'apps.mainbrella.com', 'https://preview.example', '*.preview.example',
@@ -33,7 +49,7 @@ test('gateway requires explicit isolated configuration and exact HTTPS bearer ho
     assert.equal(previewDomain({ PREVIEW_DOMAIN: invalid }), null, invalid);
     assert.equal(previewsConfigured({ ...f.env, PREVIEW_DOMAIN: invalid }), false);
   }
-  for (const url of [`http://${token}.${domain}/`, `https://${token}.${domain}:8443/`, `https://${domain}/`,
+  for (const url of [`http://${token}.${domain}/`, `https://${token}.${domain}:8443/`,
     `https://extra.${token}.${domain}/`, `https://${token}.${domain}.evil.example/`, `https://${'c'.repeat(48)}.${domain}/`]) {
     const response = await handlePreviewGateway(new Request(url), f.env);
     assert.equal(response.status, 404, url);

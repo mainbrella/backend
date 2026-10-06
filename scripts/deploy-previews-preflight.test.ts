@@ -73,6 +73,8 @@ test('unsafe isolation, routing, logging and lifecycle configuration fails befor
     (o: any) => { o.gateway.routes[0].pattern = '*.mainbrella.com/*'; },
     (o: any) => { o.gateway.routes[0].custom_domain = true; },
     (o: any) => { o.gateway.routes.push({ pattern: 'api.mainbrella.com/*' }); },
+    (o: any) => { o.gateway.routes.push({ pattern: 'www.preview.example', custom_domain: true }); },
+    (o: any) => { o.gateway.routes.push({ pattern: 'preview.example', custom_domain: true }, { pattern: 'preview.example', custom_domain: true }); },
     (o: any) => { o.gateway.triggers.crons = []; },
   ];
   for (const change of changes) {
@@ -81,6 +83,13 @@ test('unsafe isolation, routing, logging and lifecycle configuration fails befor
     assert.throws(() => previewPreflight(f.options));
     assert.equal(f.calls.length, 0);
   }
+});
+
+test('the optional apex custom domain passes while preserving the wildcard route', () => {
+  const f = fixture();
+  f.options.gateway.routes.unshift({ pattern: 'preview.example', custom_domain: true });
+  assert.equal(previewPreflight({ ...f.options, local: true }).domain, 'preview.example');
+  assert.equal(f.calls.length, 0);
 });
 
 test('missing migration, constraints, expiry index and malformed remote evidence fail closed', () => {
