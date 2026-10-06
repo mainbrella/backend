@@ -146,11 +146,25 @@ archive each passed all 13 contract tests with isolated imports. Evidence is in
 The npm token authenticated as `andrewarrow`, but publishing the qualified tarball
 returned `E403`: "Two-factor authentication or granular access token with bypass
 2fa enabled is required to publish packages." The npm package remains unpublished.
-Use an authorized publishing token with the required 2FA permission or interactive
-OTP to release this exact tarball; do not rebuild or repeat the SDK start gate.
+Use [staged publishing](https://docs.npmjs.com/staged-publishing/) for this release:
+submit the exact qualified tarball with the existing token, then review and approve
+it on npmjs.com with browser 2FA. Submission requires no 2FA bypass. Staging supports
+new packages and creates a public `0.0.0-stage` placeholder; the actual 0.1.0 archive
+becomes public only after approval. Do not rebuild or repeat the SDK start gate.
+
+An isolated npm 11.21.0 CLI was installed under `.wrangler/npm-stage-tools`, without
+changing repository dependencies or the global CLI. The first staging attempt
+returned `E404: Scope not found` for `@mainbrella/sdk`; no stage ID was returned.
+Its checkpoint remains in
+`.wrangler/sdk-npm-stage-0.1.0-20261006/stage-verification.json`. Create the
+`mainbrella` npm organization using the free public-package plan, or establish
+publish access to that scope, before another attempt. The credential-safe local
+wrapper verifies the candidate and deployed gate hashes, preserves a new evidence
+directory, and verifies a staged archive download before browser approval.
 
 ```sh
-npm publish artifacts/sdk-release-0.1.0-20261006-r2/mainbrella-sdk-0.1.0.tgz --access public
+# After the namespace blocker is resolved; choose a new evidence directory.
+node .wrangler/stage-qualified-npm.mjs --output=.wrangler/sdk-npm-stage-0.1.0-20261006-r2
 pip install mainbrella==0.1.0
 ```
 
@@ -164,8 +178,11 @@ than rebuilding them. Registry credentials belong in the release environment,
 never the repository, artifact or qualification report.
 
 ```sh
-# Operator release commands, after the above gates:
-npm publish /path/to/mainbrella-sdk-0.1.0.tgz --access public
+# Operator release commands, after the above gates, with npm 11.15+ and Node 22.14+:
+npm stage publish /path/to/mainbrella-sdk-0.1.0.tgz --access public --tag latest
+# Review in the npmjs.com Staged Packages tab, then approve with browser 2FA.
+# CLI alternative, requiring interactive 2FA:
+npm stage approve STAGE_ID
 python -m twine upload /path/to/mainbrella-0.1.0.tar.gz /path/to/mainbrella-0.1.0-py3-none-any.whl
 ```
 
