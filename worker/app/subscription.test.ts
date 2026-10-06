@@ -58,7 +58,7 @@ for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
     assert.equal(checkout.params.get('line_items[0][price]'), PLAN_PRICES[plan]);
     assert.equal(checkout.params.get('line_items[0][quantity]'), '1');
     assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
-    assert.equal(checkout.params.get('ui_mode'), 'embedded');
+    assert.equal(checkout.params.get('ui_mode'), 'custom');
     assert.equal(checkout.params.get('allow_promotion_codes'), 'true');
     assert.equal(checkout.params.has('customer_email'), false);
     assert.equal(checkout.params.get('client_reference_id'), TEST_USER);
@@ -87,13 +87,14 @@ test('checkout reuses an open matching session and expires a session for a diffe
   assert.equal(f.calls.at(-1)?.params.get('line_items[0][price]'), PLAN_PRICES.scale);
 });
 
-for (const legacy of [{ ui_mode: 'custom', allow_promotion_codes: true }, { ui_mode: 'embedded', allow_promotion_codes: false }]) {
+for (const legacy of [{ ui_mode: 'embedded', allow_promotion_codes: true }, { ui_mode: 'custom', allow_promotion_codes: false }]) {
   test(`checkout replaces incompatible session ${JSON.stringify(legacy)}`, async t => {
     const f = await billingFixture(t); f.state.subscriptions = [];
     Object.assign(f.state.checkout, legacy);
     const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'builder' }), f.env);
     assert.equal(response.status, 200);
     assert.ok(f.calls.some(c => c.url.pathname.endsWith('/cs_old/expire')));
+    assert.equal(f.calls.at(-1)?.params.get('ui_mode'), 'custom');
     assert.equal(f.calls.at(-1)?.params.get('allow_promotion_codes'), 'true');
   });
 }

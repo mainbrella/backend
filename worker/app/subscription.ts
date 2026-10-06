@@ -130,12 +130,12 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (record.checkout_session_id) {
       const existing = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${encodeURIComponent(record.checkout_session_id)}`);
       if (existing.status === "open") {
-        if (existing.ui_mode === "embedded" && existing.allow_promotion_codes === true && existing.metadata?.plan === plan && existing.client_secret) return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
+        if (existing.ui_mode === "custom" && existing.allow_promotion_codes === true && existing.metadata?.plan === plan && existing.client_secret) return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
         await stripeRequest(env, `/checkout/sessions/${encodeURIComponent(existing.id)}/expire`, new URLSearchParams());
       }
     }
     const params = new URLSearchParams({
-      mode: "subscription", ui_mode: "embedded", allow_promotion_codes: "true", "payment_method_types[0]": "card",
+      mode: "subscription", ui_mode: "custom", allow_promotion_codes: "true", "payment_method_types[0]": "card",
       "metadata[plan]": plan, "subscription_data[metadata][plan]": plan,
       customer: record.stripe_customer_id, client_reference_id: user.id,
       "line_items[0][price]": PLAN_PRICES[plan], "line_items[0][quantity]": "1",
@@ -143,7 +143,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       return_url: `${origin}/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing`,
     });
     const session = await stripeRequest<CheckoutSession>(env, "/checkout/sessions", params,
-      `mainbrella-embedded-promo-checkout-${user.id}-${plan}-${record.checkout_session_id || "initial"}`);
+      `mainbrella-inline-promo-checkout-${user.id}-${plan}-${record.checkout_session_id || "initial"}`);
     if (!session.client_secret) throw new Error("billing_unavailable");
     await env.DB.prepare("UPDATE pro_billing SET checkout_session_id = ? WHERE user_id = ?").bind(session.id, user.id).run();
     return authJson({ client_secret: session.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
