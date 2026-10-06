@@ -46,7 +46,9 @@ try:
                     else:
                         raise
                 if not data:
-                    sys.exit(child.wait() if child.poll() is not None else 137)
+                    # PTY EOF can arrive before the child is reaped. Wait for its
+                    # actual exit status rather than inventing a failure in that race.
+                    sys.exit(child.wait())
                 os.write(1, data)
             else:
                 data = os.read(0, 65536)
