@@ -47,6 +47,17 @@ async function document() {
   return response.json() as Promise<any>;
 }
 
+test('workspace schemas describe capture budgets, usage and nonrefundable deletion', async () => {
+  const {paths}=await document();
+  const list=paths['/workspaces'].get.responses['200'].content['application/json'].schema;
+  const limits=list.properties.limits;
+  for(const field of ['maxCaptureBytesPerMonth','maxRetainedCaptureBytes'])assert.ok(limits.properties[field]);
+  for(const field of ['savesThisMonth','captureBytesThisMonth','retainedCaptureBytes'])assert.ok(list.properties.usage.properties[field]);
+  assert.match(paths['/workspaces'].post.description,/workspace_capture_budget_exceeded/);
+  assert.match(paths['/workspaces'].post.description,/workspace_retained_budget_exceeded/);
+  assert.match(paths['/workspaces/{workspaceId}'].delete.description,/does not refund/);
+});
+
 test('filesystem schemas expose exact generation, bounded pagination, permissions and mutation semantics', async () => {
   const { paths } = await document();
   const list = paths['/containers/files/list'].get;

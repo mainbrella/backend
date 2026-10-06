@@ -1,9 +1,21 @@
-import { WORKSPACE_POLICY, WORKSPACE_OPERATION_RETENTION_MS, publicWorkspace, validWorkspaceId, validWorkspaceName, validGeneration } from './workspace-contract.js';
-import { entitlementHeaders, requestEntitlement, validEntitlement, machineSize } from './plan-policy.js';
+import { WORKSPACE_POLICY, WORKSPACE_CAPTURE_RETENTION_MS, WORKSPACE_OPERATION_RETENTION_MS, publicWorkspace, validWorkspaceId, validWorkspaceName, validGeneration } from './workspace-contract.js';
+import { entitlementHeaders, requestEntitlement, validEntitlement, machineSize, MACHINE_SIZES } from './plan-policy.js';
 import { validContainerId, validIdempotencyKey } from './container-account-core.js';
 import { readFileBytes } from './file-contract.js';
 
 const KEY='workspaceIndex';
+const maxDiskBytes=Math.max(...MACHINE_SIZES.map(size=>size.diskGB))*1_000_000_000;
+function reserveCapture(index,bytes,at){
+  const day=new Date(at).toISOString().slice(0,10),previous=index.captureUsage[day];
+  index.captureUsage[day]={bytes:(previous?.bytes??0)+bytes,
+    retainUntil:Math.max(previous?.retainUntil??0,at+WORKSPACE_CAPTURE_RETENTION_MS)};
+}
+function captureUsage(index,now){
+  const month=new Date(now).toISOString().slice(0,7);
+  return {savesThisMonth:index.usage[month]??0,
+    captureBytesThisMonth:Object.entries(index.captureUsage).reduce((sum,[day,bucket])=>sum+(day.startsWith(month)?bucket.bytes:0),0),
+    retainedCaptureBytes:Object.values(index.captureUsage).reduce((sum,bucket)=>sum+bucket.bytes,0)};
+}
 const fail=(code,status)=>Response.json({error:code},{status,headers:{'Cache-Control':'no-store'}});
 // Uses the same account lock and owner namespace as start/stop. Provider handles
 // never cross the public boundary. Capture intent precedes any provider call.
@@ -11,10 +23,10 @@ export class AccountWorkspaces {
   constructor(account){this.account=account;}
   async index(){
     const stored=await this.account.ctx.storage.get(KEY);
-    if(!stored)return {records:[],usage:{}};
+    if(!stored)return {records:[],usage:{},captureUsage:{}};
     if(stored.records)return stored; // Migrate the initial single-value format.
     const chunks=await Promise.all(Array.from({length:stored.chunks},(_,i)=>this.account.ctx.storage.get(`${KEY}:${i}`)));
-    return {records:chunks.flatMap(chunk=>chunk??[]),usage:stored.usage};
+    return {records:chunks.flatMap(chunk=>chunk??[]),usage:stored.usage,captureUsage:stored.captureUsage};
   }
   async persist(index){
     // A busy account can retain thousands of 24-hour operation receipts. Keep
@@ -23,20 +35,37 @@ export class AccountWorkspaces {
     await storage.transaction(async tx=>{
       const previous=await tx.get(KEY),chunks=Math.ceil(index.records.length/32);
       for(let i=0;i<chunks;i++)await tx.put(`${KEY}:${i}`,index.records.slice(i*32,(i+1)*32));
-      await tx.put(KEY,{chunks,usage:index.usage});
+      await tx.put(KEY,{chunks,usage:index.usage,captureUsage:index.captureUsage});
       for(let i=chunks;i<(previous?.chunks??0);i++)await tx.delete(`${KEY}:${i}`);
     });
   }
   async prune(){
-    if(!await this.account.ctx.storage.get(KEY))return {records:[],usage:{}};
+    if(!await this.account.ctx.storage.get(KEY))return {records:[],usage:{},captureUsage:{}};
     const index=await this.index(),now=this.account.now();
+    if(!index.captureUsage){
+      // Migrate before pruning receipts. Never treat unknown legacy bytes as
+      // zero: missing monthly receipts reserve the largest supported disk.
+      index.captureUsage={};const known={};
+      for(const record of index.records){
+        const at=Number.isFinite(Date.parse(record.createdAt))?Date.parse(record.createdAt):now;
+        const month=new Date(at).toISOString().slice(0,7);known[month]=(known[month]??0)+1;
+        if(at+WORKSPACE_CAPTURE_RETENTION_MS>now)reserveCapture(index,(machineSize(record.size)?.diskGB??maxDiskBytes/1_000_000_000)*1_000_000_000,at);
+      }
+      for(const [month,count] of Object.entries(index.usage)){
+        const missing=Math.max(0,count-(known[month]??0));
+        if(missing)reserveCapture(index,missing*maxDiskBytes,now);
+      }
+    }
+    index.captureUsage=Object.fromEntries(Object.entries(index.captureUsage).filter(([,bucket])=>bucket.retainUntil>now));
     index.records=index.records.filter(record=> (record.deleted ? record.deletedAt + WORKSPACE_OPERATION_RETENTION_MS : record.expiresAt+WORKSPACE_OPERATION_RETENTION_MS)>now);
     for(const record of index.records)if(record.expiresAt<=now || record.deleted){delete record.handle;record.reservedBytes=0;}
     const month=new Date(now).toISOString().slice(0,7);index.usage={[month]:index.usage[month]??0};
     await this.persist(index);
     return index;
   }
-  async nextAlarm(){const index=await this.index(),now=this.account.now();return Math.min(Infinity,...index.records.map(r=>r.deleted?r.deletedAt+WORKSPACE_OPERATION_RETENTION_MS:r.expiresAt>now?r.expiresAt:r.expiresAt+WORKSPACE_OPERATION_RETENTION_MS));}
+  async nextAlarm(){const index=await this.index(),now=this.account.now();return Math.min(Infinity,
+    ...Object.values(index.captureUsage??{}).map(bucket=>bucket.retainUntil),
+    ...index.records.map(r=>r.deleted?r.deletedAt+WORKSPACE_OPERATION_RETENTION_MS:r.expiresAt>now?r.expiresAt:r.expiresAt+WORKSPACE_OPERATION_RETENTION_MS));}
   async restoreSelection(state,selection){
     const index=await this.prune(),record=index.records.find(r=>r.id===selection.workspaceId);
     if(!record || record.deleted)throw new Error('workspace_not_found');
@@ -68,7 +97,7 @@ export class AccountWorkspaces {
         const records=index.records.filter(r=>!r.deleted);
         if(id){const record=records.find(r=>r.id===id);return record?account.respond(publicWorkspace(record,now)):fail('workspace_not_found',404);}
         return account.respond({workspaces:records.map(r=>publicWorkspace(r,now)),limits:WORKSPACE_POLICY[state.entitlement.plan]??null,
-          usage:{saved:records.filter(r=>r.expiresAt>now).length,reservedBytes:records.reduce((sum,r)=>sum+(r.reservedBytes??0),0)}});
+          usage:{saved:records.filter(r=>r.expiresAt>now).length,reservedBytes:records.reduce((sum,r)=>sum+(r.reservedBytes??0),0),...captureUsage(index,now)}});
       }
       if(['PATCH','DELETE'].includes(request.method)){
         const record=index.records.find(r=>r.id===id);if(!record)return fail('workspace_not_found',404);
@@ -101,10 +130,14 @@ export class AccountWorkspaces {
         const saved=index.records.filter(r=>!r.deleted&&r.expiresAt>now),month=new Date(now).toISOString().slice(0,7);
         if(saved.length>=policy.maxSaved || saved.reduce((sum,r)=>sum+(r.reservedBytes??0),0)+reservedBytes>policy.maxReservedBytes)return fail('workspace_quota_exceeded',429);
         if((index.usage[month]??0)>=policy.maxSavesPerMonth)return fail('workspace_save_limit',429);
+        const captures=captureUsage(index,now);
+        if(captures.captureBytesThisMonth+reservedBytes>policy.maxCaptureBytesPerMonth)return fail('workspace_capture_budget_exceeded',429);
+        if(captures.retainedCaptureBytes+reservedBytes>policy.maxRetainedCaptureBytes)return fail('workspace_retained_budget_exceeded',429);
         record={id:crypto.randomUUID(),name:body.name,source:{id:body.id,createdAt:body.createdAt},createdAt:new Date(now).toISOString(),expiresAt:now+policy.retentionMs,
           size:source.size,internet:source.internet??true,imageDigest:source.imageDigest,imageId:source.imageId,imageName:source.imageName,catalogId:source.catalogId,
           operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false};
         index.records.push(record);index.usage[month]=(index.usage[month]??0)+1;
+        reserveCapture(index,reservedBytes,now);
         await this.persist(index);await account.saveState(state);
       }
       if(!record.handle){

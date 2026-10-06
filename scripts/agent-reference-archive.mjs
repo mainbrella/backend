@@ -6,6 +6,7 @@ export function agentReferenceArchive(files) {
   const entries = {
     'mainbrella-containers/': null,
     'mainbrella-containers/references/': null,
+    ...(Object.keys(files).some(name => name.startsWith('scripts/')) ? { 'mainbrella-containers/scripts/': null } : {}),
     ...Object.fromEntries(Object.entries(files).map(([name, bytes]) => [`mainbrella-containers/${name}`, bytes])),
   };
   const blocks = [];

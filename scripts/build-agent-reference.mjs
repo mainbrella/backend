@@ -19,6 +19,7 @@ const sources = {
 };
 const documents = {};
 for (const [name, path] of Object.entries(sources)) documents[name] = await readFile(join(root, path), 'utf8');
+const scripts = { 'scripts/mainbrella-deploy-static.mjs': await readFile(join(root, 'scripts/mainbrella-deploy-static.mjs'), 'utf8') };
 const references = {};
 const sections = documents['API.md'].split(/(?=^## )/m).slice(1);
 for (const section of sections) {
@@ -31,19 +32,20 @@ for (const section of sections) {
 references['references/javascript-sdk.md'] = documents['sdk/javascript.md'];
 references['references/python-sdk.md'] = documents['sdk/python.md'];
 references['references/index.md'] = `# Mainbrella reference index\n\nGenerated from backend API.md and SDK READMEs. Local implementation does not establish deployed support; read /capabilities before using a feature.\n\n${Object.entries(references).map(([name, content]) => `- [${content.match(/^#+ (.+)$/m)?.[1]}](${name.slice('references/'.length)})`).join('\n')}\n`;
-for (const [name, content] of Object.entries({ 'API.md': documents['API.md'], 'SKILL.md': documents['SKILL.md'], ...references })) {
+for (const [name, content] of Object.entries({ 'API.md': documents['API.md'], 'SKILL.md': documents['SKILL.md'], ...references, ...scripts })) {
+  await mkdir(dirname(join(skillDir, name)), { recursive: true });
   await writeFile(join(skillDir, name), content);
 }
 await copyFile(join(root, 'LICENSE'), join(skillDir, 'LICENSE'));
 const full = `# Mainbrella full agent reference\n\nGenerated from the backend's authoritative API, skill and SDK instructions. Read the SDK references for installation and publication status; deployment capabilities must be checked independently.\n\n${Object.entries(documents).map(([name, content]) => `<!-- Source: https://mainbrella.com/${name} -->\n\n${content}`).join('\n\n')}\n`;
 await writeFile(join(output, 'llms-full.txt'), full);
-const files = { ...documents, ...references, 'llms-full.txt': full };
+const files = { ...documents, ...references, ...scripts, 'llms-full.txt': full };
 const manifest = { version, source: 'mainbrella/backend', licenseSha256: createHash('sha256').update(await readFile(join(root, 'LICENSE'))).digest('hex'), files: Object.fromEntries(Object.entries(files).map(([name, value]) =>
   [name, createHash('sha256').update(value).digest('hex')])) };
 await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const archive = join(output, `mainbrella-containers-${version}.tar.gz`);
 await writeFile(archive, agentReferenceArchive({
   'API.md': documents['API.md'], 'SKILL.md': documents['SKILL.md'],
-  ...references, LICENSE: await readFile(join(root, 'LICENSE')),
+  ...references, ...scripts, LICENSE: await readFile(join(root, 'LICENSE')),
 }));
 console.log(`Agent reference package: ${output}`);

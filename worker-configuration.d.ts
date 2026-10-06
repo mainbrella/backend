@@ -7,6 +7,7 @@ interface __BaseEnv_Env {
 	EMAIL_AUTH_LIMIT: RateLimit;
 	ACTIVITY_WEBSOCKET_ENABLED: "true";
 	PREVIEWS_ENABLED: "true";
+	WORKSPACE_PERSISTENCE_ENABLED: "true";
 	PREVIEW_DOMAIN: "mainbrella.dev";
 	GOOGLE_CLIENT_ID: "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com";
 	STRIPE_PUBLISHABLE_KEY: string;
@@ -17,6 +18,9 @@ interface __BaseEnv_Env {
 	MONITORING_SECRET: string;
 	MAINBRELLA_API_KEY: string;
 	MAINBRELLA_API_KEY2: string;
+	PIPY: string;
+	NPMJS: string;
+	FOO_KEY: string;
 	ACCOUNT_ACTIVITY: DurableObjectNamespace<import("./worker/index").AccountActivity>;
 	CONTAINER_ACCOUNT: DurableObjectNamespace<import("./worker/index").ContainerAccount>;
 	USER_CONTAINER: DurableObjectNamespace /* UserContainer from mainbrella-containers */;
@@ -33,7 +37,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ACTIVITY_WEBSOCKET_ENABLED" | "PREVIEWS_ENABLED" | "PREVIEW_DOMAIN" | "GOOGLE_CLIENT_ID" | "STRIPE_PUBLISHABLE_KEY" | "STRIPE_SECRET_KEY" | "DNS_EDIT" | "IMAGE_BUILD_SECRET" | "WORKLOAD_METRIC_TOKEN" | "MONITORING_SECRET" | "MAINBRELLA_API_KEY" | "MAINBRELLA_API_KEY2">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ACTIVITY_WEBSOCKET_ENABLED" | "PREVIEWS_ENABLED" | "WORKSPACE_PERSISTENCE_ENABLED" | "PREVIEW_DOMAIN" | "GOOGLE_CLIENT_ID" | "STRIPE_PUBLISHABLE_KEY" | "STRIPE_SECRET_KEY" | "DNS_EDIT" | "IMAGE_BUILD_SECRET" | "WORKLOAD_METRIC_TOKEN" | "MONITORING_SECRET" | "MAINBRELLA_API_KEY" | "MAINBRELLA_API_KEY2" | "PIPY" | "NPMJS" | "FOO_KEY">> {}
 }
 
 // Begin runtime types

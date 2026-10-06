@@ -23,7 +23,10 @@ execution mode. Obtain account allowances and deployed images from `/containers`
 1. Read `MAINBRELLA_API_KEY` from the project's existing environment loading or
    secret manager. It starts with `mb_`. If missing, ask the user to sign in at
    `https://mainbrella.com/api-keys/`, create a named key, and provision it locally
-   as `MAINBRELLA_API_KEY`. Do not ask them to paste the secret into chat. A key
+   as `MAINBRELLA_API_KEY`. For an existing ignored `.env`, Node 22+ supports
+   `node --env-file=.env mainbrella-doctor.mjs` without dependencies or shell
+   sourcing. Never expose this key in a Vite `VITE_*` variable/client bundle or
+   copy it into the container. Do not ask them to paste the secret into chat. A key
    grants no compute allowance by itself; paid access or a coupon trial is required.
 2. Detect the project without asking: `package.json` means JavaScript/TypeScript;
    `pyproject.toml` or `requirements.txt` means Python; `Cargo.toml` means Rust;
@@ -38,7 +41,9 @@ execution mode. Obtain account allowances and deployed images from `/containers`
 4. Download `https://mainbrella.com/mainbrella-doctor.mjs` and
    `https://mainbrella.com/mainbrella-verify.mjs` into the same local directory.
    Inspect them, then run `node mainbrella-doctor.mjs` from the project directory.
-   The doctor prints JSON diagnostics without secrets and performs only GETs.
+   The doctor checks readiness for the full verification suite, including managed
+   execution, streaming, reconnect and cancellation. It prints JSON diagnostics
+   without secrets and performs only GETs.
    Exit 0 means ready for a new verification container; exit 1 identifies blockers.
    `MAINBRELLA_API_URL` optionally selects a different HTTPS origin (HTTP localhost
    is allowed for development). It must not contain a credential, path, or query.
@@ -97,13 +102,44 @@ When capability discovery confirms support,
 start the server on an eligible application port, then POST
 `/containers/previews?id=<id>&createdAt=<generation>` with `{"port":3000}`.
 The returned URL is a bearer credential: share only as requested and keep it out
-of logs/public artifacts. It expires within the hard lease. GET the same endpoint
+of logs/public artifacts. This is temporary hosting: it expires within the hard
+lease, and inactivity can stop the container earlier. Explain this before
+deployment and report the actual returned expiration alongside the URL. GET the same endpoint
 for metadata and DELETE with `previewId` to revoke. A lost creation response
 requires listing/revoking before issuing another link; a 503
 `preview_reconciliation_required` includes the ID to retry revocation.
 Cookies and account credentials are stripped from app traffic. See API.md for
 limits and framework restrictions. The SDKs provide `sandbox.previews.create`,
 `list` and `revoke`; consult their references for installation instructions.
+
+## Deploy a static site
+
+Read [Static-site deployment over HTTP](references/static-site-deployment-over-http.md)
+(or the same section in API.md) for the complete local build → chunked upload →
+hash verification → detached server → readiness → preview → URL checks workflow.
+Use the archive's `scripts/mainbrella-deploy-static.mjs` or download and inspect
+`https://mainbrella.com/mainbrella-deploy-static.mjs`. It requires Node 22+ and local
+`tar`, has no npm dependencies, and uses a single dedicated Lite Node generation.
+Build locally with the existing package manager, then run:
+
+```sh
+node --env-file=.env scripts/mainbrella-deploy-static.mjs \
+  --dist dist --state .mainbrella/deployment.json \
+  --check /<actual-page>/ --check /assets/<actual-built-file>.js
+```
+
+Omit `--env-file` if the environment already provides the key. Keep `.mainbrella/`
+ignored/private; select real paths from the build. The helper checks only the
+capabilities it needs. Do not run the full paid verifier before every deployment
+unless setup verification is part of the task. It preserves creation key/body,
+exact generation, current step, command result flags, logs and preview metadata
+before cleanup. It refuses existing state and never blindly replays uncertain
+commands or preview issuance. On failure, inspect private diagnostics and reconcile
+before an intentional retry; stop the saved generation explicitly when finished
+using `--cleanup --state <file>`. Report any remaining container and idle/lease
+limits. The helper keeps the bearer URL in private state; share as requested with
+its actual expiration. It verifies HTTP content; check browser behavior separately
+when relevant.
 
 ## Verify
 
@@ -112,10 +148,15 @@ Set `MAINBRELLA_CATALOG_ID` to the available image selected for the project;
 without it the script selects `node`. This verification consumes one monthly start.
 It creates a new container, runs `echo "hello from mainbrella"` through HTTP, checks
 stdout and exit code, writes and reads a binary probe under `/tmp`, compares every
-byte, and deletes **only that container generation** in a `finally` block.
+byte, starts a managed job, consumes SSE output with cursor reconnect if needed,
+checks the retained result, then starts `sleep 30`, cancels it and polls for
+`canceled`. All checks share that one start. It requires foreground, background,
+streaming, reconnect, cancellation and binary file read/write capabilities, and
+deletes **only that container generation** in a `finally` block.
 
 Pass requires `ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`,
-`files: "verified"`, and `cleanup: "completed"`. Never report success without all five. On a failure, use
+`files: "verified"`, `managed: "verified"`, `cancellation: "verified"`, and
+`cleanup: "completed"`. Never report success without all seven. On a failure, use
 Troubleshooting to fix the demonstrated cause and re-run at most once **only after
 cleanup is confirmed and allowance permits**. If creation was ambiguous or cleanup
 failed, reconcile first and report any remaining machine; do not blindly re-run.
@@ -138,7 +179,7 @@ renew idle time, and SSH issuance does not extend the hard deadline.
 | `execution_failed` / `timedOut` / `outputTruncated` | Inspect exit status and execution flags. Reduce the job or use authorized SSH access for longer tasks. |
 | 429 `execution_limit` | Wait for an active command/file operation to finish; do not stop unrelated work. |
 | `file_verification_failed` / `files_unavailable` | Check deployment alignment and image utilities. Preserve unexpected file contents and diagnostics outside shared logs. |
-| `file_too_large` / `invalid_file_path` | Use files up to 1 MiB and valid absolute paths; use authorized SSH for larger transfers. |
+| `file_too_large` / `invalid_file_path` | Use valid absolute paths and files up to 1 MiB; for larger artifacts upload archive chunks, concatenate and verify SHA-256 before extraction (see the static deployment reference). Authorized SSH is another option. |
 | `file_not_found` / `not_regular_file` / `file_access_denied` | Check the path, parent directory and guest permissions. Writes need a regular file or an unused path. |
 | `idempotency_key_conflict` | The key belongs to a different image selection. Use the original request to reconcile it; use a new key only for an intentional new launch. |
 | `creation_no_longer_running` | The original operation stopped or failed. Do not touch a replacement in its slot. |
@@ -149,7 +190,10 @@ renew idle time, and SSH issuance does not extend the hard deadline.
 ## Report
 
 One paragraph: which integration changed, what command ran, stdout, exit code,
-whether the binary file round trip passed, and whether cleanup completed. State any blocker or remaining container plainly.
+whether binary files, managed streaming/results and cancellation passed, and
+whether cleanup completed. For deployment, report verified paths and the requested
+preview URL with actual expiration instead; identify temporary hosting and earlier
+idle shutdown. State any blocker or remaining container plainly.
 Offer one relevant next step: an owned custom image, an LLM tool that runs commands,
 or a coding agent inside a container. Do not start that additional work unasked.
 

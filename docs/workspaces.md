@@ -20,6 +20,26 @@ The original verifier reported a cleanup failure because deleting the already re
 
 Backups are customer downloads, not a managed offsite backup service. Physical provider snapshots follow provider retention; public delete revokes new admission and releases quota without guaranteeing immediate provider erasure. Image changes can make snapshots incompatible, so image rollout must retain needed digests or require customer export before replacement. Workspaces are subject to current plan limits; retained metadata remains accessible during billing outages.
 
+Cost controls reserve full source disk capacity before each capture. Builder ($5)
+allows 3 live workspaces / 8 GB, 10 new saves/month and 20 GB of capture capacity;
+Pro ($180) allows 20 / 160 GB, 100 saves and 400 GB; Scale ($999) allows
+100 / 1,000 GB, 500 saves and 2,000 GB. Both UTC-month and retained capture budgets
+apply. Reservations survive deletion, expiry, billing changes, failed captures,
+controller restarts and receipt pruning. They persist for at least 60 days, with
+daily aggregation conservatively retaining earlier captures for up to one extra
+day. Existing workspace expiry/restore eligibility is preserved. Legacy monthly
+save counts without recoverable records reserve the largest supported disk;
+never silently reset existing usage at rollout.
+
+These are conservative capacity controls, not a guarantee of profit. Cloudflare
+has no published separate native-snapshot rate as of October 6, 2026. At a
+hypothetical $0.03/GB-month, the retained caps correspond to $0.60 / $12 / $60
+per account-month (12% / 6.7% / 6% of gross plan revenue), before compute,
+requests, metadata, payment fees and other costs. This is a stress assumption,
+not a Cloudflare quote. Revisit the caps against actual provider billing before
+increasing them. Sources: https://developers.cloudflare.com/containers/platform/pricing/
+and https://developers.cloudflare.com/containers/guides/snapshots/.
+
 ## Installed SDK workspace qualification
 
 On October 6, 2026, clean registry installations of `@mainbrella/sdk@0.1.0`

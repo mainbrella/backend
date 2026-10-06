@@ -32,7 +32,7 @@ export class MainbrellaError extends Error { code: string; status: number; idemp
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
-  workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number}|null;usage:{saved:number;reservedBytes:number}}>;
+  workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number;maxCaptureBytesPerMonth:number;maxRetainedCaptureBytes:number}|null;usage:{saved:number;reservedBytes:number;savesThisMonth:number;captureBytesThisMonth:number;retainedCaptureBytes:number}}>;
     get(id:string):Promise<Workspace>;update(id:string,options:{name?:string;archived?:boolean}):Promise<Workspace>;delete(id:string):Promise<{deleted:true}>;
     restore(id:string,options?:{idempotencyKey?:string;waitTimeoutMs?:number;pollIntervalMs?:number}):Promise<Sandbox>};
   request<T = unknown>(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string>; binary?: boolean; stream?: boolean; signal?: AbortSignal }): Promise<T>;

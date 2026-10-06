@@ -61,11 +61,12 @@ for the authorized job's duration.
 The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
 integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
-No Mainbrella SDK is published yet. Use native HTTP requests for lifecycle,
-command execution, and file transfer; local SSH tools are optional for interactive access.
-Local dependency-free SDK packages are available in this backend repository at
-`sdk/javascript` and `sdk/python`; their READMEs describe local installation. Do
-not assume these names can be installed from public npm/PyPI registries.
+The dependency-free SDKs are published as `@mainbrella/sdk` 0.1.0 on npm
+and `mainbrella` 0.1.0 on PyPI. See the
+[JavaScript](https://mainbrella.com/sdk/javascript.md) and
+[Python](https://mainbrella.com/sdk/python.md) references for installation and APIs.
+Native HTTP remains sufficient for lifecycle, execution and file transfer;
+local SSH tools are optional for interactive access.
 
 Download and inspect the dependency-free Node 22+ tools:
 
@@ -77,7 +78,12 @@ node mainbrella-doctor.mjs
 node mainbrella-verify.mjs
 ```
 
-Keep both scripts in the same directory. The doctor performs only GET requests,
+For a project with an existing ignored `.env`, use Node’s built-in loader:
+`node --env-file=.env mainbrella-doctor.mjs` (likewise for verification/deployment).
+Never copy the key into the guest or expose it through a Vite `VITE_*` variable
+or client bundle. Keep both scripts in the same directory. The doctor checks
+readiness for the full verification suite, including managed execution, SSE,
+reconnect and cancellation. It performs only GET requests,
 checks access, quotas, image availability, HTTP execution/file routes, Node version, and project markers, and
 never prints credentials. Both commands print JSON and exit 0 for a pass or 1
 for a failure. `MAINBRELLA_API_URL` can select another HTTPS API origin, or HTTP
@@ -86,14 +92,140 @@ verification; it defaults to `node`.
 
 Verification runs `echo "hello from mainbrella"`, checks stdout and exit code 0,
 writes and reads a six-byte binary probe under `/tmp`, and compares every byte.
-It deletes the newly created generation in `finally`. Pass requires
-`ok: true`, `files: "verified"`, and `cleanup: "completed"`. It preserves pre-existing containers.
+It also starts a managed job, consumes SSE output (resuming the last cursor if
+disconnected), checks the retained result, then starts `sleep 30`, cancels it
+and polls for `canceled`. Foreground, background, streaming, reconnect,
+cancellation and binary read/write capabilities are required. All checks share
+one new container/start. It deletes that generation in `finally`. Pass requires
+`ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`, `files: "verified"`,
+`managed: "verified"`, `cancellation: "verified"`, and `cleanup: "completed"`.
+It preserves pre-existing containers. The static deployment helper below checks
+only its own required capabilities; a separate full verification is not a
+prerequisite for every deployment and consumes an additional start.
 It uses a unique idempotency key and the returned `creation` identity, so concurrent
 launches cannot confuse ownership. It retries the same operation up to three times
 on a lost response or a `starting` result. Unresolved startup produces
 `creation_ambiguous` and `cleanup: "reconcile_manually"`, with `creationKey` for
 recovery: repeat the same POST body and key within 24 hours. It never deletes a
 machine by guesswork. Cleanup failures include the created ID and generation.
+
+## Static-site deployment over HTTP
+
+This produces a **temporary preview**, not persistent hosting. The preview expires
+no later than the container's hard lease; inactivity can stop the container sooner.
+Ordinary stop discards the upload. Report the returned preview `expiresAt` beside
+the URL, rather than calculating expiration from the requested TTL. Container IDs
+are opaque: an ID such as `small` does not establish the requested machine size.
+
+The [dependency-free Node 22+ helper](https://mainbrella.com/mainbrella-deploy-static.mjs)
+is also included as `scripts/mainbrella-deploy-static.mjs` in the skill archive.
+It uses native HTTP, a local `tar` executable, and a catalog Node guest with
+`node`, `tar`, `setsid`, and `nohup`. It checks guest utilities before uploading;
+these are prerequisites of this recipe, not a guarantee for every catalog image.
+It does not require SSH, an SDK, `curl`, `ps`, or `sha256sum` in the guest.
+Build locally using the existing package manager; the Lite guest only serves
+public static output. This helper does not run framework servers or provide SPA
+history fallback. Include only files intended for public access in `dist/`.
+
+```sh
+# Download and inspect the helper before running it.
+curl --fail --silent --show-error https://mainbrella.com/mainbrella-deploy-static.mjs -o mainbrella-deploy-static.mjs
+# Preserve the project's package manager and build command.
+npm run build
+# Keep .mainbrella/ ignored and private. New directories use 0700, state uses 0600.
+# Remove --env-file=.env if credentials already come from the environment.
+node --env-file=.env mainbrella-deploy-static.mjs \
+  --dist dist --state .mainbrella/deployment.json \
+  --check /download/ --check /privacy/ --check /terms/ \
+  --check /dryerasiac.css --check /images/logo.png
+# Add --check /assets/<actual-built-file>.js for the JS emitted by this build.
+```
+
+Check paths are examples: select paths that exist in the actual build. Root is
+always checked; `--check` adds pages or assets and compares exact bytes with the
+local files. Directory paths must end in `/`; their bare path must return a 308
+redirect to the directory. A generated missing path must return 404. This checks
+HTTP serving through the preview gateway; it does not prove browser rendering
+or JavaScript behavior. Perform a browser check when that matters to the task.
+
+The helper follows this workflow:
+
+1. Validate local static files (reject symlinks), create a gzip tar archive, and
+   check foreground execution, binary files, previews, Node image and allowances.
+2. Save a UUID creation key and exact `{catalogId:"node",size:"lite"}` selection
+   before POST. Retry the same key/body at most three times for transport/5xx or
+   `starting` responses. Known 4xx errors stop immediately. This is one logical
+   start; unresolved or failed starts may still consume allowance.
+3. Save returned ID, exact `createdAt` generation, hard expiration and upload
+   directory. Upload sequential chunks of at most `1024 * 1024` bytes through
+   `PUT /containers/files`, with generation-qualified, encoded query values.
+   For an uncertain PUT, read that file and compare SHA-256 before continuing.
+4. Concatenate zero-padded chunks, compare the full archive's SHA-256 using Node
+   crypto, and extract only after the hash matches. A roughly 13 MB static build
+   can use this recipe without exceeding the per-file limit; compression may
+   reduce the number of chunks. Chunking does not remove disk, memory, execution
+   timeout or lease limits. The helper buffers the archive in memory and is meant
+   for modest artifacts, not unbounded bulk transfers.
+5. Upload the Node static server, then start it on `0.0.0.0:3000` with explicit
+   detachment and redirected descriptors:
+
+   ```sh
+   setsid nohup node <upload-dir>/server.cjs <upload-dir>/site 3000 \
+     > <upload-dir>/server.log 2>&1 < /dev/null &
+   ```
+
+   Wait one second, then probe `http://127.0.0.1:3000/` using native Node `fetch`,
+   up to ten attempts with one-second request limits and 500 ms intervals.
+   A successful shell exit alone does not prove server readiness. On failure,
+   preserve the command result and inspect the final 8 KiB of `server.log` through
+   Node before cleanup. Do not assume `ps` is installed. This startup recipe
+   succeeded in a reported deployment; the earlier failure discarded diagnostics,
+   so missing `setsid` or a startup race is not an established root cause.
+6. Persist `previewPending:true`, request `{port:3000,ttlSeconds:900}`, save the
+   one-time URL/metadata, then verify root, selected pages/assets, redirects and
+   404 through that URL. The final JSON reports success, preview ID, actual ISO
+   expiration, exact container generation and state path. It keeps the bearer
+   URL in the private state file rather than stdout. Read it privately and share
+   only with the requested recipient, alongside expiration and the idle limit.
+
+The helper leaves success running and preserves failure for inspection. A failed
+run can continue consuming compute until explicitly stopped or expired. It
+refuses to overwrite existing state; it does not automatically resume commands,
+launch a replacement, retry preview issuance, or clean up evidence.
+
+State includes `apiOrigin`, `creationKey`, `creationBody`, `container:{id,createdAt}`,
+`containerExpiresAt`, `step`, archive hash/chunk count, `uploadChunk`,
+`lastCommand:{command,pending}` or `{command,result}`, bounded server-log result,
+`apiError:{status,code,previewId}`, `previewPending`, preview metadata/URL,
+`verifiedPaths` and cleanup status. Writes are atomic, mode 0600 and fsynced before
+further mutations. Command diagnostics retain stdout, stderr, `exitCode`,
+`timedOut` and `outputTruncated` privately; they must not enter shared logs.
+HTTP errors expose status, allowlisted API code and validated reconciliation ID,
+not raw server bodies. Unknown codes become `request_failed`.
+
+Recovery before another start:
+
+- If creation is unresolved, repeat the exact saved body/key within 24 hours.
+  Resolve ownership from `creation.containerId` and `creation.createdAt`, not
+  another task's container. Save the matching running identity before cleanup.
+- If a command is still pending after a transport failure, inspect its effects
+  and log on the exact generation before deciding whether to run it again.
+- If preview issuance is pending, GET the generation's preview metadata and revoke
+  its grants before another issuance. This helper owns a dedicated generation;
+  do not revoke unrelated grants on a shared machine. A known
+  `preview_reconciliation_required` supplies the ID for generation-qualified
+  revocation. Do not retry POST blindly; URLs are not recoverable from listing.
+- Preserve state and logs before stopping. Explicit cleanup removes only the
+  saved generation and confirms its absence in the returned status:
+
+  ```sh
+  node --env-file=.env mainbrella-deploy-static.mjs \
+    --cleanup --state .mainbrella/deployment.json
+  ```
+
+  If cleanup is uncertain, retain state and reconcile with GET `/containers`;
+  never target a replacement in the same slot. Keep resolved state as diagnostic
+  evidence; use a new state path for a deliberately new deployment.
 
 ## Images
 
@@ -232,8 +364,10 @@ Four HTTP commands can run concurrently per container, separately from terminal
 connections. Starting a command counts as idle activity without extending the
 hard deadline or consuming a start. Stopping/replacing a machine revokes commands.
 A disconnect requests cancellation when observable; the timeout still applies
-when the platform does not propagate a disconnect. Background jobs and reconnect
-are not supported. Results are not retained. An HTTP failure can hide a completed
+when the platform does not propagate a disconnect. This foreground route has
+no retained or reconnectable jobs; use `/containers/executions` for managed
+background jobs, streaming and reconnect when advertised by `/capabilities`.
+Foreground results are not retained. An HTTP failure can hide a completed
 command: do not blindly retry commands with side effects. SSH remains available
 for longer-running and interactive workflows.
 
@@ -631,10 +765,14 @@ Discover `capabilities.persistence.snapshots` before issuing saves or restores. 
 
 Restore with `POST /containers` and `{workspaceId}` using a new persisted creation key. A restore consumes one normal start and compute allowance and creates a fresh generation. It retains the saved machine size and internet policy, requires the same deployed image digest, and fails before admission if expired, archived or incompatible. A provider restore failure never falls back to an empty filesystem. RAM and running processes are not restored. Existing previews and generation-bound commands do not transfer.
 
-| Plan | Saved workspaces | Reserved capacity | Retention | Saves/month |
-| --- | ---: | ---: | ---: | ---: |
-| Builder | 3 | 24 GB | 7 days | 30 |
-| Pro | 20 | 160 GB | 14 days | 300 |
-| Scale | 100 | 2,000 GB | 29 days | 3,000 |
+| Plan | Saved workspaces | Reserved capacity | Retention | Saves/month | Capture capacity/month | Retained capture capacity |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Builder | 3 | 8 GB | 7 days | 10 | 20 GB | 20 GB |
+| Pro | 20 | 160 GB | 14 days | 100 | 400 GB | 400 GB |
+| Scale | 100 | 1,000 GB | 29 days | 500 | 2,000 GB | 2,000 GB |
+
+Each new save reserves the full source disk capacity against both capture budgets before contacting the provider, even if the resulting snapshot is smaller. Failed or uncertain saves keep their reservations; identical keyed retries do not charge again. Monthly counts/bytes reset at UTC calendar month boundaries. Retained capture capacity stays charged for at least 60 days, covering customer retention plus the provider's 30-day TTL after the last restore; daily buckets may retain earlier captures for up to one extra day. Archive, deletion, expiry and subscription changes do not refund these capture budgets. Deletion releases only live workspace count/capacity. Existing workspaces keep their original expiry. Legacy usage is migrated conservatively: saves whose records are unavailable reserve the maximum supported disk capacity.
+
+`GET /workspaces` includes `maxCaptureBytesPerMonth` and `maxRetainedCaptureBytes` in `limits`, and `savesThisMonth`, `captureBytesThisMonth`, and `retainedCaptureBytes` in `usage`. New saves return HTTP 429 with `workspace_quota_exceeded`, `workspace_save_limit`, `workspace_capture_budget_exceeded`, or `workspace_retained_budget_exceeded` when the corresponding limit is reached. Reads, restores of otherwise eligible workspaces, archive and deletion remain available when a save budget is exhausted.
 
 Reservation uses the source machine's full disk capacity, even when the snapshot is smaller. Expiry releases quota and removes usable handles; the provider controls physical retention. Backup to your own storage with `GET /containers/export?id=…&createdAt=…`: this returns a gzip tar archive of `/workspace`, limited to 16 MiB compressed and 60 seconds. Export a restored saved workspace to download it. Export excludes other root paths, mounted volumes and process memory, and fails if the archive exceeds the limit or files change during capture. It shares the four-operation limit with other filesystem operations.

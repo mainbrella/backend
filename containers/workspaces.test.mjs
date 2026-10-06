@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ContainerAccountController, machineName } from './container-account-core.js';
 import { UserContainerController } from './user-container-core.js';
 import { entitlementHeaders } from './plan-policy.js';
+import { WORKSPACE_POLICY, WORKSPACE_CAPTURE_RETENTION_MS } from './workspace-contract.js';
 
 class Storage {
   values=new Map();alarm=null;
@@ -13,7 +14,8 @@ class Storage {
   async list({prefix,limit=1000,startAfter}){return new Map([...this.values].sort(([a],[b])=>a.localeCompare(b)).filter(([k])=>k.startsWith(prefix)&&(!startAfter||k>startAfter)).slice(0,limit));}
   async setAlarm(at){this.alarm=at;}async deleteAlarm(){this.alarm=null;}
 }
-function fixture(){
+function fixture(initialPlan='builder'){
+  let plan=initialPlan;
   let now=Date.UTC(2026,9,6),paid=true;const snapshots=new Map(),machines=new Map(),accounts=new Map();
   const machineFor=(user,id)=>{
     const name=machineName(user,id);if(!machines.has(name)){
@@ -28,12 +30,12 @@ function fixture(){
   const accountFor=user=>{if(!accounts.has(user))accounts.set(user,new ContainerAccountController({storage:new Storage()},machineFor,()=>now));return accounts.get(user);};
   const call=async(path,method='GET',body,headers={},user='owner')=>{
     const response=await accountFor(user).fetch(new Request('https://internal'+path,{method,headers:{'x-mainbrella-user':user,
-      ...entitlementHeaders({active:paid,plan:paid?'builder':null,validUntil:paid?now+90*86400_000:null,checkedAt:now}),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})}));
+      ...entitlementHeaders({active:paid,plan:paid?plan:null,validUntil:paid?now+90*86400_000:null,checkedAt:now}),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})}));
     return {status:response.status,data:await response.json()};
   };
   const start=async(body={},key=crypto.randomUUID(),user='owner')=>call('/containers','POST',body,{'Idempotency-Key':key},user);
   const save=async(source,options={},key=crypto.randomUUID(),user='owner')=>call('/workspaces','POST',{id:source.id,createdAt:source.createdAt,name:'My workspace',...options},{'Idempotency-Key':key},user);
-  return {call,start,save,machineFor,accountFor,accounts,now:()=>now,setTime:value=>{now=value;},setPaid:value=>{paid=value;}};
+  return {call,start,save,machineFor,accountFor,accounts,now:()=>now,setTime:value=>{now=value;},setPaid:value=>{paid=value;},setPlan:value=>{plan=value;}};
 }
 
 test('save/stop/restore survives controller restart, restores bytes and issues a fresh fenced generation',async()=>{
@@ -81,6 +83,7 @@ test('lost snapshot response reconciles receipt without recapture, and changed i
   let lost=true;machine.fetch=async req=>{const response=await original(req);if(lost&&new URL(req.url).pathname==='/workspaces/snapshot-v1'){lost=false;throw new Error('response_lost');}return response;};
   assert.equal((await f.save(source,{},'recovery')).status,503);assert.equal(machine.runtime.captures,1);
   assert.equal((await f.save(source,{},'recovery')).status,201);assert.equal(machine.runtime.captures,1);
+  assert.deepEqual((await f.call('/workspaces')).data.usage,{saved:1,reservedBytes:2_000_000_000,savesThisMonth:1,captureBytesThisMonth:2_000_000_000,retainedCaptureBytes:2_000_000_000});
   assert.equal((await f.save(source,{name:'different'},'recovery')).status,409);
 });
 test('provider restore rejection never starts an empty image; uncertain capture cannot be repeated',async()=>{
@@ -90,6 +93,88 @@ test('provider restore rejection never starts an empty image; uncertain capture 
   runtime.restoreFails=false;const next=(await f.start()).data.containers.find(c=>c.status==='running');const nextRuntime=f.machineFor('owner',next.id).runtime;nextRuntime.captureFails=true;
   assert.equal((await f.save(next,{},'uncertain')).status,503);assert.equal((await f.save(next,{},'uncertain')).status,503);
   assert.equal(nextRuntime.captures,1);
+  assert.equal((await f.call('/workspaces')).data.usage.savesThisMonth,2);
+});
+
+for(const plan of ['builder','pro','scale']){
+  test(`${plan}: live count and monthly saves are enforced before provider capture`,async()=>{
+    const f=fixture(plan),policy=WORKSPACE_POLICY[plan],saved=[];
+    let source=(await f.start()).data.containers[0];
+    for(let i=0;i<policy.maxSaved;i++){
+      const response=await f.save(source);assert.equal(response.status,201);saved.push(response.data.id);
+    }
+    await f.call('/workspaces?workspaceId='+saved[0],'PATCH',{archived:true});
+    assert.equal((await f.save(source)).data.error,'workspace_quota_exceeded');
+    for(const id of saved)await f.call('/workspaces?workspaceId='+id,'DELETE');
+    for(let i=policy.maxSaved;i<policy.maxSavesPerMonth;i++){
+      // The runtime separately caps one day's recovery receipts at 100.
+      if(i%100===0){f.setTime(f.now()+86400_000);source=(await f.start()).data.containers[0];}
+      const response=await f.save(source);assert.equal(response.status,201);
+      await f.call('/workspaces?workspaceId='+response.data.id,'DELETE');
+    }
+    const rejected=await f.save(source);assert.equal(rejected.status,429);assert.equal(rejected.data.error,'workspace_save_limit');
+    assert.equal(f.machineFor('owner',source.id).runtime.captures,policy.maxSavesPerMonth);
+    assert.equal((await f.call('/workspaces')).data.usage.savesThisMonth,policy.maxSavesPerMonth);
+  });
+  test(`${plan}: full-disk capture budgets survive deletion, receipt pruning, restart and month rollover`,async()=>{
+    const f=fixture(plan),size=plan==='builder'?'small':'xl',disk=plan==='builder'?8_000_000_000:20_000_000_000;
+    const source=(await f.start({size})).data.containers[0],limit=WORKSPACE_POLICY[plan].maxCaptureBytesPerMonth;
+    const count=Math.floor(limit/disk),startedAt=f.now();
+    for(let i=0;i<count;i++){
+      const saved=await f.save(source);assert.equal(saved.status,201);
+      await f.call('/workspaces?workspaceId='+saved.data.id,'DELETE');
+    }
+    let response=await f.save(source);assert.equal(response.status,429);assert.equal(response.data.error,'workspace_capture_budget_exceeded');
+    assert.equal(f.machineFor('owner',source.id).runtime.captures,count);
+    f.setTime(Date.UTC(2026,10,1));
+    const account=f.accountFor('owner');f.accounts.set('owner',new ContainerAccountController(account.ctx,f.machineFor,f.now));
+    const usage=(await f.call('/workspaces')).data.usage;
+    assert.equal(usage.saved,0);assert.equal(usage.savesThisMonth,0);assert.equal(usage.captureBytesThisMonth,0);assert.equal(usage.retainedCaptureBytes,count*disk);
+    assert.equal((await f.accountFor('owner').workspaces.index()).records.length,0);
+    const next=(await f.start({size})).data.containers[0];
+    response=await f.save(next);assert.equal(response.status,429);assert.equal(response.data.error,'workspace_retained_budget_exceeded');
+    f.setTime(startedAt+WORKSPACE_CAPTURE_RETENTION_MS);
+    assert.equal((await f.call('/workspaces')).data.usage.retainedCaptureBytes,0);
+    const later=(await f.start({size})).data.containers[0];assert.equal((await f.save(later)).status,201);
+  });
+}
+
+test('live disk quota rejects a larger machine before capture on each plan',async()=>{
+  for(const [plan,size,disk] of [['builder','small',8e9],['pro','large',16e9],['scale','xl',20e9]]){
+    const f=fixture(plan),source=(await f.start({size})).data.containers[0],policy=WORKSPACE_POLICY[plan];
+    for(let i=0;i<policy.maxReservedBytes/disk;i++)assert.equal((await f.save(source)).status,201);
+    const captures=f.machineFor('owner',source.id).runtime.captures;
+    assert.equal((await f.save(source)).data.error,'workspace_quota_exceeded');
+    assert.equal(f.machineFor('owner',source.id).runtime.captures,captures);
+  }
+  const f=fixture(),source=(await f.start({size:'xl'})).data.containers[0];
+  assert.equal((await f.save(source)).data.error,'workspace_quota_exceeded');assert.equal(f.machineFor('owner',source.id).runtime.captures,0);
+});
+
+test('concurrent saves cannot overspend the last capture reservation',async()=>{
+  const f=fixture(),source=(await f.start({size:'small'})).data.containers[0];
+  const saved=await f.save(source);await f.call('/workspaces?workspaceId='+saved.data.id,'DELETE');
+  const responses=await Promise.all([f.save(source),f.save(source)]);
+  assert.deepEqual(responses.map(r=>r.status).sort(),[201,429]);assert.equal(f.machineFor('owner',source.id).runtime.captures,2);
+});
+
+test('downgrades preserve saved workspaces and usage without allowing new over-budget captures',async()=>{
+  const f=fixture('pro'),source=(await f.start({size:'xl'})).data.containers[0],saved=(await f.save(source,{stop:true})).data;
+  f.setPlan('builder');assert.equal((await f.call('/workspaces?workspaceId='+saved.id)).data.expiresAt,saved.expiresAt);
+  assert.equal((await f.start({workspaceId:saved.id})).status,200);
+  const running=(await f.call('/containers')).data.containers[0];assert.equal((await f.save(running)).status,429);
+  await f.call('/workspaces?workspaceId='+saved.id,'DELETE');
+  assert.equal((await f.call('/workspaces')).data.usage.retainedCaptureBytes,20e9);
+});
+
+test('legacy missing receipts migrate conservatively and do not refund capture history',async()=>{
+  const f=fixture(),storage=f.accountFor('owner').ctx.storage;
+  await storage.put('workspaceIndex',{records:[],usage:{'2026-10':2}});
+  const first=(await f.call('/workspaces')).data.usage;
+  assert.equal(first.savesThisMonth,2);assert.equal(first.captureBytesThisMonth,40e9);assert.equal(first.retainedCaptureBytes,40e9);
+  assert.deepEqual((await f.call('/workspaces')).data.usage,first);
+  const source=(await f.start()).data.containers[0];assert.equal((await f.save(source)).data.error,'workspace_capture_budget_exceeded');
+  assert.equal(f.machineFor('owner',source.id).runtime.captures,0);
 });
 test('completed stop with a lost response reconciles without stopping the replacement',async()=>{
   const f=fixture(),source=(await f.start()).data.containers[0],machine=f.machineFor('owner','small'),original=machine.fetch;
