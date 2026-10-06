@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { Readable, Writable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import { executeCommand } from './commands.js';
@@ -10,6 +11,14 @@ import { UserContainerController } from './user-container-core.js';
 const createdAt = '2026-10-05T12:00:00.000Z';
 const now = Date.parse(createdAt);
 const expiresAt = now + 120_000;
+async function assertTerminated(child) {
+  // SIGKILL delivery and Node's exit notification are asynchronous, especially
+  // when the full suite shares a busy CI runner. Still fail if exit is missing.
+  if (child.exitCode === null && child.signalCode === null) {
+    await once(child, 'exit', { signal: AbortSignal.timeout(2000) });
+  }
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+}
 function request(command = 'printf hello', timeoutMs = 3000, headers = {}, signal) {
   return new Request('https://internal/exec', { method: 'POST', signal,
     headers: { 'x-exec-created-at': createdAt, 'x-exec-expires-at': String(expiresAt), ...headers },
@@ -82,8 +91,7 @@ test('timeout terminates a running process and returns partial output', async ()
   assert.equal(result.outputTruncated, false);
   assert.equal(result.stdout, 'started');
   assert.equal(f.active.size, 0);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(f.children[0].exitCode !== null || f.children[0].signalCode !== null);
+  await assertTerminated(f.children[0]);
 });
 
 test('combined output limit is bounded and stops an unbounded producer', async () => {
@@ -94,8 +102,7 @@ test('combined output limit is bounded and stops an unbounded producer', async (
   assert.equal(result.exitCode, null);
   assert.equal(result.timedOut, false);
   assert.equal(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr), MAX_OUTPUT_BYTES);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(f.children[0].exitCode !== null || f.children[0].signalCode !== null);
+  await assertTerminated(f.children[0]);
 });
 
 test('execution capacity rejects a fifth command without launching a process', async () => {

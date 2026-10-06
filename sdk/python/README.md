@@ -47,9 +47,9 @@ operations share the four-operation pool and 30-second file deadline. Recursive
 deletion and moves across filesystems may partly complete before interruption;
 inspect state before retrying a mutation. Watchers remain unsupported.
 
-Versioned local archives can be built and checked with backend `npm run sdk:qualify`.
-Install its wheel with `python -m pip install /path/to/mainbrella-0.1.0-py3-none-any.whl`;
-this remains an archive installation, not a PyPI release. See the backend
+For development and release qualification, build local archives with backend
+`npm run sdk:qualify` and install the wheel with
+`python -m pip install /path/to/mainbrella-0.1.0-py3-none-any.whl`. See the backend
 [SDK release runbook](https://github.com/mainbrella/backend/blob/main/docs/sdk-release.md)
 for artifact and deployed-workflow gates.
 

@@ -250,3 +250,27 @@ and review the workflow's pinned tag, filename and checksum before dispatch.
 Trusted publishing setup requires npm package administration in the signed-in
 browser; configuring a connection alone does not verify it. This connection has
 not yet been configured or exercised against npm.
+
+The October 6 release-hygiene follow-up confirmed that `npm trust list
+@mainbrella/sdk --json` with the release credential requires owner 2FA (`EOTP`).
+No trust configuration was changed. After authenticating with owner 2FA, the
+stage-only connection can be configured with npm 11.15+:
+
+```sh
+npm trust github @mainbrella/sdk --repo mainbrella/backend \
+  --file sdk-npm-release.yml --allow-stage-publish
+```
+
+The workflow now rejects a published version or an unavailable registry before
+downloading or staging its pinned archive. Its 0.1.0 pins are historical and must
+be replaced with the next qualified candidate before dispatch.
+
+## Published description correction
+
+PyPI's 0.1.0 description still contains the pre-publication README. The source
+README and generated web references use `pip install mainbrella==0.1.0` and
+describe local archives only for development and release qualification.
+[PyPI stores release metadata from the first upload](https://docs.pypi.org/api/json/);
+subsequent uploads do not update that description. Correct the registry page
+through the next qualified version. Preserve the published 0.1.0 archives and
+checksums; a source documentation edit does not change their embedded README.
