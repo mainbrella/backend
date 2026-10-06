@@ -42,6 +42,57 @@ key to resolve a lost response. Record the deployed API/runtime versions and
 evidence beside the candidate checksums. Preview issuance requires its separate
 isolated-domain qualification and must remain capability-gated.
 
+The executable gate installs the qualified npm tarball and Python wheel into
+temporary clean projects before making API requests. It validates checksums for
+all three candidate archives against the local qualification manifest; the source
+archive retains its local installed-workflow qualification and is not given a
+separate deployed start. Set the dedicated account key in `MAINBRELLA_API_KEY`,
+and optionally set a trusted `MAINBRELLA_API_URL` and `MAINBRELLA_CATALOG_ID`.
+Use the API and private runtime source revisions from the deployment records:
+
+```sh
+npm run sdk:qualify:deployed -- \
+  --candidate=/path/to/qualified-candidate \
+  --output=/path/to/new-deployed-evidence \
+  --max-starts=2 \
+  --api-revision=API_COMMIT_SHA \
+  --runtime-revision=RUNTIME_COMMIT_SHA
+```
+
+This command consumes up to two unique starts; invoke it only within the agreed
+live budget. Each SDK explicitly requests Lite, checks current capabilities and
+account allowance, and saves its creation key before sending creation. The first
+SDK requires two remaining starts; the second requires one. Both repeat creation
+with the same key to verify idempotent admission, check foreground stdout/stderr,
+binary file transfer, deliberately disconnect a managed output stream and attach
+from its retained cursor, cancel a second job, and confirm generation-specific
+cleanup. It rejects identities that were present before creation. Any failed
+verification or unconfirmed cleanup stops the run before the next SDK starts.
+There are no automatic retries with new creation keys or account-wide stops.
+
+The new evidence directory contains `javascript.json`, `python.json` when reached,
+and `deployed-qualification.json`. Checkpoints preserve container generations and
+creation/execution/cancellation keys even if the child process is interrupted.
+Reconcile an incomplete run before approving another budget; a process killed
+after ten minutes can leave a machine running until its lease expires. Do not
+rerun the command to recover an ambiguous start. Checkpoints and the aggregate
+report omit credentials, command output and server diagnostics. Existing evidence
+directories are never overwritten. Reports record candidate/manifest/verifier
+hashes, installed artifact names, SDK runtime versions and discovered API versions.
+Deployment revisions are labeled **operator supplied**, since the API does not
+expose private runtime deployment identity. The runner does not deploy, enable
+features, issue previews or publish packages.
+
+For local runner smoke checks, after `npm run sdk:qualify`:
+
+```sh
+MAINBRELLA_SDK_CANDIDATE=artifacts/sdk node --test scripts/sdk-deployed.test.mjs
+```
+
+These tests use loopback HTTP fixtures and no production credentials. The report
+marks a loopback target explicitly; successful loopback runs do not satisfy the
+deployed release gate. The artifact CI job runs this smoke check after packaging.
+
 ## Publication
 
 After artifact and deployed qualification, confirm registry ownership, the

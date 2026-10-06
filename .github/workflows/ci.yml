@@ -70,6 +70,10 @@ jobs:
           python-version: '3.10'
       - run: npm ci
       - run: npm run sdk:qualify
+      - name: Smoke-test the deployed qualification runner with installed archives
+        run: node --test scripts/sdk-deployed.test.mjs
+        env:
+          MAINBRELLA_SDK_CANDIDATE: artifacts/sdk
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-local-qualification

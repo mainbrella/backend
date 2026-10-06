@@ -31,7 +31,8 @@ function run(command, argv, { cwd = work, env = {}, capture = false } = {}) {
 
 async function qualificationSources() {
   const paths = ['LICENSE', 'package.json', 'package-lock.json', 'scripts/qualify-sdk-artifacts.mjs',
-    'scripts/qualify-python-artifact.py', 'scripts/sdk-build-requirements.txt', 'scripts/sdk-runtime-workflow.py', 'scripts/sdk-types.ts'];
+    'scripts/qualify-python-artifact.py', 'scripts/sdk-build-requirements.txt', 'scripts/sdk-runtime-workflow.py', 'scripts/sdk-types.ts',
+    'scripts/qualify-sdk-deployed.mjs', 'scripts/sdk-deployed-workflow.mjs', 'scripts/sdk-deployed-workflow.py', 'scripts/sdk-deployed.test.mjs'];
   async function walk(directory) {
     for (const item of await readdir(join(root, directory), { withFileTypes: true })) {
       if (item.name.startsWith('.') || ['node_modules', '__pycache__', 'dist', 'build'].includes(item.name) || item.name.endsWith('.egg-info')) continue;

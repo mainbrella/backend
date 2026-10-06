@@ -394,7 +394,7 @@ The dependency-free packages in [sdk/javascript](sdk/javascript/README.md) and
 or PyPI. Both support creation, generation-specific cleanup, binary files,
 foreground commands, filesystem metadata/mutations, managed argv/cwd/env, stdin, signals, PTY resize, retained-job listing and streamed reconnect. Commands and environment values are not retained. Guest-wide OS process listing is not implemented.
 
-`npm run sdk:qualify` creates versioned archives, clean-installs them and writes hashes and qualification evidence. `npm run docs:package` creates the installable skill/reference bundle. See [the release runbook](docs/sdk-release.md); registry publication and paid deployed qualification remain separate gates. The backend API.md/SKILL.md and SDK READMEs are authoritative; run web `npm run docs:sync` after changing them. Both repositories check public contract agreement in CI.
+`npm run sdk:qualify` creates versioned archives, clean-installs them and writes hashes and qualification evidence. `npm run sdk:qualify:deployed` installs those exact npm/wheel candidates and verifies their deployed workflows with an explicit two-start budget and recovery checkpoints; follow [the release runbook](docs/sdk-release.md) for its required arguments and account scope. Registry publication and paid deployed qualification remain separate gates. `npm run docs:package` creates the installable skill/reference bundle. The backend API.md/SKILL.md and SDK READMEs are authoritative; run web `npm run docs:sync` after changing them. Both repositories check public contract agreement in CI.
 
 Protected application previews now have a private runtime, isolated gateway and
 authenticated `/containers/previews` API, with hash-only routing in a separate
