@@ -20,7 +20,7 @@ export interface Capabilities {
     maxCommandBytes: number; maxTimeoutMs: number; maxOutputBytes: number; maxConcurrentOperations: number;
     maxManagedTimeoutMs: number; retentionMs: number; maxRetainedExecutions: number };
   files: { read: boolean; write: boolean; binary: boolean; maxFileBytes: number; maxPathBytes: number; timeoutMs: number; [key: string]: boolean | number };
-  persistence: { filesystemAfterStop: boolean; snapshots: boolean; memory: boolean; volumes: boolean };
+  persistence: { filesystemAfterStop: boolean; snapshots: boolean; workspaces?:boolean; exports?:boolean; memory: boolean; volumes: boolean };
   observability: { lifecycleEvents: boolean; metrics: boolean; webhooks: boolean; otlp: boolean; eventRetentionMs: number; maxLifecycleEvents: number; maxMetricRangeMs: number; metricBucketMs: number };
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };

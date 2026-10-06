@@ -23,6 +23,7 @@ export class ManagedExecutions {
     this.sessions = new Map();
     this.listeners = new Set();
     this.streams = 0;
+    this.activityStatuses = new Map();
     this.tail = Promise.resolve();
   }
   async serialized(fn) {
@@ -34,6 +35,7 @@ export class ManagedExecutions {
   }
   async records() { return this.ctx.storage.list({ prefix: RECORD, limit: MAX_RETAINED_EXECUTIONS + 1 }); }
   async erase(record) {
+    this.activityStatuses.delete(record.id);
     const events = await this.ctx.storage.list({ prefix: eventPrefix(record.id), limit: MAX_EXECUTION_EVENTS + 2 });
     await this.ctx.storage.delete([...events.keys(), RECORD + record.id]);
   }
@@ -75,7 +77,7 @@ export class ManagedExecutions {
         record.status = 'interrupted';
         record.stdinClosed = true;
         record.finishedAt = new Date(this.controller.now()).toISOString();
-        await this.ctx.storage.put(RECORD + record.id, record);
+        await this.save(record);
       }
     }
     if (interrupt && this.controller.container.running) await this.controller.destroy('Managed execution interrupted by runtime restart');
@@ -89,6 +91,10 @@ export class ManagedExecutions {
       await this.ctx.storage.put({ [RECORD + record.id]: record, [eventKey(record.id, event.sequence)]: event });
     } else await this.ctx.storage.put(RECORD + record.id, record);
     this.wake();
+    if (this.activityStatuses.get(record.id) !== record.status) {
+      this.activityStatuses.set(record.id, record.status);
+      this.onStatus?.(summary(record));
+    }
   }
   async output(record, stream, text) {
     if (!text) return;

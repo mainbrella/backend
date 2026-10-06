@@ -8,6 +8,8 @@ import { ManagedExecutions } from './executions.js';
 import { ContainerPreviews } from './previews.js';
 import { WorkloadWebhooks } from './webhooks.js';
 import { exportWorkspace } from './workspace-export.js';
+import { publishActivity, validActivityUser } from './activity.js';
+import { validContainerId } from './container-account-core.js';
 
 export class UserContainer extends DurableObject {
   constructor(ctx, env) {
@@ -16,10 +18,15 @@ export class UserContainer extends DurableObject {
     this.terminals = new Set();
     this.commands = new Set();
     this.executions = new ManagedExecutions(this.controller, this.commands, ctx);
+    this.executions.onStatus = record => this.notifyActivity({ resource: 'executions', createdAt: record.createdAt, executionId: record.id });
     this.previews = new ContainerPreviews(this.controller);
+    this.previews.onChange = createdAt => this.notifyActivity({ resource: 'previews', createdAt });
     this.webhooks = new WorkloadWebhooks(this.controller, env);
     this.controller.webhooks = this.webhooks;
-    this.controller.observations.onAppend = event => this.webhooks.enqueue(event);
+    this.controller.observations.onAppend = event => {
+      this.notifyActivity({ resource: 'containers', createdAt: event.createdAt });
+      return this.webhooks.enqueue(event);
+    };
     this.webhooks.onChange = () => ctx.waitUntil(this.executions.scheduleCleanup().catch(() => { console.error('webhook_alarm_schedule_failed'); }));
     this.controller.onStarted = createdAt => this.monitor(createdAt);
     this.controller.onStopped = () => {
@@ -37,7 +44,14 @@ export class UserContainer extends DurableObject {
     });
   }
 
-  fetch(request) {
+  async fetch(request) {
+    const userId = request.headers.get('x-mainbrella-user'), containerId = request.headers.get('x-mainbrella-container');
+    if (userId !== null || containerId !== null) {
+      if (!validActivityUser(userId) || !validContainerId(containerId)) return this.controller.respond({ error: 'invalid_activity_owner' }, 400);
+      const owner = await this.ctx.storage.get('activityOwner');
+      if (owner && (owner.userId !== userId || owner.containerId !== containerId)) return this.controller.respond({ error: 'account_mismatch' }, 403);
+      if (!owner) await this.ctx.storage.put('activityOwner', { userId, containerId });
+    }
     const path = new URL(request.url).pathname;
     if (path === '/features') return this.controller.fetch(request);
     if (path === '/workspaces/export-v1') return exportWorkspace(this.controller,request,this.commands);
@@ -53,6 +67,13 @@ export class UserContainer extends DurableObject {
       return upgradeTerminal(this.controller, request, this.terminals);
     }
     return this.executions.lifecycleFetch(request);
+  }
+
+  notifyActivity(change) {
+    this.ctx.waitUntil((async () => {
+      const owner = await this.ctx.storage.get('activityOwner');
+      if (owner) await publishActivity(this.env, owner.userId, { ...change, containerId: owner.containerId });
+    })().catch(() => { console.error('activity_delivery_failed'); }));
   }
 
   monitor(createdAt) {

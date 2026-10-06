@@ -31,7 +31,7 @@ export class ContainerAccountController {
     // discovery and boot from silently ignoring the internet-off selection.
     const path = method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
     const response = await this.machineFor(state.userId, id).fetch(new Request(`https://internal${path}`, {
-      method, headers: { ...entitlementHeaders(entitlement), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
+      method, headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': state.userId, 'x-mainbrella-container': id, ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
     }));
     if (!response.ok) {

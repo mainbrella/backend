@@ -16,6 +16,7 @@
 		]
 	},
 	"vars": {
+		"ACTIVITY_WEBSOCKET_ENABLED": "true",
 		"PREVIEWS_ENABLED": "true",
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
@@ -38,6 +39,10 @@
 	"durable_objects": {
 		"bindings": [
 			{
+				"name": "ACCOUNT_ACTIVITY",
+				"class_name": "AccountActivity"
+			},
+			{
 				"name": "CONTAINER_ACCOUNT",
 				"class_name": "ContainerAccount"
 			},
@@ -49,6 +54,10 @@
 		]
 	},
 	"exports": {
+		"AccountActivity": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"ContainerAccount": {
 			"type": "durable-object",
 			"storage": "sqlite"

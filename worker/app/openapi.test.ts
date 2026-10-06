@@ -6,6 +6,7 @@ import { handleRequest } from "./router";
 const endpointMethods: Record<string, string[]> = {
   '/workspaces': ['get','post'], '/workspaces/{workspaceId}': ['get','patch','delete'], '/containers/export': ['get'],
   '/capabilities': ['get'],
+  '/containers/activity': ['get'],
   '/status': ['get'], '/status/history': ['get'],
   '/internal/status/observations': ['post'], '/internal/status/incidents': ['post'],
   '/containers/executions': ['get', 'post'],

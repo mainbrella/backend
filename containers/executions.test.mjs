@@ -58,6 +58,8 @@ function fixture(t) {
 
 test('managed creation is idempotent across concurrent retries and returns real retained output', async t => {
   const f = fixture(t);
+  const changes = [];
+  f.manager.onStatus = record => changes.push({ id: record.id, status: record.status });
   const start = () => f.manager.fetch(request('', 'POST', { command: 'printf "héllo"; printf problem >&2; exit 7' }));
   const responses = await Promise.all([start(), start(), start()]);
   const records = await Promise.all(responses.map(r => r.json()));
@@ -69,6 +71,7 @@ test('managed creation is idempotent across concurrent retries and returns real 
   assert.equal(result.stdout, 'héllo'); assert.equal(result.stderr, 'problem');
   assert.equal(f.children.length, 1); assert.equal(f.killsAfterExit, 0); assert.equal(f.active.size, 0);
   assert.ok(!('key' in result)); assert.ok(!('fingerprint' in result));
+  assert.deepEqual(changes.map(change => change.status), ['starting', 'running', 'failed']);
   assert.equal((await f.manager.fetch(request('', 'POST', { command: 'changed' }))).status, 409);
 });
 

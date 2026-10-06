@@ -18,6 +18,7 @@ import { handlePreviewRequest } from './previews';
 import { handleStatusRequest } from './status';
 import { handleObservationRequest } from './observations';
 import { handleWebhookRequest } from './webhooks';
+import { handleActivityRequest } from './activity';
 import { handleWorkspacesRequest } from './workspaces';
 import { handleWorkspaceExportRequest } from './workspace-export';
 
@@ -31,6 +32,7 @@ async function handleLegacyRequest(
   if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
+  if (url.pathname === '/containers/activity') return handleActivityRequest(request, env);
   if (['/containers/events', '/containers/metrics'].includes(url.pathname)) return handleObservationRequest(request, env);
   if (url.pathname === '/containers/webhook' || url.pathname.startsWith('/containers/webhook/')) return handleWebhookRequest(request, env);
   if (url.pathname === '/containers/previews') return handlePreviewRequest(request, env);

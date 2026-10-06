@@ -10,6 +10,7 @@ import { MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_OFFSET, MAX_FILESYSTEM_OUTPUT_BYTE
 import { metricsConfigured, MAX_METRIC_RANGE_MS, METRIC_BUCKET_MS } from '../lib/workload-metrics';
 import { OBSERVATION_RETENTION_MS, MAX_LIFECYCLE_EVENTS } from '../../containers/observations.js';
 import { webhooksConfigured } from '../../containers/webhook-contract.js';
+import { activityConfigured } from './activity';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
@@ -29,8 +30,8 @@ export function capabilities(env: Env) {
       mkdir: true, delete: true, move: true, chmod: true, watch: false, maxDirectoryEntries: MAX_DIRECTORY_ENTRIES,
       maxDirectoryOffset: MAX_DIRECTORY_OFFSET, maxMetadataBytes: MAX_FILESYSTEM_OUTPUT_BYTES, maxFileBytes: MAX_FILE_BYTES,
       maxPathBytes: MAX_FILE_PATH_BYTES, timeoutMs: FILE_TIMEOUT_MS, sharedExecutionPool: true },
-    persistence: { filesystemAfterStop: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.WORKSPACE_PERSISTENCE_ENABLED==='true'), snapshots: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.WORKSPACE_PERSISTENCE_ENABLED==='true'), memory: false, volumes: false },
-    observability: { lifecycleEvents: true, metrics: metricsConfigured(env), webhooks: Boolean(env.USER_CONTAINER && webhooksConfigured(env)), otlp: false,
+    persistence: { filesystemAfterStop: false, snapshots: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.WORKSPACE_PERSISTENCE_ENABLED==='true'), workspaces:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), exports:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), memory: false, volumes: false },
+    observability: { lifecycleEvents: true, activityWebSocket: activityConfigured(env), metrics: metricsConfigured(env), webhooks: Boolean(env.USER_CONTAINER && webhooksConfigured(env)), otlp: false,
       eventRetentionMs: OBSERVATION_RETENTION_MS, maxLifecycleEvents: MAX_LIFECYCLE_EVENTS, maxMetricRangeMs: MAX_METRIC_RANGE_MS, metricBucketMs: METRIC_BUCKET_MS },
     previews: { supported: previewsConfigured(env), signedUrls: false },
     images: { catalog: true, availableCatalogPath: '/containers',

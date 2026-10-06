@@ -14,8 +14,8 @@ export const capabilitiesSchema = z.object({
     maxManagedTimeoutMs: limit, retentionMs: limit, maxRetainedExecutions: limit, maxStdinChunkBytes: limit, maxStdinBytes: limit, maxPendingStdinBytes: limit }),
   files: flags('read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
     .extend({ maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
-  persistence: flags('filesystemAfterStop', 'snapshots', 'memory', 'volumes'),
-  observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
+  persistence: flags('filesystemAfterStop', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
+  observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),

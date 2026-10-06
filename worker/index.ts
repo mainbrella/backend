@@ -4,6 +4,7 @@ import { collectStatus } from './app/status';
 
 export { AppState };
 export { ContainerAccount } from "./durable-objects/container-account";
+export { AccountActivity } from './durable-objects/account-activity';
 
 export default {
   fetch: handleRequest,

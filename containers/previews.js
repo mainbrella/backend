@@ -71,6 +71,7 @@ export class ContainerPreviews {
       if (request.method === 'DELETE') {
         await c.ctx.storage.put(STORAGE_KEY, grants.filter(grant => grant.id !== id));
         for (const session of this.active) if (session.grant.id === id) session.close('Preview revoked');
+        this.onChange?.(new Date(metadata.createdAt).toISOString());
         return c.respond({ revoked: true });
       }
       if (grants.length >= MAX_PREVIEW_GRANTS) return c.respond({ error: 'preview_limit' }, 429);
@@ -79,6 +80,7 @@ export class ContainerPreviews {
         createdAt: new Date(metadata.createdAt).toISOString(),
         expiresAt: Math.min(c.now() + (body.ttlSeconds ?? DEFAULT_PREVIEW_TTL_SECONDS) * 1000, metadata.expiresAt) };
       await c.ctx.storage.put(STORAGE_KEY, [...grants, grant]);
+      this.onChange?.(grant.createdAt);
       return c.respond({ ...publicGrant(grant), token }, 201);
     });
   }
