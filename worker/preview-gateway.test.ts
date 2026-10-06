@@ -37,7 +37,7 @@ test('gateway requires explicit isolated configuration and exact HTTPS bearer ho
     `https://extra.${token}.${domain}/`, `https://${token}.${domain}.evil.example/`, `https://${'c'.repeat(48)}.${domain}/`]) {
     const response = await handlePreviewGateway(new Request(url), f.env);
     assert.equal(response.status, 404, url);
-    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('cache-control'), 'no-store, no-transform');
   }
   assert.equal((await handlePreviewGateway(new Request(`https://${token}.${domain}/`, { headers: { host: 'api.mainbrella.com' } }), f.env)).status, 404);
   for (const env of [{}, { ...f.env, PREVIEWS_ENABLED: 'false' }, { ...f.env, PREVIEW_ROUTES: undefined }, { ...f.env, USER_CONTAINER: undefined }]) {

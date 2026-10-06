@@ -15,8 +15,10 @@ gateway using one Lite generation, with confirmed cleanup. Network Error Logging
 was disabled by the operator, and public responses no longer contain reporting
 headers. Issuance was disabled again after the transport run: its API version was
 `4af68011-cff8-47f7-ba56-903a4ffe8053`, and the gateway version is
-`086b5312-9d9e-4e9e-b9a9-77964669e21f`. Real-framework/browser, second-account,
-replacement-generation qualification remains pending. The operator logging review
+`086b5312-9d9e-4e9e-b9a9-77964669e21f`. Subsequent Medium runs passed second-account
+and replacement-generation isolation, but full framework/browser qualification
+remains incomplete. These version IDs describe the transport checkpoint, not
+the latest framework deployments. The operator logging review
 and subsequent framework qualification are recorded below.
 JavaScript/Python SDK
 helpers and capability-gated dashboard controls are implemented locally.
@@ -110,7 +112,7 @@ preview headers and strips account credentials, cookies, platform/forwarding
 headers and Referer. It preserves method, body, path, query, Origin and Upgrade,
 uses manual redirects and propagates the request AbortSignal. Responses pass
 through unchanged to retain streaming and Worker WebSocket upgrades; the runtime
-owns response-cookie stripping, no-store/no-referrer and active revocation.
+owns response-cookie stripping, no-store/no-transform/no-referrer and active revocation.
 
 The account API registers authenticated GET, POST and DELETE
 `/containers/previews`, with matching Chanfana/Zod schemas. All require `id` and
@@ -144,6 +146,15 @@ volume requires it. The query cap bounds work, not total historical database siz
 Gateway observability is disabled to avoid automatic token-host logging, and
 errors never log request URLs, token values or routing exceptions. Do not add
 analytics, request logging or third-party assets that expose bearer hostnames.
+Preview application responses and gateway errors now set
+`Cache-Control: no-store, no-transform`. The added directive asks intermediaries
+to preserve the payload, including preventing automatic analytics injection.
+[Cloudflare documents this restriction](https://developers.cloudflare.com/web-analytics/faq/).
+A private disposable HTML edge probe observed no external requests with these
+directives; the earlier browser failure recorded two external requests despite
+zero page errors and zero failed HTTP responses. The production header change
+still requires deployment and a real framework/browser run. This does not
+prevent an application from deliberately loading its own external resources.
 Operator/CDN logging policy is a deployment qualification item. Listing never
 returns tokens or hashes. Sharing a URL deliberately grants access to its app;
 only the account owner can issue/list/revoke it.
@@ -417,8 +428,28 @@ passed second-account management isolation, but Next.js Server Actions rejected
 the private upstream host. That generation was stopped and both enablement flags
 restored to false. The runtime/gateway fix attests the validated public origin;
 local tests against the actual Next.js server reproduce the old 500, verify a
-same-origin 303 after the fix, and retain foreign-origin rejection. One approved
-start remains for full framework and replacement-generation qualification.
+same-origin 303 after the fix, and retain foreign-origin rejection. The second
+Medium start passed replacement-generation management rejection, old-URL denial,
+cross-account isolation and foreign-origin Server Action rejection. It completed
+the mobile app interactions and no-overflow check, then failed the final browser
+check with two external requests, zero page errors and zero failed HTTP responses.
+Both generations were confirmed stopped; the two-start budget is exhausted.
+The evidence is in
+[framework-recovery-2.json](../.wrangler/preview-framework-preparation/live-2026-10-06T03-37-54-654Z/framework-recovery-2.json).
+The pending work is to deploy the no-transform response change and qualify the
+full browser workflow at all four sizes, plus development WebSockets/hot reload
+and post-stop denial. A proposed follow-up needs one additional Medium Node start,
+at most 30 minutes, on the primary account and no starts on the secondary account.
+Agree that additional budget before enabling/deploying and running the follow-up.
+The private follow-up runner is prepared at
+`.wrangler/preview-framework-preparation/run-final.mjs`. It requires
+`--max-new-starts=1`, verifies the prior reports and unchanged verification inputs,
+and refuses execution until `final-rollout.json` records the deployed API/runtime/
+gateway versions with `deploymentPending: false`. It writes fresh
+`framework-final.json` checkpoints, checks the no-transform header in each browser
+viewport, and records external hosts with bearer tokens redacted if checks fail.
+It uses the primary account for the sole new generation, keeps the secondary
+account read/management-only, and retains the 30-minute cleanup deadline.
 For the development fixture, configure `allowedDevOrigins` with exactly the
 current preview hostname via `MAINBRELLA_PREVIEW_HOST`; do not allow wildcard
 origins. This is separate from production Server Action validation.

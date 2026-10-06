@@ -188,7 +188,9 @@ export class ContainerPreviews {
       if (session.closed) throw new Error('closed');
       if (!await c.touchTerminalActivity(session.grant.createdAt) || session.closed) throw new Error('closed');
       const headers = new Headers(response.headers);
-      headers.set('cache-control', 'no-store');
+      // Bearer preview hosts must not reach injected CDN analytics scripts.
+      // Preserve the application payload as well as disabling response caching.
+      headers.set('cache-control', 'no-store, no-transform');
       headers.set('referrer-policy', 'no-referrer');
       // Cookie-based application sessions remain unsupported. Forwarding the
       // attested app origin must never propagate account cookies to the guest.

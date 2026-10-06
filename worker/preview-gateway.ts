@@ -4,7 +4,7 @@ import { previewDomain, previewsConfigured, previewTokenHash, prunePreviewRoutes
 
 function unavailable(status = 404): Response {
   return new Response('Preview unavailable.', { status, headers: {
-    'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+    'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store, no-transform',
     'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
   } });
 }

@@ -118,7 +118,7 @@ test('HTTP preserves application path, body and redirect, strips platform creden
       'x-preview-port': '22', 'x-forwarded-host': 'api.mainbrella.com', 'content-type': 'application/octet-stream' } });
   assert.equal(await response.text(), 'app');
   assert.equal(response.headers.get('set-cookie'), null);
-  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('cache-control'), 'no-store, no-transform');
   assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
   const { port, request } = f.calls[0];
   assert.equal(port, 3000);
