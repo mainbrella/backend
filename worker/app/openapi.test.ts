@@ -48,7 +48,7 @@ async function document() {
 }
 
 test("admin users schema documents restricted cookie access and safe user fields", async () => {
-  const { paths } = await document();
+  const { paths, components } = await document();
   const operation = paths["/admin/users"].get;
   assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
   assert.equal(operation.operationId, "listAdminUsers");
@@ -56,6 +56,9 @@ test("admin users schema documents restricted cookie access and safe user fields
   assert.match(operation.description, /created_at descending/);
   for (const status of [200, 401, 403, 405, 503]) assert.ok(operation.responses[status]);
   assert.ok(operation.responses[200].content["application/json"].schema.properties.users);
+  const planFields = components.schemas.AdminUser.allOf.find((schema: any) => schema.properties?.plan);
+  assert.deepEqual(planFields.properties.plan.enum, ['none', 'builder', 'pro', 'scale']);
+  assert.ok(planFields.required.includes('plan'));
 });
 
 test('workspace schemas describe capture budgets, usage and nonrefundable deletion', async () => {

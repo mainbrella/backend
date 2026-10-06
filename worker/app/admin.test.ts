@@ -9,7 +9,7 @@ const LEGACY_ADMIN_ID = "4109eeda-46e0-4ffa-ac57-f1ff81902116";
 
 async function fixture({ legacy = true } = {}) {
   const sqlite = new DatabaseSync(":memory:");
-  for (const file of ["001_initial.sql", "002_auth_sessions.sql"]) {
+  for (const file of ["001_initial.sql", "002_auth_sessions.sql", "003_pro_billing.sql", "004_subscription_details.sql", "009_trial_coupons.sql"]) {
     sqlite.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), "utf8"));
   }
   if (legacy) sqlite.exec(readFileSync(new URL('./fixtures/legacy-compatibility.sql', import.meta.url), 'utf8'));
@@ -86,8 +86,46 @@ test("admin users work with the production schema and return all users newest fi
   assert.equal(users[0].id, 'user-29');
   assert.equal(users[15].id, 'user-14');
   for (const user of users) {
-    assert.deepEqual(Object.keys(user).sort(), ['created_at', 'dob', 'email', 'id', 'name']);
+    assert.deepEqual(Object.keys(user).sort(), ['created_at', 'dob', 'email', 'id', 'name', 'plan']);
+    assert.equal(user.plan, 'none');
   }
+});
+
+test("admin users include stored active subscription and trial plan levels", async () => {
+  const { call, sqlite, adminToken } = await fixture({ legacy: false });
+  const now = Date.now();
+  const cases = [
+    { id: 'builder', plan: 'builder', status: 'active', end: now + 86400000, expected: 'builder' },
+    { id: 'pro', plan: 'pro', status: 'active', end: now + 86400000, expected: 'pro' },
+    { id: 'scale', plan: 'scale', status: 'active', end: now + 86400000, expected: 'scale' },
+    { id: 'expired', plan: 'pro', status: 'active', end: now - 1000, expected: 'none' },
+    { id: 'canceled', plan: 'scale', status: 'canceled', end: now + 86400000, expected: 'none' },
+    { id: 'past-due', plan: 'builder', status: 'past_due', end: now + 86400000, expected: 'none' },
+    { id: 'missing-plan', plan: null, status: 'active', end: now + 86400000, expected: 'none' },
+  ];
+  for (const item of cases) {
+    sqlite.prepare('INSERT INTO users (id, name) VALUES (?, ?)').run(item.id, item.id);
+    sqlite.prepare(`INSERT INTO pro_billing (user_id, stripe_customer_id, stripe_subscription_id, plan, subscription_status, current_period_end)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(item.id, `cus_${item.id}`, `sub_${item.id}`, item.plan, item.status, Math.floor(item.end / 1000));
+  }
+  sqlite.prepare(`INSERT INTO trial_coupons (code_hash, plan, trial_days, expires_at, max_redemptions)
+    VALUES ('trial-code', 'pro', 7, ?, 10)`).run(now + 86400000);
+  for (const id of ['trial', 'expired-trial', 'checkout-trial']) {
+    sqlite.prepare('INSERT INTO users (id, name) VALUES (?, ?)').run(id, id);
+  }
+  sqlite.prepare(`INSERT INTO pro_billing (user_id, stripe_customer_id) VALUES ('checkout-trial', 'cus_checkout')`).run();
+  for (const id of ['trial', 'expired-trial', 'checkout-trial', 'scale', 'canceled']) {
+    sqlite.prepare(`INSERT INTO trial_redemptions (user_id, code_hash, plan, redeemed_at, expires_at)
+      VALUES (?, 'trial-code', 'pro', ?, ?)`).run(id, now - 86400000, id === 'expired-trial' ? now - 1000 : now + 86400000);
+  }
+  const response = await call('/admin/users', adminToken);
+  assert.equal(response.status, 200);
+  const { users } = await response.json() as { users: { id: string; plan: string }[] };
+  const plans = new Map(users.map(user => [user.id, user.plan]));
+  for (const { id, expected } of cases) assert.equal(plans.get(id), expected, id);
+  assert.equal(plans.get('trial'), 'pro');
+  assert.equal(plans.get('expired-trial'), 'none');
+  assert.equal(plans.get('checkout-trial'), 'pro');
 });
 
 test("admin table reads require a session for oneone@gmail.com", async () => {

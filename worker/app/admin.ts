@@ -1,4 +1,5 @@
 import { authCorsHeaders, authJson, currentUser, type AuthUser } from "./auth-core";
+import type { Plan } from "../lib/stripe";
 
 const ADMIN_EMAIL = "oneone@gmail.com";
 const PAGE_SIZE = 25;
@@ -45,8 +46,19 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     const url = new URL(request.url);
     if (url.pathname === "/admin/users") {
       const rows = await env.DB.prepare(
-        "SELECT id, email, name, dob, created_at FROM users ORDER BY created_at DESC, id DESC",
-      ).all<Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at">>();
+        `SELECT users.id, users.email, users.name, users.dob, users.created_at,
+          CASE
+            WHEN billing.subscription_status = 'active' AND billing.current_period_end > ?
+              THEN COALESCE(billing.plan, 'none')
+            WHEN billing.stripe_subscription_id IS NULL AND trial.expires_at > ?
+              THEN trial.plan
+            ELSE 'none'
+          END AS plan
+        FROM users
+        LEFT JOIN pro_billing AS billing ON billing.user_id = users.id
+        LEFT JOIN trial_redemptions AS trial ON trial.user_id = users.id
+        ORDER BY users.created_at DESC, users.id DESC`,
+      ).bind(Date.now() / 1000, Date.now()).all<Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at"> & { plan: Plan | "none" }>();
       return authJson({ users: rows.results || [] }, 200, corsHeaders);
     }
     if (url.pathname === "/admin/tables") {
