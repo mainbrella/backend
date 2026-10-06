@@ -37,7 +37,7 @@ async function guestNetwork(sandbox, source) {
   const evidence = JSON.parse(result.stdout); requireCheck(probes.every(name => typeof evidence.results?.[name] === 'boolean'));
   return evidence;
 }
-export async function accessChecks(sandbox, secondary, appSource, checks) {
+export async function accessChecks(sandbox, secondary, appSource, checks, { webhooks = true } = {}) {
   const bytes = new Uint8Array([0, 1, 127, 128, 255, 10]);
   await sandbox.files.write('/tmp/mainbrella-job3.bin', bytes);
   requireCheck(Buffer.from(await sandbox.files.read('/tmp/mainbrella-job3.bin')).equals(Buffer.from(bytes))); checks.binaryFiles = true;
@@ -53,7 +53,9 @@ export async function accessChecks(sandbox, secondary, appSource, checks) {
   const canceled = await sandbox.commands.start(['sleep', '30'], { timeoutMs: 30_000 }); await canceled.cancel();
   requireCheck((await canceled.wait({ timeoutMs: 15_000 })).status === 'canceled'); checks.cancellation = true;
   await expectedFailure(() => secondary.request(sandbox.path('/containers/events')), 404); checks.crossAccountHistory = true;
-  const foreign = await secondary.request(sandbox.path('/containers/webhook')); requireCheck(foreign.webhook === null); checks.crossAccountWebhook = true;
+  if (webhooks) {
+    const foreign = await secondary.request(sandbox.path('/containers/webhook')); requireCheck(foreign.webhook === null); checks.crossAccountWebhook = true;
+  }
   const appPath = '/tmp/mainbrella-job3-preview.mjs'; await sandbox.files.write(appPath, new TextEncoder().encode(appSource));
   const app = await sandbox.commands.start(['node', appPath], { timeoutMs: 180_000 });
   await until(() => app.get(), job => job.status === 'running' && job.stdout.includes('mainbrella-preview-ready'), 15_000);
@@ -67,22 +69,25 @@ export async function accessChecks(sandbox, secondary, appSource, checks) {
   checks.previewRevocation = true;
 }
 
-export async function verifyJob3(client, { secondary, receiverRequest, networkSource, appSource, previous, maxStarts = 2, checkpoint = async () => {}, exerciseAccess = accessChecks, exerciseNetwork = guestNetwork } = {}) {
-  const report = { formatVersion: 1, ok: false, releaseQualified: false, maxStarts, startsRequested: 0,
+export async function verifyJob3(client, { secondary, receiverRequest, networkSource, appSource, previous, maxStarts = 2, mode = 'combined', checkpoint = async () => {}, exerciseAccess = accessChecks, exerciseNetwork = guestNetwork } = {}) {
+  const webhooks = mode === 'combined';
+  const report = { formatVersion: 1, mode, ok: false, releaseQualified: false, maxStarts, startsRequested: 0,
     stage: 'preflight', cleanup: 'not_needed', checks: {}, generations: [], receiverRuns: [],
-    pendingGates: ['dedicated_metrics_token_and_deployed_metrics', 'browser_terminal_tmux_and_ssh_compatibility',
-      'webhook_restart_lease_recovery_and_inflight_removal', 'lifecycle_expiry_retention_and_disabled_policy_cleanup'] };
+    pendingGates: ['browser_terminal_tmux_and_ssh_compatibility', 'replacement_generation_fencing',
+      'runtime_upgrade_downgrade', 'lifecycle_expiry_retention_and_disabled_policy_cleanup',
+      ...(webhooks ? ['dedicated_metrics_token_and_deployed_metrics', 'webhook_restart_lease_recovery_and_inflight_removal'] : [])] };
   const save = () => checkpoint(structuredClone(report));
   let sandbox, online, offline;
   try {
-    requireCheck([2, 3].includes(maxStarts) && (maxStarts === 2 || previous));
+    requireCheck(['combined', 'network'].includes(mode) && [2, 3].includes(maxStarts) && (maxStarts === 2 || previous));
     const capabilities = await client.capabilities();
-    requireCheck(capabilities.networking?.internetControl && capabilities.observability?.webhooks && capabilities.previews?.supported);
+    requireCheck(capabilities.networking?.internetControl && capabilities.previews?.supported
+      && (!webhooks || capabilities.observability?.webhooks));
     const before = await deploymentPreflight(client, { starts: previous ? 1 : 2 }); report.preexisting = before.existing;
     const usage = { primary: (await client.list()).usage.starts, secondary: (await secondary.list()).usage.starts };
     report.before = usage;
     if (previous) {
-      requireCheck(previous.ok === false && [2, 3].includes(previous.maxStarts) && [1, 2].includes(previous.startsRequested)
+      requireCheck((previous.mode ?? 'combined') === mode && previous.ok === false && [2, 3].includes(previous.maxStarts) && [1, 2].includes(previous.startsRequested)
         && previous.startsRequested < maxStarts && previous.cleanup === 'completed'
         && previous.generations?.length === previous.startsRequested && previous.generations[0].internet === true
         && previous.generations.every(generation => generation.cleanup === 'completed')
@@ -120,9 +125,9 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
       generation.checks.packageManager = true;
       if (npm.timedOut && !report.pendingGates.includes('offline_package_manager_dns_failure_latency')) report.pendingGates.push('offline_package_manager_dns_failure_latency');
       report.stage = internet ? 'online_access' : 'offline_access'; await save();
-      await exerciseAccess(sandbox, secondary, appSource, generation.checks);
+      await exerciseAccess(sandbox, secondary, appSource, generation.checks, { webhooks });
       let receiver;
-      {
+      if (webhooks) {
         report.stage = 'webhook_configure'; const runId = randomUUID(); report.receiverRuns.push(runId); await save();
         const config = await sandbox.webhook.configure(`${RECEIVER_ORIGIN}/receive/${runId}`, { replayFromCursor: 0 });
         requireCheck(/^mbwh_[a-f0-9]{64}$/.test(config.signingSecret));
@@ -180,7 +185,7 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
   }
   finally {
     if (sandbox) {
-      try { await sandbox.webhook.remove(); } catch {}
+      if (webhooks) try { await sandbox.webhook.remove(); } catch {}
       try { await sandbox.kill(); requireCheck(!(await client.list()).containers.some(current => same(current, sandbox))); report.generations.at(-1).cleanup = 'completed'; report.cleanup = 'completed'; }
       catch { report.cleanup = 'failed'; }
     }
@@ -196,16 +201,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const options = {};
     for (const arg of process.argv.slice(2)) {
-      const match = /^--(output|max-starts|secret-file|api-version|runtime-version|resume-report)=(.+)$/.exec(arg);
+      const match = /^--(output|max-starts|secret-file|api-version|runtime-version|resume-report|mode)=(.+)$/.exec(arg);
       requireCheck(match && !Object.hasOwn(options, match[1])); options[match[1]] = match[2];
     }
-    requireCheck(options.output && ['2', '3'].includes(options['max-starts']) && (options['max-starts'] === '2' || options['resume-report']) && options['secret-file']
+    const mode = options.mode ?? 'combined';
+    requireCheck(['combined', 'network'].includes(mode) && options.output && ['2', '3'].includes(options['max-starts']) && (options['max-starts'] === '2' || options['resume-report']) && (mode === 'network' || options['secret-file'])
       && ['api-version', 'runtime-version'].every(name => /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(options[name] ?? '')));
     const env = { ...parseEnv(await readFile(join(root, '.env'), 'utf8')), ...process.env };
-    const secrets = parseEnv(await readFile(resolve(options['secret-file']), 'utf8'));
     const client = new Mainbrella({ apiKey: env.MAINBRELLA_API_KEY, timeoutMs: 25_000 });
     const secondary = new Mainbrella({ apiKey: env.MAINBRELLA_API_KEY2, timeoutMs: 25_000 });
-    const request = receiverClient(secrets.QUALIFICATION_RECEIVER_TOKEN);
+    const request = mode === 'combined' ? receiverClient(parseEnv(await readFile(resolve(options['secret-file']), 'utf8')).QUALIFICATION_RECEIVER_TOKEN) : undefined;
     let previous, previousReportSha256;
     if (options['resume-report']) {
       const bytes = await readFile(resolve(options['resume-report'])); previous = JSON.parse(bytes);
@@ -225,10 +230,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         deploymentVersions: { api: options['api-version'], runtime: options['runtime-version'], source: 'operator_supplied' } }, null, 2) + '\n', { mode: 0o600 });
       await rename(path + '.tmp', path);
     };
-    const report = await verifyJob3(client, { secondary, receiverRequest: request, checkpoint, previous, maxStarts: Number(options['max-starts']),
+    const report = await verifyJob3(client, { secondary, receiverRequest: request, checkpoint, previous, mode, maxStarts: Number(options['max-starts']),
       networkSource: await readFile(join(root, 'scripts/network-guest-probe.mjs'), 'utf8'), appSource: await readFile(join(root, 'scripts/preview-app.mjs'), 'utf8') });
-    console.log(JSON.stringify({ ok: report.ok, releaseQualified: false, cleanup: report.cleanup, startsRequested: report.startsRequested,
+    console.log(JSON.stringify({ mode: report.mode, ok: report.ok, releaseQualified: false, cleanup: report.cleanup, startsRequested: report.startsRequested,
       checks: report.checks, networkComparison: report.networkComparison, error: report.error, pendingGates: report.pendingGates }));
     if (!report.ok) process.exitCode = 1;
-  } catch { console.error('Use --output=NEW_DIR --max-starts=2 --secret-file=FILE --api-version=UUID --runtime-version=UUID. Check the private recovery report after interruptions; do not rerun with new creation keys.'); process.exitCode = 1; }
+  } catch { console.error('Use --output=NEW_DIR --max-starts=2 --api-version=UUID --runtime-version=UUID, with --secret-file=FILE for combined mode or --mode=network. Check the private recovery report after interruptions; do not rerun with new creation keys.'); process.exitCode = 1; }
 }

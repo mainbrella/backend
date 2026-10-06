@@ -8,14 +8,19 @@ These changes live in the backend repository. Frontend work can proceed independ
 | `GET /status` | Website, API, auth, provisioning, SSH, image-build and billing observations, plus incidents. Each component includes freshness and probe scope. |
 | `GET /status/history` | Up to 100 observations per page, retained for 31 days. Follow both returned cursor fields when present. |
 | `/containers/executions` | Start shell/argv jobs, inspect/list, write stdin, signal, resize PTYs and reconnect. See [API.md](../API.md) for authenticated request shapes. |
-| `/containers/previews` | Locally implemented issue/list/revoke for owned generations. Gate controls on `previews.supported`; the isolated gateway/domain is disabled pending configuration and qualification. URL is a bearer credential returned once. |
+| `/containers/previews` | Production-qualified issue/list/revoke for owned generations on `mainbrella.dev`, including Next.js assets, WebSockets/HMR, account isolation and stop revocation. Gate controls on `previews.supported`. URL is a bearer credential returned once. |
+| `/workspaces`, create with `workspaceId` | Saved filesystem workspaces are enabled and production-qualified through the API, dashboard and registry-installed SDKs. Save explicitly before stop; restore starts a fresh generation without RAM/process state. Gate new snapshots on `persistence.snapshots`. See [workspaces.md](workspaces.md). |
+| `/images`, `/image-builds` | Catalog selection exists. Custom build handlers and workflow are implemented, but production build admission is disabled until the API has its GitHub dispatch credential. See [custom-images.md](custom-images.md). |
 | Container `imageDigest` | Optional image identity recorded at generation creation. Do not manufacture it when an older response lacks it. |
 | `sdk/javascript`, `sdk/python` | Python 0.1.0 is published on PyPI; JavaScript 0.1.0 is published on npm. Both support lifecycle, execution, files, and saved workspaces. Installation examples are in their READMEs. |
 | Benchmark JSON | Raw samples, failures, cleanup results, environment metadata and methodology. Publish measured results from an actual run. |
 
 Missing observations and observations older than 15 minutes are `unknown`. An auth observation with scope `control_plane` proves the database check succeeded; it does not prove a customer can log in. The scheduled collector checks website/API reachability and database access. Provisioning, SSH, image builds and billing need separate probes. Incident text is public plain text and should be rendered as text.
 
-The frontend repository's copies of API documentation, the agent skill, and diagnostic instructions need a coordinated update. This work does not edit those copies.
+The frontend repository's API documentation, agent skill and SDK references are
+generated from backend sources. Run web `npm run docs:sync` after changing those
+sources and `npm run docs:check` before release. Published SDK installation
+guidance is synchronized for 0.1.0 on both registries.
 
 ## Rollout
 
@@ -32,8 +37,24 @@ On a Durable Object restart, unfinished managed jobs become `interrupted`. Recov
 
 ## Further backend work
 
-The isolated probes in [runtime-feasibility.md](runtime-feasibility.md) prepare resource qualification and filesystem-snapshot experiments. Five sizes and compute entitlement enforcement are now implemented locally. Resource qualification still needs measured workloads and costs; customer persistence still needs ownership and quotas, image compatibility, and expiry behavior. Secure preview SDK/dashboard integration exists locally; isolated-domain qualification remains; see [preview-ingress.md](preview-ingress.md). Warm pools and configurable lifecycle policies remain separate implementation work.
+Five sizes and compute entitlement enforcement are implemented. Saved workspaces
+and protected previews have completed their customer qualification; see
+[workspaces.md](workspaces.md) and [preview-ingress.md](preview-ingress.md).
+The corrected browser/Rust/Lite-Python benchmark replay remains pending under a
+new eleven-start budget; see [size-benchmarks.md](size-benchmarks.md). Snapshot
+economics remain unmeasured. Warm pools, configurable lifecycle policies,
+snapshot/fork ergonomics and process-state suspend/resume remain separate work.
 
-Filesystem list/stat/mkdir/remove/move/chmod and managed stdin/signals/PTY are implemented locally with schemas, SDKs and exact-generation checks. GNU timeout/stat/find/sed compatibility checks now gate image builds. Watching, guest-wide process listing and actual provider PTY transport qualification remain separate. `npm run sdk:qualify` and web `npm run docs:sync` prepare artifact and public-reference evidence; see [sdk-release.md](sdk-release.md).
+Filesystem list/stat/mkdir/remove/move/chmod and managed stdin/signals/PTY are
+implemented with schemas, SDKs and exact-generation checks. Native PTY resize and
+signals passed the October 6 internet-off checks; full internet-off release gates
+remain open. GNU timeout/stat/find/sed compatibility checks gate image builds.
+Watching and guest-wide process listing remain unsupported. Both SDKs are
+published as 0.1.0; preserve the artifact and deployed gates for future releases.
+See [sdk-release.md](sdk-release.md) and [network-policy.md](network-policy.md).
 
-Workload lifecycle events and a compact dashboard History view are implemented locally. Provider analytics and signed, encrypted-key webhook delivery remain disabled pending explicit API/runtime configuration and provider qualification. See [workload-observability.md](workload-observability.md); these observations are separate from public service health and billing resource usage.
+Workload lifecycle events and a compact dashboard History view are available.
+Provider analytics and signed, encrypted-key webhook delivery remain disabled
+pending explicit API/runtime configuration and provider qualification. See
+[workload-observability.md](workload-observability.md); these observations are
+separate from public service health and billing resource usage.

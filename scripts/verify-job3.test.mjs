@@ -18,13 +18,13 @@ test('an unreachable control never counts as a denial, and any offline success f
   assert.equal(compareNetworkControls(online, offline).ok, false);
   assert.throws(() => compareNetworkControls({}, {}));
 });
-function fixture({ enabled = true, failCreate = false, failCleanup = false, failAccess = false, failWebhook = false } = {}) {
+function fixture({ enabled = true, webhooksEnabled = enabled, failCreate = false, failCleanup = false, failAccess = false, failWebhook = false, npmTimedOut = false } = {}) {
   const previous = { id: 'c1', createdAt: '2026-10-01T00:00:00.000Z' }, admitted = new Map();
   const calls = [], checkpoints = [], receivers = new Map(); let active, starts = 3, keys = 0, webhook;
   const list = async () => ({ active: true, containers: [previous, ...(active ? [active] : [])], imageCatalog: [{ id: 'node' }],
     limits: { maxStartsPerMonth: 100, maxContainers: 5, maxConcurrentComputeUnits: 28 },
     usage: { starts, availableComputeUnitHours: 100, concurrentComputeUnits: 0 } });
-  const capabilities = async () => ({ apiVersion: '2026-10-05', networking: { internetControl: enabled }, observability: { webhooks: enabled }, previews: { supported: true },
+  const capabilities = async () => ({ apiVersion: '2026-10-05', networking: { internetControl: enabled }, observability: { webhooks: webhooksEnabled }, previews: { supported: true },
     containers: { idempotentCreate: true, generationRequired: true }, execution: { foreground: true, background: true, streaming: true, reconnect: true, cancellation: true },
     files: { read: true, write: true, binary: true } });
   const client = { list, capabilities, async create({ internet, idempotencyKey }) {
@@ -37,12 +37,12 @@ function fixture({ enabled = true, failCreate = false, failCleanup = false, fail
     const identity = active;
     let stopped = false;
     const sandbox = { ...identity,
-      commands: { run: async () => ({ exitCode: internet ? 0 : 1, timedOut: false }) },
+      commands: { run: async () => ({ exitCode: internet ? 0 : npmTimedOut ? null : 1, timedOut: !internet && npmTimedOut }) },
       events: async () => ({ events: [{ type: 'starting' }, { type: 'started' }, ...(stopped ? [{ type: 'stopped' }] : [])] }),
       async kill() { calls.push('kill'); if (failCleanup) throw new Error('cleanup'); active = undefined; stopped = true; },
       webhook: { configure: async () => { if (failWebhook) { webhook = {}; throw new Error('credential-must-not-leak'); } webhook = {}; return { signingSecret: 'mbwh_' + String(++keys).repeat(64) }; },
         deliveries: async () => ({ deliveries: webhook ? [{ status: 'delivered', attempts: 2 }, { status: 'delivered', attempts: 1 }] : [] }),
-        remove: async () => { webhook = null; }, get: async () => ({ webhook }) } };
+        remove: async () => { calls.push('webhook_remove'); webhook = null; }, get: async () => ({ webhook }) } };
     admitted.set(idempotencyKey, sandbox); return sandbox;
   } };
   const secondary = { list: async () => ({ usage: { starts: 0 } }) };
@@ -104,4 +104,62 @@ test('webhook failures checkpoint bounded diagnostics before erasing the outbox'
   assert.equal(report.cleanup, 'completed'); assert.equal(report.webhookFailure.deliveries.length, 2);
   assert.ok(f.checkpoints.some(saved => saved.webhookFailure?.deliveries.length === 2));
   assert.equal(JSON.stringify(report).includes('credential-must-not-leak'), false);
+});
+
+test('network mode works with disabled webhooks and never contacts the receiver or webhook API', async () => {
+  const f = fixture({ webhooksEnabled: false, failWebhook: true });
+  const report = await verifyJob3(f.client, { ...f.options, mode: 'network',
+    receiverRequest: async () => { assert.fail('receiver must not be used'); },
+    exerciseAccess: async (_sandbox, _secondary, _appSource, _checks, options) => {
+      assert.equal(options.webhooks, false);
+    } });
+  assert.equal(report.ok, true); assert.equal(report.mode, 'network');
+  assert.equal(report.releaseQualified, false); assert.equal(report.startsRequested, 2);
+  assert.equal(report.cleanup, 'completed'); assert.deepEqual(report.receiverRuns, []);
+  assert.equal(f.calls.includes('webhook_remove'), false);
+  assert.equal(report.pendingGates.some(gate => /webhook|metrics/.test(gate)), false);
+  assert.ok(report.pendingGates.includes('replacement_generation_fencing'));
+  const combined = fixture({ webhooksEnabled: false });
+  assert.equal((await verifyJob3(combined.client, combined.options)).startsRequested, 0);
+});
+
+test('network mode keeps cleanup and offline latency gates, and rejects cross-mode recovery', async () => {
+  const timeout = fixture({ npmTimedOut: true });
+  const report = await verifyJob3(timeout.client, { ...timeout.options, mode: 'network' });
+  assert.equal(report.ok, true); assert.equal(report.releaseQualified, false);
+  assert.ok(report.pendingGates.includes('offline_package_manager_dns_failure_latency'));
+  const failed = fixture({ failAccess: true });
+  const previous = await verifyJob3(failed.client, { ...failed.options, mode: 'network' });
+  assert.equal(previous.cleanup, 'completed'); assert.equal(previous.startsRequested, 1);
+  const wrongMode = await verifyJob3(failed.client, { ...failed.options, previous });
+  assert.equal(wrongMode.ok, false); assert.equal(wrongMode.startsRequested, 0);
+  const resumed = await verifyJob3(failed.client, { ...failed.options, mode: 'network', previous, exerciseAccess: async () => {} });
+  assert.equal(resumed.ok, true); assert.equal(resumed.startsRequested, 2);
+  const cleanup = fixture({ failCleanup: true });
+  const rejected = await verifyJob3(cleanup.client, { ...cleanup.options, mode: 'network' });
+  assert.equal(rejected.cleanup, 'failed'); assert.equal(rejected.startsRequested, 1);
+});
+
+test('unknown verification modes are rejected before admission', async () => {
+  const f = fixture();
+  const report = await verifyJob3(f.client, { ...f.options, mode: 'typo' });
+  assert.equal(report.ok, false); assert.equal(report.startsRequested, 0); assert.deepEqual(f.calls, []);
+});
+
+test('network access checks omit cross-account webhook reads', async () => {
+  let count = 0;
+  const checks = {}, requests = [];
+  const sandbox = { path: value => value,
+    files: { write: async () => {}, read: async () => new Uint8Array([0, 1, 127, 128, 255, 10]) },
+    commands: { start: async () => {
+      if (++count === 4) throw new Error('stop_before_preview');
+      const index = count;
+      return { get: async () => ({ status: 'running', stdout: 'mainbrella-job3-pty' }),
+        stdin: { write: async () => {}, close: async () => {} }, resize: async () => {}, signal: async () => {}, cancel: async () => {},
+        wait: async () => ({ status: index === 1 ? 'succeeded' : 'canceled', stdout: 'stdin:mainbrella-job3' }) };
+    } } };
+  const secondary = { request: async path => { requests.push(path); throw Object.assign(new Error('not_found'), { status: 404 }); } };
+  await assert.rejects(accessChecks(sandbox, secondary, '', checks, { webhooks: false }), /stop_before_preview/);
+  assert.deepEqual(requests, ['/containers/events']);
+  assert.equal(checks.crossAccountHistory, true); assert.equal(checks.crossAccountWebhook, undefined);
 });

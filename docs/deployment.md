@@ -87,9 +87,11 @@ do not create incidents; a sustained failed health check still records an outage
 These checks do not prove login, SSH, image builds or billing. Publish web integrations
 and feature claims only after the appropriate live workflow passes.
 
-Protected previews have a separate, disabled gateway configuration and routing
-database migration directory. The default deploy command does not deploy or
-enable that gateway. Follow [preview-ingress.md](preview-ingress.md) for isolated
+Protected previews are enabled and production-qualified on `mainbrella.dev`.
+They have a separate gateway configuration and routing database migration
+directory. The default deploy command does not redeploy that gateway. Preserve
+the enabled preview settings during unrelated API releases and follow
+[preview-ingress.md](preview-ingress.md) for isolated
 domain/TLS, routing bindings, runtime-before-gateway-before-enabled-API order,
 partial cleanup and the bounded qualification run. The gateway must never receive
 the account database or an account-site hostname.

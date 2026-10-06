@@ -51,6 +51,44 @@ not describe the combined report as a release pass. Evidence:
 Production enablement was reverted while the remaining gates are incomplete.
 The separate native interception/credential-injection experiment remains unrun.
 
+## Independent network qualification
+
+Use the network-only runner for the next bounded online/offline comparison. It
+does not require webhook enablement, receiver credentials, webhook API calls or
+metrics configuration. The default `verify:job3` command retains the combined
+network/webhook workflow.
+
+After approving a new two-start budget, deploy the runtime before temporarily
+enabling `NETWORK_INTERNET_CONTROL_ENABLED=true` on the API. Keep metrics and
+webhooks disabled. Record the deployed API and runtime version UUIDs, provision
+the primary and secondary account keys in `.env`, pause concurrent starts on
+those accounts, then run:
+
+```sh
+npm run verify:network -- \
+  --max-starts=2 \
+  --output=.wrangler/network-qualification-<new-run> \
+  --api-version=API_VERSION_UUID \
+  --runtime-version=RUNTIME_VERSION_UUID
+```
+
+The runner uses one online and one offline Lite Node generation sequentially.
+It checkpoints recovery keys before admission, tests same-key replay and policy
+conflict, compares the ten root-guest network controls, exercises files,
+stdin/signals/PTY and protected preview HTTP/WebSockets/revocation, and verifies
+retained stop history, exact-generation cleanup and account start deltas. Existing
+containers must remain unchanged. The report is `job3-verification.json`; its
+`mode` is `network`. A failed or interrupted run must be reconciled before another
+start. Resume reports must match the selected mode and pinned deployments; do not
+use the historical combined run as a network-mode continuation.
+
+`ok: true` establishes these checks only; `releaseQualified` remains false.
+Browser terminal/tmux, SSH, replacement-generation fencing, runtime
+upgrade/downgrade, lifecycle expiry/retention and offline package-manager latency
+remain explicit gates. An unreachable online control cannot establish denial.
+Turn the API flag off after this bounded check while any release gate remains
+open. Do not enable permanent customer issuance based on this report alone.
+
 ## Next policy and secrets work
 
 Cloudflare's native API supports outbound HTTP interception through a Fetcher, including HTTPS only with interception enabled and the provider CA trusted by the guest. Non-HTTP traffic needs internet disabled to avoid bypass. This codebase currently uses native Durable Object containers, so adding the separate Containers library would be a deliberate architectural choice rather than an incidental dependency.
