@@ -45,7 +45,7 @@ test('preview URL validation rejects account origins, redirects, port/generation
   }
 });
 
-async function fixture(t, { fail, preexisting = false, earlyExpiry = false, checkpointFailure } = {}) {
+async function fixture(t, { fail, preexisting = false, earlyExpiry = false, earlyStream = false, starting = false, checkpointFailure } = {}) {
   const app = createPreviewApp();
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   t.after(() => app.close());
@@ -64,7 +64,9 @@ async function fixture(t, { fail, preexisting = false, earlyExpiry = false, chec
     files: { write: async (_path, bytes) => { calls.push('upload'); assert.equal(new TextDecoder().decode(bytes), appSource); } },
     commands: { start: async (argv, options) => {
       calls.push('startApp'); assert.equal(argv[0], 'node'); assert.equal(options.timeoutMs, 240_000);
-      return { id: 'safe-execution-id', get: async () => ({ status: 'running', stdout: 'mainbrella-preview-ready\n' }) };
+      let polls = 0;
+      return { id: 'safe-execution-id', get: async () => starting && polls++ === 0
+        ? { status: 'starting', stdout: '' } : { status: 'running', stdout: 'mainbrella-preview-ready\n' } };
     } },
     previews: {
       create: async (port, { ttlSeconds }) => {
@@ -118,6 +120,11 @@ async function fixture(t, { fail, preexisting = false, earlyExpiry = false, chec
     const returned = new Headers(upstream.headers); returned.delete('set-cookie'); returned.set('referrer-policy', 'no-referrer');
     if (url.pathname !== '/stream') return new Response(upstream.body, { status: upstream.status, headers: returned });
     const reader = upstream.body.getReader();
+    if (earlyStream) {
+      const { value } = await reader.read();
+      await reader.cancel();
+      return new Response(value, { headers: returned });
+    }
     const body = new ReadableStream({
       start: controller => entry.streams.push(controller),
       pull: async controller => {
@@ -155,7 +162,7 @@ test('one-start verifier exercises real HTTP/binary/WebSocket fixture and labels
   const report = await verifyPreviews(f.client, f.options);
   assert.equal(report.ok, true, JSON.stringify(report)); assert.equal(report.cleanup, 'completed'); assert.equal(report.releaseQualified, false);
   assert.deepEqual(Object.keys(report.checks), ['application', 'httpAssetsBinary', 'credentialStripping', 'relativeRedirect',
-    'metadataOnly', 'controlPortRejected', 'gatewayIsolation', 'websocketEcho', 'activeRevocation', 'activeExpiry', 'stoppedAccess']);
+    'metadataOnly', 'controlPortRejected', 'gatewayIsolation', 'websocketEcho', 'activeRevocation', 'activeExpiry', 'activeStop', 'stoppedAccess']);
   assert.equal(f.calls.filter(c => c === 'create').length, 1); assert.equal(f.calls.filter(c => c === 'kill').length, 1);
   assert.deepEqual(report.preexisting, [existing]); assert.deepEqual(report.container, { id: identity.id, createdAt: identity.createdAt });
   const evidence = JSON.stringify(f.snapshots);
@@ -186,6 +193,21 @@ test('a socket closed before its expiry cannot satisfy the active expiry check',
   const f = await fixture(t, { earlyExpiry: true });
   const report = await verifyPreviews(f.client, f.options);
   assert.equal(report.ok, false); assert.equal(report.checks.activeExpiry, undefined); assert.equal(report.cleanup, 'completed');
+});
+
+test('application readiness tolerates managed execution starting before running', async t => {
+  const f = await fixture(t, { starting: true });
+  const report = await verifyPreviews(f.client, f.options);
+  assert.equal(report.ok, true, JSON.stringify(report));
+  assert.equal(report.checks.application, true); assert.equal(report.cleanup, 'completed');
+});
+
+test('an HTTP stream already closed before revocation cannot satisfy active revocation', async t => {
+  const f = await fixture(t, { earlyStream: true });
+  const report = await verifyPreviews(f.client, f.options);
+  assert.equal(report.ok, false); assert.equal(report.error, 'revocation_failed');
+  assert.equal(report.checks.activeRevocation, undefined); assert.equal(report.cleanup, 'completed');
+  assert.equal(f.calls.includes('revoke'), false);
 });
 
 test('checkpoint failure before admission prevents starts; later evidence failures still attempt cleanup', async t => {

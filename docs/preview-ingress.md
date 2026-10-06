@@ -192,6 +192,74 @@ reconciliation, generation replacement and capability gating. Mocked-API browser
 checks passed at 390×844, 768×1024, 1280×800 and 1440×900, including expiry while
 open. These results do not establish deployed transport behavior.
 
+## Bounded transport verification
+
+`npm run verify:previews` prepares transport evidence with at most **one new
+Lite generation** on the Node catalog image. Use Node 22+ and a dedicated
+provisioned account, after the rollout prerequisites above and agreement on the
+one-start budget. The command does not deploy or enable previews. Supply the
+isolated registrable domain and the API, runtime and gateway source revisions
+from deployment records; those revisions are labeled operator supplied.
+Set `MAINBRELLA_API_KEY` in the environment and optionally set a trusted
+`MAINBRELLA_API_URL` (the default is `https://api.mainbrella.com`).
+
+```sh
+npm run verify:previews -- \
+  --output=/path/to/new-preview-evidence \
+  --max-starts=1 \
+  --preview-domain=ISOLATED_REGISTRABLE_DOMAIN \
+  --api-revision=API_COMMIT_SHA \
+  --runtime-revision=RUNTIME_COMMIT_SHA \
+  --gateway-revision=GATEWAY_COMMIT_SHA
+```
+
+The runner checks public capabilities without credentials, then authenticated
+account allowance and the catalog. It checkpoints a creation key before admission
+and rejects an identity already present in the account. It uploads the
+dependency-free `scripts/preview-app.mjs` fixture, starts a four-minute managed
+job on port 3000 and waits for readiness, including the initial `starting` state.
+There are no new-key creation retries or stops of pre-existing generations.
+
+Checks cover HTML/root-relative assets, binary responses and POST bodies, query
+preservation, credential/response-cookie stripping, relative redirects,
+metadata-only listing, control-port rejection, invalid hosts/tokens and a request
+to an account-only path. Native WebSockets must echo through the gateway.
+Revocation must close an HTTP stream and WebSocket that were still open before
+the mutation; an already completed stream cannot count. A separate quiet
+WebSocket must remain open until its 60-second grant expires, then close and deny
+new access. Finally, stopping the exact created generation must close another
+active WebSocket and deny its URL. Transport waits are bounded; the expiry check
+normally takes about a minute. The managed fixture ends after four minutes even
+if the verifier is interrupted; the machine's existing lease remains independent.
+
+`preview-verification.json` is updated atomically in a new private evidence
+directory. It records checks, stage, cleanup, safe grant IDs/expiry, creation and
+execution keys, exact container generation, verifier/fixture/SDK source hashes,
+Node version, API version and target. It omits account credentials, bearer URLs,
+tokens, command output and raw server errors. Existing evidence directories are
+never overwritten. Loopback targets are explicitly labeled and cannot qualify
+provider transports. Run `node --test scripts/verify-previews.test.mjs` for local
+failure-path and real loopback HTTP/WebSocket fixture checks with no paid starts.
+
+After a failure or interruption, inspect the checkpoint before approving another
+run. `cleanup: "completed"` means an account read confirmed the exact generation
+absent; `failed` or `pending` requires reconciliation. If `container` is present,
+stop only that recorded `id`/`createdAt` using the dedicated account. If admission
+is ambiguous (`reconcile_manually`), use the recorded `creationKey` with the same
+`{catalogId:"node", size:"lite"}` selection to reconcile within the 24-hour
+idempotency window, under the existing budget; never invent a new key. Do not
+replay an expired key, guess ownership from the newest slot, or mass-stop the
+account. Grant IDs allow list/revoke reconciliation while that generation runs;
+the checkpoint cannot recover a one-time URL. Successful stop invalidates runtime
+access even if expired routing rows await cleanup.
+
+Even `ok: true` always leaves `releaseQualified: false`: this fixture is a
+transport probe. Its `pendingGates` still require a real Next.js or similar
+framework/browser run (including WebSocket Origin, CSP and service workers),
+cross-account isolation with a second account, replacement-generation checks
+within a separately agreed start budget, and domain/TLS/CDN logging review.
+Retain that evidence alongside this report before enabling public claims.
+
 ## Qualification gates
 
 `node --test containers/previews.test.mjs` exercises the runtime guard with no

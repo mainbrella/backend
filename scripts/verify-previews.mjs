@@ -134,8 +134,8 @@ export async function verifyPreviews(client, {
     let ready = false;
     for (let i = 0; i < 30; i++) {
       const status = await job.get();
-      if (status.status !== 'running') throw new Error('app_not_running');
-      if (status.stdout === 'mainbrella-preview-ready\n') { ready = true; break; }
+      if (!['starting', 'running'].includes(status.status)) throw new Error('app_not_running');
+      if (status.status === 'running' && status.stdout === 'mainbrella-preview-ready\n') { ready = true; break; }
       await wait(500);
     }
     requireCheck(ready); report.checks.application = true;
@@ -188,12 +188,17 @@ export async function verifyPreviews(client, {
     streamReader = stream.body.getReader();
     const first = await bounded(streamReader.read());
     requireCheck(!first.done && Buffer.from(first.value).toString() === 'mainbrella-stream\n');
-    const streamClosed = streamReader.read().then(result => { requireCheck(result.done); }, error => {
+    let streamSettled = false;
+    const streamClosed = streamReader.read().then(result => { streamSettled = true; requireCheck(result.done); }, error => {
+      streamSettled = true;
       // A transport reset is expected; a local deadline abort is not revocation evidence.
       requireCheck(!streamSignal.aborted && !['TimeoutError', 'AbortError'].includes(error.name));
     });
     streamClosed.catch(() => {});
-    requireCheck(connection.socket.readyState === 1 && expiringConnection.socket.readyState === 1);
+    // Observe liveness before the mutation: an already completed response is
+    // not evidence that revocation closed an active transport.
+    await wait(250);
+    requireCheck(!streamSettled && connection.socket.readyState === 1 && expiringConnection.socket.readyState === 1);
     await sandbox.previews.revoke(active.grant.id); active.record.state = 'revoked';
     await bounded(Promise.all([connection.closed, streamClosed]));
     await denied(active.url); report.checks.activeRevocation = true;
@@ -207,9 +212,12 @@ export async function verifyPreviews(client, {
     const stopped = await issue('stop', 300);
     const live = await request(stopped.url);
     requireCheck(live.status === 200 && (await bodyBytes(live)).toString() === previewHtml);
+    const stoppedConnection = await connectSocket(stopped.url); sockets.push(stoppedConnection);
+    requireCheck(stoppedConnection.socket.readyState === 1);
     await sandbox.kill();
     const after = await client.list(); requireCheck(Array.isArray(after.containers) && !after.containers.some(c => same(c, sandbox)));
     report.cleanup = 'completed';
+    await bounded(stoppedConnection.closed); report.checks.activeStop = true;
     await denied(stopped.url, [403, 404]); report.checks.stoppedAccess = true;
   } catch { report.error = `${report.stage}_failed`; }
   finally {

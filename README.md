@@ -9,9 +9,8 @@ exclusive to `POST /containers`; client ownership, plan, resource and lease
 headers are never forwarded.
 
 The [preview ingress design and private runtime contract](docs/preview-ingress.md)
-cover the local port-bound grant/HTTP/WebSocket foundation. Public preview URLs,
-account endpoints and SDK/dashboard integration remain unfinished; deployment
-capabilities continue to report previews as unsupported.
+cover the local runtime, gateway, account endpoints and SDK/dashboard integration.
+Previews remain disabled pending isolated-domain rollout and transport qualification.
 
 ## Browser terminal
 
@@ -403,6 +402,9 @@ and qualified. `npm run check:previews` bundles the disabled gateway without
 deployment. The default deploy command does not publish it. See
 [the ingress handoff](docs/preview-ingress.md) for configuration, sharing semantics,
 failure reconciliation and live release gates. SDK helpers and capability-gated dashboard controls exist locally; isolated-domain qualification remains.
+`npm run verify:previews` supplies a one-start transport probe with recovery
+checkpoints; follow the handoff's required arguments and explicit budget. Its
+success does not satisfy the remaining framework, isolation and deployment gates.
 
 `npm run verify:agent` exercises create, execution, files, streaming and cleanup,
 consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs
