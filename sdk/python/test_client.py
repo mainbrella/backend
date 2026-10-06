@@ -174,6 +174,7 @@ class ClientTests(unittest.TestCase):
                     query = parse_qs(url.query)
                     body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                     owner.assertEqual(self.headers["Authorization"], "Bearer " + KEY)
+                    owner.assertEqual(self.headers["User-Agent"], "mainbrella-python/0.1.0")
                     result = None
                     content_type = "application/json"
                     if url.path == "/capabilities":

@@ -10,6 +10,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+_USER_AGENT = "mainbrella-python/0.1.0"
+
 
 def verify_webhook_signature(body, signature, signing_secret, now=None, tolerance=300):
     now = time.time() if now is None else now
@@ -73,6 +75,7 @@ class Mainbrella:
         if not path.startswith("/") or path.startswith("//") or urlsplit(path).scheme:
             raise MainbrellaError("invalid_api_path")
         outgoing = dict(headers or {})
+        outgoing["User-Agent"] = _USER_AGENT
         outgoing["Authorization"] = f"Bearer {self._api_key}"
         if body is not None:
             outgoing["Content-Type"] = "application/octet-stream" if isinstance(body, bytes) else "application/json"
@@ -379,7 +382,7 @@ class Execution:
             saw_status = False
             try:
                 response = build_opener(_NoRedirect()).open(Request(client.base_url + self._path("/events", cursor=cursor),
-                    headers={"Authorization": "Bearer " + client._api_key}), timeout=client.timeout)
+                    headers={"Authorization": "Bearer " + client._api_key, "User-Agent": _USER_AGENT}), timeout=client.timeout)
                 with response:
                     frame = []
                     while True:
