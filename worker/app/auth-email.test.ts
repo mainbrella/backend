@@ -39,7 +39,8 @@ test("email form creates an account, stores only a salted hash, and establishes 
   assert.equal(first.status, 200);
   assert.equal(first.headers.get("cache-control"), "no-store");
   assert.equal(first.headers.get("access-control-allow-origin"), "https://mainbrella.com");
-  const body = await first.json() as { user: { id: string; email: string; password_hash?: string } };
+  const body = await first.json() as { user: { id: string; email: string; password_hash?: string }; created: boolean };
+  assert.equal(body.created, true);
   assert.equal(body.user.email, "person@example.com");
   assert.equal(body.user.password_hash, undefined);
   const stored = f.sqlite.prepare("SELECT password_hash FROM users WHERE id = ?").get(body.user.id)?.password_hash;
@@ -50,10 +51,10 @@ test("email form creates an account, stores only a salted hash, and establishes 
   const me = await handleRequest(new Request("https://api.mainbrella.com/auth/me", {
     headers: { Cookie: cookie.split(";")[0] },
   }), f.env);
-  assert.deepEqual(await me.json(), body);
+  assert.deepEqual(await me.json(), { user: body.user });
   const repeat = await f.login("PERSON@example.com");
   assert.equal(repeat.status, 200);
-  assert.deepEqual(await repeat.json(), body);
+  assert.deepEqual(await repeat.json(), { user: body.user, created: false });
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 1);
   const wrong = await f.login("person@example.com", "wrong password");
   assert.equal(wrong.status, 401);
@@ -100,6 +101,8 @@ test("concurrent signups only authenticate the password that created the account
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 1);
   const same = await Promise.all([f.login("same@example.com"), f.login("same@example.com")]);
   assert.deepEqual(same.map(response => response.status), [200, 200]);
+  const results = await Promise.all(same.map(response => response.json() as Promise<{ created: boolean }>));
+  assert.deepEqual(results.map(result => result.created).sort(), [false, true]);
 });
 
 test("rate limits and untrusted origins reject email auth before creating accounts", async t => {

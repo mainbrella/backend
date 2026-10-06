@@ -16,7 +16,7 @@ export function registerAuthRoutes(api: OpenAPIApi, handler: LegacyHandler): voi
       operationId: `${provider}Login`, tags: ["Authentication"], summary: `Sign in with ${provider} and create a browser session`,
       ...(provider === "email" ? { description: "Signs in an existing password account or creates an account when the email is unused. New passwords require 8–128 characters. Email is trimmed and lowercased. No verification email is sent. Existing provider-only accounts must use their provider. Limited to 20 attempts per minute per IP." } : {}),
       request: requestBody(provider === "email" ? z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128) }) : credentials[provider]),
-      responses: { 200: jsonResponse(z.object({ user: userSchema, ...(provider === "google" ? { created: z.boolean() } : {}) })), ...errors(400, 401, 403, ...(provider === "email" ? [429] : [409]), 500, 503) },
+      responses: { 200: jsonResponse(z.object({ user: userSchema, created: z.boolean() })), ...errors(400, 401, 403, ...(provider === "email" ? [429] : [409]), 500, 503) },
     }, handler);
   }
   for (const provider of ["google", "email", "apple"] as const) {

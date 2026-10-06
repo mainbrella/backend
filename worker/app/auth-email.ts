@@ -27,7 +27,7 @@ async function verifyPassword(password: string, hash: string | null): Promise<bo
   return timingSafeEqual(actual, expected) && Boolean(valid);
 }
 
-export async function signInOrCreateEmailUser(env: Env, email: unknown, password: unknown): Promise<AuthUser> {
+export async function signInOrCreateEmailUser(env: Env, email: unknown, password: unknown): Promise<{ user: AuthUser; created: boolean }> {
   if (typeof email !== "string" || typeof password !== "string") throw new AuthError("invalid_request", 400);
   const normalizedEmail = email.trim().toLowerCase();
   if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
@@ -40,7 +40,7 @@ export async function signInOrCreateEmailUser(env: Env, email: unknown, password
   const existing = await readUser();
   if (existing) {
     if (!await verifyPassword(password, existing.password_hash)) throw new AuthError("invalid_credentials");
-    return existing;
+    return { user: existing, created: false };
   }
   if (password.length < 8) throw new AuthError("weak_password", 400);
   const hash = await hashPassword(password);
@@ -65,5 +65,5 @@ export async function signInOrCreateEmailUser(env: Env, email: unknown, password
   if (saved.id !== user.id && !await verifyPassword(password, saved.password_hash)) {
     throw new AuthError("invalid_credentials");
   }
-  return saved;
+  return { user: saved, created: saved.id === user.id };
 }

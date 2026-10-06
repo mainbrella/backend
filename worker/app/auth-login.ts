@@ -51,9 +51,9 @@ export async function handleEmailLogin(
   try {
     const body = await readJSON(request, 2_000);
     if (!body) return authJson({ error: "invalid_request" }, 400, corsHeaders);
-    const user = await signInOrCreateEmailUser(env, body.email, body.password);
+    const { user, created } = await signInOrCreateEmailUser(env, body.email, body.password);
     return authJson(
-      { user: publicUser(user) },
+      { user: publicUser(user), created },
       200,
       { ...corsHeaders, "set-cookie": await createSession(env, user.id) },
     );
