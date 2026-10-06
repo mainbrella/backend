@@ -1,0 +1,4 @@
+# Build/release tooling only; the installed SDK has no runtime dependencies.
+build>=1.2,<2
+twine>=6,<7
+setuptools>=77.0.3

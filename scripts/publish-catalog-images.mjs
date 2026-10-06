@@ -31,7 +31,7 @@ for (const entry of IMAGE_CATALOG) {
   }
   const tag = `${entry.repository}:${process.env.GITHUB_RUN_ID || 'local'}`;
   run('docker', ['build', '--pull', '--platform', 'linux/amd64', '--provenance=false', '-f', entry.dockerfile, '-t', tag, 'containers'], { stdio: 'inherit', timeout: 12 * 60_000 });
-  const check = `command -v sleep; bash --version; git --version; command -v ssh; test -f /etc/tmux.conf; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke; ${entry.smoke}`;
+  const check = `command -v sleep; timeout --version; stat --version; find --version; sed --version; bash --version; git --version; command -v ssh; test -f /etc/tmux.conf; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke; ${entry.smoke}`;
   run('docker', ['run', '--rm', '--network', 'none', '--entrypoint', '/bin/sh', tag, '-ec', check], { stdio: 'inherit', timeout: 60_000 });
   run(process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'containers', 'push', tag, '--config', 'wrangler.containers.jsonc'], { stdio: 'inherit' });
   const registry = `registry.cloudflare.com/${accountId}/${tag}`;

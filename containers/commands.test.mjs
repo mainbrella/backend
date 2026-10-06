@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
+import { spawnSync } from 'node:child_process';
 import { executeCommand } from './commands.js';
 import { MAX_OUTPUT_BYTES, readCommandBody } from './command-contract.js';
 import { UserContainerController } from './user-container-core.js';
@@ -31,13 +32,13 @@ function fixture() {
         const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' });
         children.push(child);
         const kill = () => { child.kill('SIGKILL'); };
-        options.signal.addEventListener('abort', kill, { once: true });
-        if (options.signal.aborted) kill();
+        options.signal?.addEventListener('abort', kill, { once: true });
+        if (options.signal?.aborted) kill();
         const exitCode = new Promise(resolve => child.on('close', code => {
-          options.signal.removeEventListener('abort', kill);
+          options.signal?.removeEventListener('abort', kill);
           resolve(code ?? 137);
         }));
-        return { stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout),
+        return { pid: child.pid, stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout),
           stderr: Readable.toWeb(child.stderr), exitCode, kill() { kill(); } };
       },
     },
@@ -53,7 +54,7 @@ test('real shell stdout, stderr, nonzero exit and EOF are returned separately', 
   const response = await f.run(request('read ignored; printf "héllo"; printf problem >&2; exit 7'));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { stdout: 'héllo', stderr: 'problem', exitCode: 7, timedOut: false, outputTruncated: false });
-  assert.deepEqual(f.calls[0].argv, ['/bin/sh', '-lc', 'read ignored; printf "héllo"; printf problem >&2; exit 7']);
+  assert.deepEqual(f.calls[0].argv.slice(-3), ['/bin/sh', '-lc', 'read ignored; printf "héllo"; printf problem >&2; exit 7']);
   assert.equal(f.active.size, 0);
 });
 
@@ -82,7 +83,7 @@ test('timeout terminates a running process and returns partial output', async ()
   assert.equal(result.stdout, 'started');
   assert.equal(f.active.size, 0);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.children[0].killed, true);
+  assert.ok(f.children[0].exitCode !== null || f.children[0].signalCode !== null);
 });
 
 test('combined output limit is bounded and stops an unbounded producer', async () => {
@@ -93,7 +94,8 @@ test('combined output limit is bounded and stops an unbounded producer', async (
   assert.equal(result.exitCode, null);
   assert.equal(result.timedOut, false);
   assert.equal(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr), MAX_OUTPUT_BYTES);
-  assert.equal(f.children[0].killed, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.children[0].exitCode !== null || f.children[0].signalCode !== null);
 });
 
 test('execution capacity rejects a fifth command without launching a process', async () => {
@@ -123,6 +125,18 @@ test('disconnect and container stop cancel work; process startup is bounded', as
     if (mode === 'startup_timeout') assert.equal((await response.json()).timedOut, true);
     assert.equal(f.active.size, 0);
   }
+});
+
+test('timeout terminates shell children that remain in the operation process group', async () => {
+  const f = fixture();
+  const response = await f.run(request('sleep 20 & printf "%s" "$!"; wait', 60));
+  const result = await response.json();
+  assert.equal(result.timedOut, true);
+  const pid = Number(result.stdout); assert.ok(Number.isSafeInteger(pid) && pid > 1);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(!state || state.startsWith('Z'), `Child still running: ${state}`);
+  assert.equal(f.active.size, 0);
 });
 
 test('generation is checked again between inspection and process launch', async () => {

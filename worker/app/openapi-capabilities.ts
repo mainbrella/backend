@@ -9,17 +9,18 @@ export const capabilitiesSchema = z.object({
   authentication: flags('apiKeys', 'browserSessions', 'browserTerminalCookieOnly'),
   containers: z.object({ idempotentCreate: z.boolean(), creationRetentionMs: limit, generationRequired: z.boolean(),
     accountLimitsPath: z.string(), configurableDeadline: z.boolean() }),
-  execution: flags('foreground', 'streaming', 'background', 'cancellation', 'reconnect', 'pty').extend({
+  execution: flags('foreground', 'streaming', 'background', 'cancellation', 'reconnect', 'pty', 'programmaticPty', 'ptyResize', 'stdin', 'signals', 'argv', 'managedProcessListing', 'processListing').extend({
     maxCommandBytes: limit, maxTimeoutMs: limit, maxOutputBytes: limit, maxConcurrentOperations: limit,
-    maxManagedTimeoutMs: limit, retentionMs: limit, maxRetainedExecutions: limit }),
-  files: flags('read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'watch', 'sharedExecutionPool')
-    .extend({ maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit }),
+    maxManagedTimeoutMs: limit, retentionMs: limit, maxRetainedExecutions: limit, maxStdinChunkBytes: limit, maxStdinBytes: limit, maxPendingStdinBytes: limit }),
+  files: flags('read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
+    .extend({ maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
   persistence: flags('filesystemAfterStop', 'snapshots', 'memory', 'volumes'),
+  observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
   resources: z.array(machineSizeSchema),
-  networking: flags('outboundInternet', 'egressPolicies', 'regionSelection'),
+  networking: flags('outboundInternet', 'internetControl', 'egressPolicies', 'regionSelection'),
   access: z.object({ maxTerminalConnections: limit, maxSSHAccessTokens: limit, sshTokenLifetimeMs: limit }),
 }).openapi('Capabilities');
 

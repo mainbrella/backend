@@ -1,4 +1,5 @@
 import { MAX_EXECUTIONS, MAX_OUTPUT_BYTES, readCommandBody, validCommand } from './command-contract.js';
+import { startOperationProcess } from './process-supervisor.js';
 
 // Foreground commands have bounded lifetime and output. A transport failure may
 // hide their result; callers must not retry commands with side effects blindly.
@@ -28,8 +29,8 @@ export async function executeCommand(controller, request, active, timers = globa
     reason = value;
     if (!exited) {
       abort.abort();
-      try { process?.kill(9); } catch { /* already exited */ }
     }
+    try { process?.kill(9); } catch { /* already exited */ }
     rejectStopped(new Error(value));
   };
   const session = { close: () => stop('container_not_running') };
@@ -63,8 +64,9 @@ export async function executeCommand(controller, request, active, timers = globa
   }
   try {
     if (request.signal.aborted) disconnected();
-    const starting = controller.startTerminalProcess(createdAt, expiresAt,
-      ['/bin/sh', '-lc', body.command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
+    const starting = startOperationProcess(controller, createdAt, expiresAt,
+      ['/bin/sh', '-lc', body.command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal },
+      Math.min(body.timeoutMs ?? 30_000, metadata.expiresAt - controller.now()));
     // A process returned after timeout must also be terminated.
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
@@ -93,5 +95,6 @@ export async function executeCommand(controller, request, active, timers = globa
       try { process?.kill(9); } catch { /* already exited */ }
     }
     for (const reader of readers) void reader.cancel().catch(() => {});
+    await process?.dispose?.();
   }
 }

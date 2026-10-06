@@ -28,6 +28,11 @@ function identity(value) {
   return { id: value.id, createdAt: value.createdAt };
 }
 
+function fileBoolean(value) {
+  if (typeof value !== 'boolean') throw new MainbrellaError('invalid_file_options');
+  return String(value);
+}
+
 export class Mainbrella {
   #apiKey;
   #fetch;
@@ -66,14 +71,16 @@ export class Mainbrella {
   capabilities() { return this.request('/capabilities'); }
   list() { return this.request('/containers'); }
   connect(value) { return new Sandbox(this, value); }
-  async create({ catalogId, imageId, size, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
+  async create({ catalogId, imageId, size, internet, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
     if (catalogId && imageId || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
       || !Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
       throw new MainbrellaError('invalid_creation_options');
     }
     const deadline = Date.now() + waitTimeoutMs;
     if (size !== undefined && !['lite', 'small', 'medium', 'large', 'xl'].includes(size)) throw new MainbrellaError('invalid_creation_options');
-    const body = { ...(imageId ? { imageId } : catalogId ? { catalogId } : {}), ...(size !== undefined ? { size } : {}) };
+    if (internet !== undefined && typeof internet !== 'boolean') throw new MainbrellaError('invalid_creation_options');
+    if (internet === false && (await this.capabilities())?.networking?.internetControl !== true) throw new MainbrellaError('network_policy_unavailable', 503, { idempotencyKey });
+    const body = { ...(imageId ? { imageId } : catalogId ? { catalogId } : {}), ...(size !== undefined ? { size } : {}), ...(internet !== undefined ? { internet } : {}) };
     while (Date.now() < deadline) {
       try {
         const data = await this.request('/containers', { method: 'POST', body,
@@ -83,12 +90,13 @@ export class Mainbrella {
         if (creation.status === 'running') {
           const selected = data.containers?.find(c => c.id === creation.containerId && c.createdAt === creation.createdAt && c.status === 'running');
           if (!selected) throw new MainbrellaError('invalid_creation_response');
+          if (internet === false && selected.internet !== false) throw new MainbrellaError('network_policy_unconfirmed', 409);
           const sandbox = this.connect(selected);
           sandbox.creationId = creation.id;
           return sandbox;
         }
       } catch (error) {
-        if (!(error instanceof MainbrellaError) || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
+        if (!(error instanceof MainbrellaError) || error.code === 'network_policy_unavailable' || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
           error.idempotencyKey = idempotencyKey;
           throw error;
         }
@@ -104,6 +112,7 @@ export class Sandbox {
   constructor(client, value) {
     this.client = client;
     Object.assign(this, identity(value));
+    if (typeof value.internet === 'boolean') this.internet = value.internet;
     for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
       read: path => this.client.request(this.path('/containers/files', { path }), { binary: true }),
@@ -111,6 +120,16 @@ export class Sandbox {
         if (!(bytes instanceof Uint8Array)) throw new MainbrellaError('file_bytes_required');
         return this.client.request(this.path('/containers/files', { path }), { method: 'PUT', body: bytes });
       },
+      list: (path, { limit, offset } = {}) => this.client.request(this.path('/containers/files/list', {
+        path, ...(limit !== undefined ? { limit: String(limit) } : {}), ...(offset !== undefined ? { offset: String(offset) } : {}),
+      })),
+      stat: (path, { followSymlinks = false } = {}) => this.client.request(this.path('/containers/files/stat', { path, followSymlinks: fileBoolean(followSymlinks) })),
+      mkdir: (path, { recursive = false, mode } = {}) => this.client.request(this.path('/containers/files/mkdir'), {
+        method: 'POST', body: { path, recursive, ...(mode !== undefined ? { mode } : {}) },
+      }),
+      remove: (path, { recursive = false } = {}) => this.client.request(this.path('/containers/files/remove', { path, recursive: fileBoolean(recursive) }), { method: 'DELETE' }),
+      move: (path, destination) => this.client.request(this.path('/containers/files/move'), { method: 'POST', body: { path, destination } }),
+      chmod: (path, mode) => this.client.request(this.path('/containers/files/chmod', { path }), { method: 'PATCH', body: { mode } }),
     };
     this.previews = {
       create: (port, { ttlSeconds } = {}) => {
@@ -127,19 +146,40 @@ export class Sandbox {
         return this.client.request(this.path('/containers/previews', { previewId }), { method: 'DELETE' });
       },
     };
+    this.webhook = {
+      get: () => this.client.request(this.path('/containers/webhook')),
+      configure: (url, { replayFromCursor } = {}) => this.client.request(this.path('/containers/webhook'), {
+        method: 'PUT', body: { url, ...(replayFromCursor !== undefined ? { replayFromCursor } : {}) },
+      }),
+      remove: () => this.client.request(this.path('/containers/webhook'), { method: 'DELETE' }),
+      deliveries: () => this.client.request(this.path('/containers/webhook/deliveries')),
+      retry: eventId => {
+        if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(eventId ?? '')) throw new MainbrellaError('invalid_event_identity');
+        return this.client.request(this.path('/containers/webhook/retry'), { method: 'POST', body: { eventId } });
+      },
+    };
     this.commands = {
+      list: () => this.client.request(this.path('/containers/executions')),
+      attach: id => new Execution(this, id),
       run: (command, { timeoutMs, signal } = {}) => this.client.request(this.path('/containers/exec'),
         { method: 'POST', body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, signal }),
-      start: async (command, { timeoutMs, idempotencyKey = crypto.randomUUID() } = {}) => {
+      start: async (command, { timeoutMs, stdin, cwd, env, pty, idempotencyKey = crypto.randomUUID() } = {}) => {
         try {
           const record = await this.client.request(this.path('/containers/executions'), { method: 'POST',
-            body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, headers: { 'Idempotency-Key': idempotencyKey } });
+            body: { ...(Array.isArray(command) ? { argv: command } : { command }), ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+              ...(pty !== undefined ? { pty } : {}), ...(stdin !== undefined ? { stdin } : {}), ...(cwd !== undefined ? { cwd } : {}), ...(env !== undefined ? { env } : {}) }, headers: { 'Idempotency-Key': idempotencyKey } });
           return new Execution(this, record.id);
         } catch (error) { error.idempotencyKey = idempotencyKey; throw error; }
       },
     };
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
+  events({ cursor, limit } = {}) {
+    return this.client.request(this.path('/containers/events', { ...(cursor !== undefined ? { cursor: String(cursor) } : {}), ...(limit !== undefined ? { limit: String(limit) } : {}) }));
+  }
+  metrics({ from, to } = {}) {
+    return this.client.request(this.path('/containers/metrics', { ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }));
+  }
   async kill() {
     const data = await this.client.request(this.path('/containers'), { method: 'DELETE' });
     if (!Array.isArray(data.containers) || data.containers.some(c => c.id === this.id && c.createdAt === this.createdAt)) {
@@ -149,16 +189,44 @@ export class Sandbox {
   }
 }
 
+export async function verifyWebhookSignature(bytes, signature, signingSecret, { nowMs = Date.now(), toleranceSeconds = 300 } = {}) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > 16 * 1024 || typeof signature !== 'string'
+    || typeof signingSecret !== 'string' || !/^mbwh_[a-f0-9]{64}$/.test(signingSecret) || !Number.isFinite(nowMs) || nowMs < 0
+    || !Number.isInteger(toleranceSeconds) || toleranceSeconds < 1 || toleranceSeconds > 900) return false;
+  const match = /^t=(\d{1,13}),v1=([a-f0-9]{64})$/.exec(signature);
+  if (!match || Math.abs(Math.floor(nowMs / 1000) - Number(match[1])) > toleranceSeconds) return false;
+  const prefix = new TextEncoder().encode(`${match[1]}.`), message = new Uint8Array(prefix.length + bytes.byteLength);
+  message.set(prefix); message.set(bytes, prefix.length);
+  const expected = Uint8Array.from(match[2].match(/.{2}/g), pair => Number.parseInt(pair, 16));
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(signingSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+  return crypto.subtle.verify('HMAC', key, expected, message);
+}
+
 export class Execution {
   constructor(sandbox, id) {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id ?? '')) throw new MainbrellaError('invalid_execution_identity');
     this.sandbox = sandbox;
     this.id = id;
     this.cursor = 0;
+    this.stdin = {
+      write: bytes => {
+        if (!(bytes instanceof Uint8Array)) throw new MainbrellaError('stdin_bytes_required');
+        return this.sandbox.client.request(this.path('/stdin'), { method: 'POST', body: bytes });
+      },
+      close: () => this.sandbox.client.request(this.path('/stdin'), { method: 'DELETE' }),
+    };
   }
   path(suffix = '', extra = {}) { return this.sandbox.path(`/containers/executions/${this.id}${suffix}`, extra); }
   get() { return this.sandbox.client.request(this.path()); }
   cancel() { return this.sandbox.client.request(this.path(), { method: 'DELETE' }); }
+  signal(signal) {
+    if (!['SIGINT', 'SIGTERM', 'SIGKILL'].includes(signal)) throw new MainbrellaError('invalid_execution_signal');
+    return this.sandbox.client.request(this.path('/signal'), { method: 'POST', body: { signal } });
+  }
+  resize(cols, rows) {
+    if (![cols, rows].every(value => Number.isInteger(value) && value >= 1 && value <= 1000)) throw new MainbrellaError('invalid_terminal_size');
+    return this.sandbox.client.request(this.path('/resize'), { method: 'POST', body: { cols, rows } });
+  }
   async wait({ timeoutMs = 15 * 60_000, pollIntervalMs = 1000 } = {}) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) throw new MainbrellaError('invalid_wait_options');
     const deadline = Date.now() + timeoutMs;

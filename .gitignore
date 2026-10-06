@@ -1,5 +1,9 @@
 # Generated with npm run docs:generate; live docs use the route schemas.
+.wrangler
 .wrangler-containers-*.json
 /openapi.json
 __pycache__/
 *.egg-info/
+/artifacts/
+/sdk/python/build/
+/sdk/python/dist/

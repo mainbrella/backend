@@ -1,5 +1,6 @@
 import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement, MACHINE_SIZES, machineSize } from './plan-policy.js';
 import { IMAGE_CATALOG } from './image-catalog.js';
+import { readFileBytes } from './file-contract.js';
 
 const KEY = 'containerAccount';
 const CREATION_PREFIX = 'creation:';
@@ -24,11 +25,15 @@ export class ContainerAccountController {
   }
   respond(data, status = 200) { return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } }); }
   async machine(state, id, method, entitlement, reservationId = state.reservations?.[id], selection) {
-    const response = await this.machineFor(state.userId, id).fetch(new Request('https://internal/container', {
+    // A versioned private start path prevents a runtime downgrade between
+    // discovery and boot from silently ignoring the internet-off selection.
+    const path = method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
+    const response = await this.machineFor(state.userId, id).fetch(new Request(`https://internal${path}`, {
       method, headers: { ...entitlementHeaders(entitlement), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
     }));
     if (!response.ok) {
+      if (path === '/container/network-v1' && response.status === 404) throw new Error('network_policy_unavailable');
       const data = await response.json().catch(() => null);
       if (data?.error === 'compute_allowance_exhausted') throw new Error('compute_allowance_exhausted');
       throw new Error(data?.error === 'container_start_canceled' ? 'container_not_running'
@@ -168,7 +173,7 @@ export class ContainerAccountController {
           this.clampLease(state, id, Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil));
           return { id, name: id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`,
             size: state.leases[id]?.size ?? 'lite', instance: machineSize(state.leases[id]?.size ?? 'lite').instance,
-            computeUnits: machineSize(state.leases[id]?.size ?? 'lite').computeUnits, status: 'starting', createdAt: new Date(reservation).toISOString(),
+            computeUnits: machineSize(state.leases[id]?.size ?? 'lite').computeUnits, internet: state.leases[id]?.internet ?? true, status: 'starting', createdAt: new Date(reservation).toISOString(),
             expiresAt: new Date(Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil, state.leases[id]?.endAt ?? Infinity)).toISOString() };
         }
         delete state.pending[id];
@@ -268,7 +273,8 @@ export class ContainerAccountController {
       const selection = request.method === 'POST' && request.body ? await request.json() : undefined;
       const size = machineSize(selection?.size ?? 'lite');
       if (!size) return this.respond({ error: 'invalid_size' }, 400);
-      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id]);
+      if (selection?.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
+      const fingerprint = JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id, ...(selection?.internet === false ? [false] : [])]);
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
         await this.pruneCreations(state);
@@ -283,7 +289,7 @@ export class ContainerAccountController {
           if (idempotencyKey) {
             const record = await this.ctx.storage.get(CREATION_PREFIX + idempotencyKey);
             if (record && record.expiresAt > this.now()) {
-              const legacyFingerprint = size.id === 'lite' ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
+              const legacyFingerprint = size.id === 'lite' && selection?.internet !== false ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
               if (record.fingerprint !== fingerprint && record.fingerprint !== legacyFingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
               return this.creationResponse(state, containers, record);
             }
@@ -305,11 +311,20 @@ export class ContainerAccountController {
             startAt + Math.floor(remaining / size.computeUnits));
           if (endAt <= startAt) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
           const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));
+          if (selection?.internet === false) {
+            try {
+              const signal = AbortSignal.timeout(5000);
+              const response = await this.machineFor(state.userId, slot).fetch(new Request('https://internal/features', { signal }));
+              const bytes = await readFileBytes(response.body, 2048, signal);
+              const features = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+              if (!response.ok || features?.protocol !== 1 || features?.internetControl !== true) throw new Error('network_policy_unavailable');
+            } catch { return this.respond({ error: 'network_policy_unavailable' }, 503); }
+          }
           state.usage[month] = (state.usage[month] ?? 0) + 1;
           state.slots.push(slot);
           const unitMs = (endAt - startAt) * size.computeUnits;
           state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
-          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs };
+          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true };
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
@@ -359,6 +374,7 @@ export class ContainerAccountController {
       if (error.message === 'image_not_available') return this.respond({ error: error.message }, 409);
       if (error.message === 'compute_allowance_exhausted') return this.respond({ error: error.message }, 429);
       if (error.message === 'subscription_required') return this.respond({ error: error.message }, 402);
+      if (error.message === 'network_policy_unavailable') return this.respond({ error: error.message }, 503);
       return this.respond({ error: 'containers_unavailable' }, 503);
     }
   }

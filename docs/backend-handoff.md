@@ -7,7 +7,7 @@ These changes live in the backend repository. Frontend work can proceed independ
 | `GET /capabilities` | Runtime feature flags and limits. Use these instead of assuming background execution, persistence, previews, or larger machines are available. |
 | `GET /status` | Website, API, auth, provisioning, SSH, image-build and billing observations, plus incidents. Each component includes freshness and probe scope. |
 | `GET /status/history` | Up to 100 observations per page, retained for 31 days. Follow both returned cursor fields when present. |
-| `/containers/executions` | Start, inspect, cancel and reconnect to managed commands. See [API.md](../API.md) for authenticated request shapes. |
+| `/containers/executions` | Start shell/argv jobs, inspect/list, write stdin, signal, resize PTYs and reconnect. See [API.md](../API.md) for authenticated request shapes. |
 | `/containers/previews` | Locally implemented issue/list/revoke for owned generations. Gate controls on `previews.supported`; the isolated gateway/domain is disabled pending configuration and qualification. URL is a bearer credential returned once. |
 | Container `imageDigest` | Optional image identity recorded at generation creation. Do not manufacture it when an older response lacks it. |
 | `sdk/javascript`, `sdk/python` | Local, unpublished SDKs with create, command, binary-file and cleanup support. Installation examples are in their READMEs. |
@@ -32,4 +32,8 @@ On a Durable Object restart, unfinished managed jobs become `interrupted`. Recov
 
 ## Further backend work
 
-The isolated probes in [runtime-feasibility.md](runtime-feasibility.md) prepare resource qualification and filesystem-snapshot experiments. Five sizes and compute entitlement enforcement are now implemented locally. Resource qualification still needs measured workloads and costs; customer persistence still needs ownership and quotas, image compatibility, and expiry behavior. Secure preview SDK/dashboard integration and isolated-domain qualification remain next; see [preview-ingress.md](preview-ingress.md). Warm pools and configurable lifecycle policies remain separate implementation work.
+The isolated probes in [runtime-feasibility.md](runtime-feasibility.md) prepare resource qualification and filesystem-snapshot experiments. Five sizes and compute entitlement enforcement are now implemented locally. Resource qualification still needs measured workloads and costs; customer persistence still needs ownership and quotas, image compatibility, and expiry behavior. Secure preview SDK/dashboard integration exists locally; isolated-domain qualification remains; see [preview-ingress.md](preview-ingress.md). Warm pools and configurable lifecycle policies remain separate implementation work.
+
+Filesystem list/stat/mkdir/remove/move/chmod and managed stdin/signals/PTY are implemented locally with schemas, SDKs and exact-generation checks. GNU timeout/stat/find/sed compatibility checks now gate image builds. Watching, guest-wide process listing and actual provider PTY transport qualification remain separate. `npm run sdk:qualify` and web `npm run docs:sync` prepare artifact and public-reference evidence; see [sdk-release.md](sdk-release.md).
+
+Workload lifecycle events and a compact dashboard History view are implemented locally. Provider analytics and signed, encrypted-key webhook delivery remain disabled pending explicit API/runtime configuration and provider qualification. See [workload-observability.md](workload-observability.md); these observations are separate from public service health and billing resource usage.

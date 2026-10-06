@@ -7,6 +7,9 @@ description: Set up Mainbrella API access, integrate account-owned Linux contain
 
 Use this workflow when asked to set up Mainbrella or execute work in its containers.
 Read [API.md](API.md) for endpoint contracts, images, quotas, and billing rules.
+The installable archive also includes an [indexed reference tree](references/index.md)
+for individual API topics and the JavaScript/Python SDK instructions. Read only
+the relevant topic when the full contract is unnecessary.
 Use `https://api.mainbrella.com` unless the user specifies another environment.
 Mainbrella uses REST for lifecycle, foreground command execution, and file transfer. No published
 SDK is available. Do not install invented SDK packages.
@@ -82,7 +85,11 @@ for file transfer up to 1 MiB. URL-encode query values. Send raw bytes with
 The parent directory must exist. Writes replace regular files atomically and reject
 symlinks/directories. New files use mode 0600. File operations share the command
 concurrency pool and have a 30-second runtime limit. Reconcile an uncertain write
-by reading before retrying. Use execution for directory creation and listing.
+by reading before retrying. Check the corresponding `files` capability flags
+before using list/stat/mkdir/remove/move/chmod; read the
+[filesystem reference](references/filesystem-metadata-and-directories.md) for
+pagination, symlinks and mutation reconciliation. Recursive deletion is explicit,
+moves never overwrite, and root cannot be mutated. Watchers remain unsupported.
 
 For an application preview, first check `previews.supported` in `/capabilities`.
 Public previews are disabled in the checked-in configuration. When enabled,
@@ -94,7 +101,8 @@ for metadata and DELETE with `previewId` to revoke. A lost creation response
 requires listing/revoking before issuing another link; a 503
 `preview_reconciliation_required` includes the ID to retry revocation.
 Cookies and account credentials are stripped from app traffic. See API.md for
-limits and framework restrictions. Existing local SDKs do not yet have helpers.
+limits and framework restrictions. Local SDKs provide `sandbox.previews.create`,
+`list` and `revoke`; they remain unpublished.
 
 ## Verify
 
@@ -143,3 +151,9 @@ One paragraph: which integration changed, what command ran, stdout, exit code,
 whether the binary file round trip passed, and whether cleanup completed. State any blocker or remaining container plainly.
 Offer one relevant next step: an owned custom image, an LLM tool that runs commands,
 or a coding agent inside a container. Do not start that additional work unasked.
+
+For managed stdin, literal argv, signals, retained-job listing and programmatic PTY resize, read [Managed execution and streaming](references/managed-execution-and-streaming.md). Gate each control on `/capabilities`; preserve exact generation/job identities. Input bytes are not retained or retried. Environment values enter the guest and are not protected secrets. Closing an output stream only detaches.
+
+The local npm SDK archive also installs `mainbrella`; read its [JavaScript reference](references/javascript-sdk.md#command-line) for lifecycle CLI usage. Creation/start require a stable explicit idempotency key. Every workload action requires both ID and generation; preserve returned identity before further actions.
+
+For generation-bound lifecycle history, provider metric evidence and signed callback delivery, read [Workload observations](references/workload-metrics-and-lifecycle-history.md) and [Lifecycle webhooks](references/lifecycle-webhooks.md). Gate controls on observability capabilities. Missing observations are unknown, not zero/healthy. Callback delivery is at least once; verify raw-body signatures, enforce freshness and deduplicate stable event IDs. Store one-time signing secrets outside the guest and logs.

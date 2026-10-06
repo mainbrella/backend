@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "Mainbrella container automation client"
 requires-python = ">=3.10"
 readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://mainbrella.com/docs/"
+Repository = "https://github.com/mainbrella/backend"
+Issues = "https://github.com/mainbrella/backend/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

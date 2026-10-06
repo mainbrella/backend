@@ -1,6 +1,12 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  NETWORK_INTERNET_CONTROL_ENABLED?: string;
+  WORKLOAD_WEBHOOKS_ENABLED?: string;
+  WEBHOOK_ALLOWED_HOSTS?: string;
+  WORKLOAD_METRICS_ENABLED?: string;
+  WORKLOAD_METRICS_ACCOUNT_ID?: string;
+  WORKLOAD_METRICS_TOKEN?: string;
   PREVIEWS_ENABLED?: string;
   PREVIEW_DOMAIN?: string;
   PREVIEW_ROUTES?: D1Database;

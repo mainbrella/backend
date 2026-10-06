@@ -33,7 +33,7 @@ function fixture() {
     if (!machines.has(key)) {
       const machineCtx = { storage: new Storage(), container: {
         images: { terminal: 'registry.test/image' }, running: false, starts: 0, destroys: 0,
-        start() { this.running = true; this.starts++; },
+        start(options) { this.running = true; this.starts++; this.startOptions = options; },
         async setInactivityTimeout() {},
         async exec() { if (this.gate) await this.gate; return { output: async () => ({ exitCode: this.exitCode ?? 0 }) }; },
         async destroy() { this.running = false; this.destroys++; },
@@ -55,6 +55,51 @@ function fixture() {
     setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, now: () => now,
     restart() { account = new ContainerAccountController(ctx, machineFor, () => now); }, alarm: () => account.alarm() };
 }
+
+test('internet-off creation is immutable, idempotent and propagates the provider switch through the trusted runtime', async () => {
+  const f = fixture(), headers = { 'Idempotency-Key': 'offline-generation' };
+  const result = await f.read('POST', undefined, headers, { internet: false }); assert.equal(result.status, 200);
+  const machine = f.machineFor('owner', 'small'); assert.equal(machine.ctx.container.startOptions.enableInternet, false);
+  assert.equal(result.data.containers[0].internet, false);
+  f.restart(); const replay = await f.read('POST', undefined, headers, { internet: false }); assert.equal(replay.status, 200);
+  assert.equal(replay.data.creation.id, result.data.creation.id); assert.equal(machine.ctx.container.starts, 1);
+  for (const selection of [{}, { internet: true }]) assert.equal((await f.read('POST', undefined, headers, selection)).status, 409);
+  const wrong = await f.read('POST', undefined, {}, { internet: 'false' }); assert.equal(wrong.status, 400);
+  assert.equal((await f.read()).data.usage.starts, 1);
+  await f.read('DELETE', 'small'); const next = await f.read('POST', undefined, {}, { internet: true });
+  assert.equal(next.status, 200); assert.equal(next.data.containers[0].internet, true); assert.equal(machine.ctx.container.startOptions.enableInternet, true);
+});
+
+test('incompatible or malformed private network features fail before quota, compute and idempotency reservation', async () => {
+  const f = fixture(), machine = f.machineFor('owner', 'small'), original = machine.fetch;
+  for (const response of [Response.json({ error: 'not_found' }, { status: 404 }), Response.json({ protocol: 1, internetControl: false }),
+    Response.json({ protocol: 2, internetControl: true }), new Response('x'.repeat(2049)), new Response('{broken')]) {
+    machine.fetch = req => new URL(req.url).pathname === '/features' ? Promise.resolve(response) : original(req);
+    const result = await f.read('POST', undefined, { 'Idempotency-Key': 'not-reserved' }, { internet: false });
+    assert.equal(result.status, 503); assert.equal(result.data.error, 'network_policy_unavailable');
+    const state = await f.ctx.storage.get('containerAccount'); assert.equal(state.usage['2026-10'] ?? 0, 0);
+    assert.equal(state.computeUsage['2026-10'] ?? 0, 0); assert.deepEqual(state.slots, []);
+    assert.equal(await f.ctx.storage.get('creation:not-reserved'), undefined); assert.equal(machine.ctx.container.starts, 0);
+  }
+  machine.fetch = original;
+  assert.equal((await f.read('POST', undefined, { 'Idempotency-Key': 'not-reserved' }, { internet: false })).status, 200);
+});
+
+test('default and explicit internet-on retain old creation fingerprints', async () => {
+  const f = fixture(); const headers = { 'Idempotency-Key': 'legacy-on' };
+  const first = await f.read('POST', undefined, headers); assert.equal(first.status, 200);
+  const key = 'creation:legacy-on', record = await f.ctx.storage.get(key);
+  record.fingerprint = JSON.stringify(['terminal', null]); await f.ctx.storage.put(key, record);
+  assert.equal((await f.read('POST', undefined, headers, { internet: true })).status, 200);
+  assert.equal((await f.read('POST', undefined, headers, { internet: false })).status, 409);
+});
+
+test('runtime downgrade after feature discovery cannot boot an internet-enabled replacement', async () => {
+  const f = fixture(), machine = f.machineFor('owner', 'small'), original = machine.fetch;
+  machine.fetch = req => new URL(req.url).pathname === '/container/network-v1' ? Promise.resolve(Response.json({ error: 'not_found' }, { status: 404 })) : original(req);
+  const result = await f.read('POST', undefined, {}, { internet: false });
+  assert.equal(result.status, 503); assert.equal(result.data.error, 'network_policy_unavailable'); assert.equal(machine.ctx.container.starts, 0);
+});
 
 test('six concurrent Builder starts reserve five distinct slots and allow parallel readiness', async () => {
   const f = fixture();

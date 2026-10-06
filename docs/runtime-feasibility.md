@@ -1,6 +1,6 @@
 # Resource and snapshot feasibility probes
 
-Production capabilities continue to advertise the existing `lite` machine and no persistence. The code in `experiments/` provides an isolated way to gather evidence before changing those contracts. No provider probe or deployment has been run as part of this work.
+The local production API implements five named sizes and no customer persistence; actual deployed values and representative workload behavior remain release gates. The code in `experiments/` provides an isolated way to gather evidence before changing those contracts. No provider probe or deployment has been run as part of this work.
 
 ## Isolated runtime experiment
 

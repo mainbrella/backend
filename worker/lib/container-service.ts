@@ -3,7 +3,7 @@ import { machineName, validContainerId } from '../../containers/container-accoun
 import { resolveEntitlement } from './entitlements';
 
 export type ContainerState = { plan: string | null; active: boolean; containers: { id: string; createdAt: string; expiresAt: string; status: string }[] };
-export type ContainerImageSelection = { imageKey?: string; imageId?: string; imageName?: string; size?: string };
+export type ContainerImageSelection = { imageKey?: string; imageId?: string; imageName?: string; size?: string; internet?: boolean };
 export async function accountResponse(env: Env, userId: string, entitlement: Entitlement, method = 'GET', id?: string | null, createdAt?: string | null, selection?: ContainerImageSelection, idempotencyKey?: string | null): Promise<Response> {
   if (!env.CONTAINER_ACCOUNT || !env.USER_CONTAINER) throw new Error('containers_unavailable');
   const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${userId}`));

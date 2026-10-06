@@ -74,7 +74,7 @@ jobs:
             timeout --kill-after=10s 300s docker build --platform linux/amd64 --pull=false --provenance=false --progress=plain -t mainbrella-custom:build context
             size=$(docker image inspect --format '{{.Size}}' mainbrella-custom:build)
             test "$size" -le 536870912 || { echo 'Image exceeds the 512 MiB limit.'; exit 1; }
-            timeout --kill-after=5s 20s docker run --rm --network none --entrypoint /bin/sh mainbrella-custom:build -ec 'command -v sleep; bash --version; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke'
+            timeout --kill-after=5s 20s docker run --rm --network none --entrypoint /bin/sh mainbrella-custom:build -ec 'command -v sleep; timeout --version; stat --version; find --version; sed --version; bash --version; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke'
             docker save -o result/image.tar mainbrella-custom:build
           } >result/build.log 2>&1
       - name: Keep bounded build output

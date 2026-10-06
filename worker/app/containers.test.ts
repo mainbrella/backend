@@ -11,6 +11,17 @@ function request(method = 'GET', origin: string | null = 'https://mainbrella.com
   });
 }
 
+test('internet-off is gated, strictly typed and forwarded only as a trusted boolean', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const call = (internet: unknown) => handleRequest(new Request('https://api.mainbrella.com/containers', { method: 'POST',
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }, body: JSON.stringify({ internet, imageKey: 'attacker', enableInternet: true }) }), f.env);
+  for (const internet of ['false', null, 0, {}]) assert.equal((await call(internet)).status, 400);
+  const disabled = await call(false); assert.equal(disabled.status, 503); assert.deepEqual(await disabled.json(), { error: 'network_policy_unavailable' });
+  assert.equal(f.accountCalls.length, 0); f.env.NETWORK_INTERNET_CONTROL_ENABLED = 'true';
+  assert.equal((await call(false)).status, 200); assert.deepEqual(await f.accountCalls.at(-1)!.request.json(), { internet: false });
+  assert.equal((await call(true)).status, 200); assert.deepEqual(await f.accountCalls.at(-1)!.request.json(), { internet: true });
+});
+
 test('container routes require a session and trusted origins for mutations', async t => {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   assert.equal((await handleRequest(request('OPTIONS', undefined, false), f.env)).status, 204);

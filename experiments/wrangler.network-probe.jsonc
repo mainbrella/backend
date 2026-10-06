@@ -1,0 +1,14 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-network-probe",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "main": "network-probe-worker.js",
+  "compatibility_date": "2026-10-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "NETWORK_PROBE_ENABLED": "false", "NETWORK_PROBE_RELAY_URL": "" },
+  "durable_objects": { "bindings": [{ "name": "NETWORK_PROBE", "class_name": "NetworkProbe" }] },
+  "exports": { "NetworkProbe": { "type": "durable-object", "storage": "sqlite" } },
+  "containers": [{ "class_name": "NetworkProbe", "scheduling_policy": "durable_object",
+    "images": { "terminal": { "dockerfile": "../containers/Dockerfile" } } }]
+}

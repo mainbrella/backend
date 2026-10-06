@@ -128,6 +128,15 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `GET /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: raw `application/octet-stream` bytes for a regular file, up to 1 MiB. ID, exact generation, and URL-encoded path are required. |
 | `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` with a raw byte body | 200: `{path, size}` after writing up to 1 MiB. An empty body creates an empty file. Requires an existing parent directory. |
+| `GET /containers/files/list?id=<id>&createdAt=<generation>&path=<directory>&limit=100&offset=0` | 200: one sorted directory page, `{path, entries, nextOffset}`. |
+| `GET /containers/files/stat?id=<id>&createdAt=<generation>&path=<path>` | 200: entry metadata; optional `followSymlinks=true` reads the target. |
+| `POST /containers/files/mkdir?id=<id>&createdAt=<generation>` with `{path, recursive?, mode?}` | 200: creates a directory; missing parents require `recursive: true`. |
+| `DELETE /containers/files/remove?id=<id>&createdAt=<generation>&path=<path>` | 200: removes a file, symlink or empty directory; nonempty directories require `recursive=true`. |
+| `POST /containers/files/move?id=<id>&createdAt=<generation>` with `{path, destination}` | 200: moves to an unused destination without replacement or nesting. |
+| `PATCH /containers/files/chmod?id=<id>&createdAt=<generation>&path=<path>` with `{mode: "0644"}` | 200: sets permission bits; leaf symlinks are rejected. |
+| `GET /containers/events?id=<id>&createdAt=<generation>` | 200: bounded lifecycle events, stable IDs and cursor pagination. |
+| `GET /containers/metrics?id=<id>&createdAt=<generation>` | 200: provider workload buckets or unobserved; disabled pending operator qualification. |
+| `/containers/webhook?id=<id>&createdAt=<generation>` | GET reads configuration; PUT configures/rotates and returns a signing secret once; DELETE removes future deliveries. Disabled pending operator configuration. |
 | `POST /containers/ssh` with `{"id":"small","createdAt":"<ISO generation>"}` | 200: `{command, expiresAt, hostname}` for the selected running container. Generation is optional. `expiresAt` is Unix milliseconds. Access lasts at most 15 minutes or until hard container expiry, whichever comes first. |
 
 Lifecycle response example (UTC timestamps and usage month):
@@ -240,8 +249,8 @@ Paths refer to the owned guest filesystem; `/workspace` is a convention, not an 
 GET reads regular files and follows symlinks inside the guest. PUT writes a temporary
 file beside the destination and atomically replaces it; it rejects directories and
 existing symlinks. New files use mode 0600; replacement preserves permission bits.
-Parent directories are not created automatically. Use HTTP execution for directory
-creation and listing until dedicated directory APIs are available.
+Parent directories are not created automatically. Use the capability-gated
+directory operations below when supported by the deployment.
 
 Runtime file operations are bounded by 30 seconds and the hard container deadline,
 share the four-command execution pool, and renew idle activity. Disconnect or stop
@@ -265,6 +274,59 @@ const download = await fetch(url, { headers });
 if (!download.ok) throw new Error(`Download failed: ${download.status}`);
 const bytes = new Uint8Array(await download.arrayBuffer());
 ```
+
+## Filesystem metadata and directories
+
+Check `/capabilities` for `files.list`, `stat`, `mkdir`, `delete`, `move` and `chmod`
+before using these additive routes. Every route requires the same exact `id` and
+`createdAt` as file transfer, with account ownership, paid lease and generation
+rechecked before launch. They share the four-operation pool, 30-second deadline
+and idle renewal. No start is consumed. Root is accepted for list/stat only.
+Paths must be well-formed UTF-8, absolute and at most 4096 bytes; empty, dot,
+parent and NUL segments are rejected. Intermediate symlinks resolve inside the
+owned guest. These are guest filesystem controls, not a `/workspace` jail.
+
+`GET /containers/files/list` accepts `path`, optional `limit` (1–1000, default 100)
+and `offset` (0–1,000,000, default 0). Entries are one level deep, sorted by UTF-8
+filename bytes; child symlinks are not followed. A directory path may itself be
+a symlink. Response: `{path, entries, nextOffset}`; null means the final page.
+Pagination rescans the directory; changes between requests may duplicate or omit
+entries. Sorting/scanning is bounded by the deadline, metadata by 1 MiB. Non-UTF-8
+names return 409 `unsupported_file_name` rather than unusable replacement paths.
+
+Each entry includes `name`, `path`, `type`, `size` in bytes, octal `mode`, numeric
+`uid`/`gid`, and `modifiedAt` with second precision. Types include `file`,
+`directory`, `symlink`, `fifo`, `socket`, `character`, `block` and `other`.
+Symlinks include `linkTarget`. `GET /containers/files/stat` returns one entry and
+inspects the link itself by default, including broken links. The optional query
+`followSymlinks=true` dereferences it; a missing target returns 404.
+
+Mutations return `{path, ok: true}`, plus `destination` for move or `mode` for chmod:
+
+- `POST /containers/files/mkdir` takes JSON `{path, recursive?: boolean, mode?: string}`.
+  Default final-directory mode is `0700`; missing parents require `recursive: true`.
+  Parent modes follow the guest umask. Recursive creation of an existing non-symlink
+  directory succeeds; existing leaf symlinks or non-directories conflict.
+- `DELETE /containers/files/remove` takes query `path` and optional `recursive=true`.
+  By default directories must be empty. A symlink is removed without deleting its
+  target. Missing paths return 404. Recursive deletion can partly complete before
+  interruption; inspect state before retrying.
+- `POST /containers/files/move` takes JSON `{path, destination}`. The destination
+  must be unused and its parent must exist. No overwrite or directory nesting.
+  Symlinks are moved as links. Moves into the source subtree are rejected. Across
+  filesystems, interruption can leave both source and destination; reconcile first.
+- `PATCH /containers/files/chmod` takes query `path` and JSON `{mode: "0644"}`.
+  Modes must be four octal characters from `0000` to `0777`; no owner changes,
+  recursive chmod or setting special bits. Leaf symlinks are rejected.
+
+Cookie mutations require a trusted Origin; Bearer automation may omit it. Unknown
+and duplicate parameters and unexpected JSON fields are rejected. Operations
+require bash, GNU coreutils, findutils and sed in the guest. A lost mutation
+response can hide completed or partial effects; SDK helpers never retry them.
+Documented errors include 404 `file_not_found`, 403 `file_access_denied`, 409
+`not_directory`, `file_exists`, `directory_not_empty`, `symlink_not_allowed` or
+`container_not_running`, 413 `directory_too_large`, 429 `execution_limit`, and
+503 `files_unavailable`. Watchers and programmatic PTY remain separate work.
 
 ## Browser billing endpoints
 
@@ -358,7 +420,7 @@ Each account may redeem one trial ever. Retrying the same valid redemption retur
 
 `GET /capabilities` is public and accepts no query parameters. Its `apiVersion`
 identifies the contract. Execution/file limits come from the runtime's shared
-constants. Unsupported persistence, filesystem-directory and network
+constants. Unsupported persistence, filesystem watchers and network
 policy features are explicit. `previews.supported` requires explicit enablement,
 an isolated preview domain, a routing database and the runtime binding. It remains
 false in the checked-in configuration. Preview links use opaque bearer tokens,
@@ -439,19 +501,19 @@ Use `POST /containers/executions?id=<id>&createdAt=<generation>` with a required
 `Idempotency-Key` and `{"command":"<shell command>","timeoutMs":30000}`. It returns
 202 with an execution record containing `id`, `createdAt`, timestamps, `status`,
 `retainUntil` (Unix milliseconds), `cursor`, `outputBytes`, `exitCode`, `timedOut`
-and `outputTruncated`. The command and creation key are not returned.
+and `outputTruncated`. New jobs also report `stdinEnabled`, `stdinClosed`, `stdinBytes` and optional `pty` dimensions. Commands, argv, environment values and creation keys are not returned.
 
-Matching key/command/timeout retries within the same generation return the retained
+Matching key and all creation-option retries within the same generation return the retained
 execution. Changed options return 409 `idempotency_key_conflict`. Retention lasts
 one hour from admission, with 32 records per container; when full, a new job returns
 429 `execution_history_limit`. After retention expires, a key can launch new work.
 Preserve the key and never retry an old operation beyond its retention window.
 
-Managed commands run `/bin/sh -lc`, default to 30 seconds, allow up to 15 minutes,
+Shell commands run `/bin/sh -lc`; alternatively pass `{"argv":["executable","literal argument"]}` without shell expansion. Supply exactly one of command/argv. Optional `cwd` is an absolute path without dot/parent segments; optional `env` has up to 64 POSIX variable names, 4096 UTF-8 bytes per value and 16 KiB of JSON. The provider inherits only PATH. Values are sent to the guest and may appear in its output; they are not a secrets vault. Jobs default to 30 seconds, allow up to 15 minutes,
 and remain bounded by the hard container deadline. They share four active
 operations with foreground commands and files. Active jobs renew idle activity.
 Output stops at 1 MiB combined stdout/stderr or the bounded output-event count.
-Client disconnect does not cancel the job.
+Client disconnect does not cancel the job. Images require GNU timeout. Cancellation and hard timeouts target the operation process group; deliberately detached processes remain bounded by the machine lease. Signal delivery is a request, not proof that every guest child has exited.
 
 - `GET /containers/executions/<execution-id>?id=<id>&createdAt=<generation>` returns
   current state plus retained `stdout` and `stderr`.
@@ -461,6 +523,14 @@ Client disconnect does not cancel the job.
   streams SSE output. stdout/stderr events carry `{type,sequence,data}` and an SSE
   `id` equal to `sequence`. Resume with the last received sequence as `cursor`.
   A cursor ahead of retained output returns 400 `invalid_cursor`.
+
+`GET /containers/executions?id=<id>&createdAt=<generation>` lists up to 32 retained managed-job summaries for that exact generation, including terminal records. It is not a guest-wide OS process table. `commands.attach(id)` reconnects SDK controls and output to a known retained job; attaching does not start or replay it.
+
+Start with `stdin:true` to accept raw input; otherwise stdin closes immediately. `POST /containers/executions/<execution-id>/stdin?...` sends `application/octet-stream`, up to 64 KiB per request, 1 MiB accepted per job and 256 KiB pending. Writes are ordered and respect pipe backpressure. Input is not retained or replayed. Ambiguous accepted bytes remain counted. A 30-second response bound or disconnect does not undo an accepted write; reconcile application state before sending again. `DELETE` at that stdin URL closes input after accepted writes. For a plain pipe this sends EOF; PTY closure can hang up the terminal. Closing input is not a cancellation request.
+
+`POST /containers/executions/<execution-id>/signal?...` accepts only `{"signal":"SIGINT"}`, SIGTERM or SIGKILL. Signals are bound to retained job identity; no arbitrary guest PID is accepted. SIGKILL requests cancellation; SIGINT/SIGTERM can be handled or ignored. Inspect retained state to confirm completion. Cleanup signal/input-close operations remain available during billing outages. Sending bytes requires paid access and the exact live generation.
+
+Start a programmatic terminal with `stdin:true` and `pty:{"cols":80,"rows":24}`. Check `execution.programmaticPty` and `ptyResize` first. Output combines stdout/stderr on stdout and follows terminal line discipline, including CRLF and possible input echo. `POST /containers/executions/<execution-id>/resize?...` accepts `{"cols":132,"rows":40}` with dimensions 1–1000 and requires the exact live paid generation. Resize does not change the original idempotency identity. Disconnect/reconnect use the same SSE cursor flow; a stream disconnect only detaches. Closing a PTY input pipe is not equivalent to a shell's Ctrl-D key. Send application-appropriate bytes or an explicit exit command, then inspect state. Arbitrary SSH/guest processes cannot be attached through this API. Filesystem watchers and guest-wide process listing remain unsupported.
 
 SSE connections emit heartbeat comments, rotate after 30 seconds, and end with a
 `status` event containing execution metadata. Reconnect after a nonterminal status;
@@ -475,6 +545,39 @@ runtime restart, unfinished jobs become `interrupted` and their matching contain
 generation stops to revoke orphan processes. This can terminate other work on that
 generation. Jobs are never replayed automatically. Filesystem/process persistence
 across stop or restart is not supported.
+
+## Outbound internet selection
+
+Creation accepts optional `internet: boolean`, default true. `internet:false` requires `networking.internetControl` capability and explicit API `NETWORK_INTERNET_CONTROL_ENABLED=true`; the flag is unset by default pending live qualification. String values, null and numeric coercion are rejected. The selection is immutable for a generation, returned as `internet` in container status, and included in creation idempotency. Default/explicit true preserve legacy fingerprints; reusing the key with a different effective policy returns 409.
+
+An offline start checks the selected private runtime's inert versioned feature contract before reserving quota or compute. It uses a new private network-start path so an older runtime cannot silently ignore the restriction, even if runtime code changes after discovery. Missing/incompatible support returns 503 `network_policy_unavailable`. A failure after reservation can retain a charged pending creation; keep the key and reconcile using that same identity. Both SDKs check public capability discovery before requesting offline creation and require the returned generation's policy to confirm false. A known policy-unavailable response is not automatically retried.
+
+The native provider `enableInternet:false` switch blocks outbound internet without configuring any allowlist/interceptor. Local tests verify the exact provider argument and fail-closed version handling; provider DNS, IPv4/IPv6, HTTP/HTTPS, direct-IP/other-port bypass and SSH/preview compatibility remain live qualification gates. HTTP command, file and PTY transports access the existing guest independently. Inbound authenticated access is a separate feature. Customer CIDR/domain rules, live policy updates, proxy routing and mediated secrets are not implemented by this switch.
+
+## Workload metrics and lifecycle history
+
+These observations describe one owned generation. They are separate from account compute reservations, billing estimates and public service health. Read `observability` capability flags first.
+
+`GET /containers/events?id=<id>&createdAt=<generation>&cursor=0&limit=100` returns `{events,nextCursor,hasMore,historyTruncated,retainForMs}`. Each event includes a stable UUID `id`, increasing slot-wide `sequence`, exact `createdAt`, `occurredAt`, `type`, machine `size`, optional bounded `reason` and `retainUntil`. Types are starting, started, failed and stopped. Started means readiness completed; starting alone does not. Deduplicate by ID and order by sequence. Pass nextCursor to read the next page. Retention is seven days, bounded to 256 events per machine slot across generations. A missing starting event sets historyTruncated. Unknown/expired generations return 404. Reads remain available after stop and during billing outages; they do not renew activity or execute in the guest. Natural-stop timestamps record when the control plane observed the stop. Provider error text, credentials and command/input values are excluded.
+
+`GET /containers/metrics?id=<id>&createdAt=<generation>&from=<ISO>&to=<ISO>` reads provider workload analytics. It stays disabled until operator configuration and live schema/label/unit qualification. The default range is the last hour, limited to the generation and seven-day retention; explicit ranges are at most 24 hours. One-minute buckets cover a half-open [from,to) interval; the first bucket can begin before an unaligned from. Each bucket includes samples, cpuSeconds, memoryPeakBytes and diskUsagePeak. The last field preserves the provider's diskUsage value; its unit remains unqualified and must not be presented as bytes or billing usage. Missing numeric fields are null. Empty/legacy observations return state unobserved, never zero/healthy. Data may arrive late or be sampled. An opaque generation label isolates provider queries and remains private. No analytics credential enters the guest.
+
+SDKs expose `sandbox.events({cursor,limit})` and `sandbox.metrics({from,to})` in JavaScript; Python uses `sandbox.events(cursor=…,limit=…)` and `sandbox.metrics(from_time=…,to_time=…)`. The local lifecycle CLI has `events` and `metrics` commands with explicit ID and generation.
+
+## Lifecycle webhooks
+
+Check `observability.webhooks`. This locally implemented feature remains disabled until the API and private runtime are configured and qualified. One destination belongs to one exact generation. Supported destinations are HTTPS URLs on operator-controlled trusted relay hosts. Arbitrary customer domains and DNS, IP literals, custom ports, embedded credentials and redirects are unsupported; this is not a general outbound URL proxy.
+
+- `PUT /containers/webhook?id=<id>&createdAt=<generation>` accepts `{url,replayFromCursor?}` (4096-byte JSON limit) for a live paid generation. It rotates configuration and returns `{webhook,signingSecret}` once. Keep the signing secret outside logs and guest files/environment. Every PUT rotates the key and clears old attempts; a lost response requires GET reconciliation and an explicit fresh rotation if the secret is unavailable. SDKs never retry it automatically. Without replayFromCursor, only future events queue; with it, retained generation events after that cursor queue.
+- `GET` at that URL returns `{webhook:<metadata-or-null>}`, never the signing secret. `DELETE` removes queued attempts and aborts in-flight transport. A receiver may already have accepted an in-flight request; removal cannot undo delivery.
+- `GET /containers/webhook/deliveries?...` returns bounded `{deliveries:[…]}` with event ID/sequence, pending/sending/delivered/exhausted state, attempts in the current retry cycle, manualRetries, nextAt, retainUntil, optional lastAttemptAt and HTTP status. Payload, receiver response bodies and exception text are excluded.
+- `POST /containers/webhook/retry?...` accepts `{eventId}` for an exhausted retained delivery. It starts a new retry cycle, at most three manual retries. Reads, removal and retry remain available during billing outages and after stop; they cannot act on a replacement generation.
+
+Delivery is at least once and may arrive out of order. Up to eight automatic attempts use delays of 5 seconds, 30 seconds, 2 minutes, 10 minutes, 1 hour, 6 hours and 24 hours. Any 2xx confirms delivery; each response is bounded by 10 seconds. Runtime recovery may repeat an ambiguous attempt. Consumers deduplicate by stable event ID and order by sequence. Configuration lasts seven days after setup. Delivery retention ends with the configuration or event, whichever expires first. Each slot retains at most 32 configurations and 256 deliveries.
+
+POST payloads are `{id,sequence,type,occurredAt,container:{id,createdAt,size},reason?}`. Headers include `Mainbrella-Event-Id` and `Mainbrella-Signature: t=<Unix-seconds>,v1=<hex-HMAC-SHA256>`. The signature covers the exact UTF-8 bytes of `<timestamp>.<raw-body>` using the returned signingSecret string as the HMAC key. Verify the raw body before JSON parsing, check timestamp freshness, then deduplicate event IDs. JS exports `verifyWebhookSignature(bytes,header,secret)`; Python exports `verify_webhook_signature(body,header,secret)`. Both default to a five-minute freshness window and compare signatures through standard cryptographic primitives.
+
+JavaScript `sandbox.webhook.configure(url,{replayFromCursor})`, `.get()`, `.remove()`, `.deliveries()` and `.retry(eventId)` expose the contract. Python equivalents use `replay_from_cursor` and `event_id`. Signing keys are encrypted in private runtime storage with an operator-managed key; destination URL paths/query values remain owner-visible configuration. Key rotation requires reconfiguring retained webhook destinations. Operators should read [the observability runbook](https://github.com/mainbrella/backend/blob/main/docs/workload-observability.md) before enabling delivery. OTLP export remains unsupported.
 
 ## Public operational status
 

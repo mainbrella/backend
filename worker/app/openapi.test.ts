@@ -7,8 +7,13 @@ const endpointMethods: Record<string, string[]> = {
   '/capabilities': ['get'],
   '/status': ['get'], '/status/history': ['get'],
   '/internal/status/observations': ['post'], '/internal/status/incidents': ['post'],
-  '/containers/executions': ['post'],
+  '/containers/executions': ['get', 'post'],
+  '/containers/executions/{executionId}/stdin': ['post', 'delete'],
+  '/containers/executions/{executionId}/signal': ['post'],
+  '/containers/executions/{executionId}/resize': ['post'],
   '/containers/previews': ['get', 'post', 'delete'],
+  '/containers/events': ['get'], '/containers/metrics': ['get'],
+  '/containers/webhook': ['get', 'put', 'delete'], '/containers/webhook/deliveries': ['get'], '/containers/webhook/retry': ['post'],
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
@@ -24,6 +29,9 @@ const endpointMethods: Record<string, string[]> = {
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
   "/containers/files": ["get", "put"],
+  '/containers/files/list': ['get'], '/containers/files/stat': ['get'],
+  '/containers/files/mkdir': ['post'], '/containers/files/remove': ['delete'],
+  '/containers/files/move': ['post'], '/containers/files/chmod': ['patch'],
   "/ssh/validate": ["post"], "/ssh/connect": ["get"],
   "/images": ["get", "post"], "/images/{id}": ["get", "delete"], "/images/{id}/logs": ["get"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
@@ -36,6 +44,19 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('filesystem schemas expose exact generation, bounded pagination, permissions and mutation semantics', async () => {
+  const { paths } = await document();
+  const list = paths['/containers/files/list'].get;
+  assert.equal(list.operationId, 'listContainerDirectory');
+  for (const name of ['id', 'createdAt', 'path']) assert.ok(list.parameters.some((p: any) => p.name === name && p.required));
+  assert.equal(list.parameters.find((p: any) => p.name === 'limit').schema.maximum, 1000);
+  assert.deepEqual(list.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+  assert.match(paths['/containers/files/move'].post.description, /no replacement/);
+  assert.match(paths['/containers/files/remove'].delete.description, /partially complete/);
+  assert.equal(paths['/containers/files/chmod'].patch.requestBody.content['application/json'].schema.properties.mode.pattern, '^0[0-7]{3}$');
+  assert.ok(paths['/containers/files/stat'].get.parameters.some((p: any) => p.name === 'followSymlinks'));
+});
 
 test("OpenAPI 3.1 documents every current endpoint with unique operation IDs and valid security references", async () => {
   const schema = await document();

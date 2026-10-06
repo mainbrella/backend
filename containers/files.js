@@ -1,5 +1,6 @@
 import { MAX_EXECUTIONS } from './command-contract.js';
 import { FILE_TIMEOUT_MS, MAX_FILE_BYTES, readFileBytes, validFilePath } from './file-contract.js';
+import { startOperationProcess } from './process-supervisor.js';
 
 // Paths are positional arguments, never interpolated shell code. Reads follow
 // symlinks inside the owned guest; writes replace regular files and reject links.
@@ -49,8 +50,8 @@ export async function accessFile(controller, request, active, timers = globalThi
     reason = value;
     if (!exited) {
       abort.abort();
-      try { process?.kill(9); } catch { /* already exited */ }
     }
+    try { process?.kill(9); } catch { /* already exited */ }
     rejectStopped(new Error(value));
   };
   const session = { close: () => stop('container_not_running') };
@@ -62,9 +63,9 @@ export async function accessFile(controller, request, active, timers = globalThi
   let writer;
   try {
     if (request.signal.aborted) disconnected();
-    const starting = controller.startTerminalProcess(createdAt, expiresAt,
+    const starting = startOperationProcess(controller, createdAt, expiresAt,
       ['/bin/sh', '-c', request.method === 'GET' ? readScript : writeScript, 'mainbrella-files', path],
-      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal });
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal }, Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now()));
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
     const exit = process.exitCode.then(code => { exited = true; return code; });
@@ -102,5 +103,6 @@ export async function accessFile(controller, request, active, timers = globalThi
       try { process?.kill(9); } catch { /* already exited */ }
     }
     if (writer) void writer.abort().catch(() => {});
+    await process?.dispose?.();
   }
 }

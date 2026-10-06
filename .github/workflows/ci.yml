@@ -9,6 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  public-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: backend
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mainbrella/web
+          path: web
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/sync-agent-docs.mjs --check
+        working-directory: web
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -36,3 +54,24 @@ jobs:
           gh release download v1.7.12 --repo rhysd/actionlint --pattern '*linux_amd64.tar.gz' --dir "$RUNNER_TEMP/actionlint"
           tar -xzf "$RUNNER_TEMP"/actionlint/*linux_amd64.tar.gz -C "$RUNNER_TEMP/actionlint"
           "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes=
+  sdk-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: npm ci
+      - run: npm run sdk:qualify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-local-qualification
+          path: artifacts/sdk/
+          retention-days: 7

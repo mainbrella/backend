@@ -17,6 +17,7 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
   assert.equal(value.images.customBuilds, false);
   assert.equal(value.persistence.filesystemAfterStop, false);
   assert.equal(value.networking.regionSelection, false);
+  assert.equal(value.networking.internetControl, false);
   assert.equal(value.containers.accountLimitsPath, '/containers');
 });
 

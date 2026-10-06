@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleRequest } from './router';
 import { executionSchema } from './openapi-executions';
+import { MAX_STDIN_CHUNK_BYTES } from '../../containers/execution-contract.js';
 import { paidContainerFixture, GENERATION_ONE, GENERATION_TWO, SESSION_ONE, USER_ONE } from './paid-container-test-helpers';
 
 const executionId = 'd688d42a-25ef-4c13-9b28-21a0fde6e163';
@@ -46,8 +47,75 @@ test('managed execution validates authentication, input, lease and endpoint meth
   assert.equal((await handleRequest(request('', 'POST', '{"command":"x","timeoutMs":900001}'), f.env)).status, 400);
   assert.equal((await handleRequest(request('', 'POST', '{"command":"x"}', {}, `${query}&id=c1`), f.env)).status, 400);
   assert.equal((await handleRequest(request(`/${executionId}/events`, 'GET', undefined, {}, `${query}&cursor=-1`), f.env)).status, 400);
-  assert.equal((await handleRequest(request('', 'GET'), f.env)).status, 405);
+  assert.equal((await handleRequest(request('', 'PUT'), f.env)).status, 405);
   f.containers.get(USER_ONE)![0].createdAt = GENERATION_TWO;
   assert.equal((await handleRequest(request('', 'POST', '{"command":"x"}'), f.env)).status, 409);
   assert.equal(f.machineCalls.length, 0);
+});
+
+test('managed input/list/signal routes preserve owned identities, input bytes and cleanup during billing outages', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const original = f.env.USER_CONTAINER, calls: Request[] = [];
+  f.env.USER_CONTAINER = { ...original, get(id: DurableObjectId) {
+    original.get(id);
+    return { async fetch(req: Request) {
+      calls.push(req);
+      const path = new URL(req.url).pathname;
+      if (path.endsWith('/stdin') && req.method === 'POST') {
+        assert.deepEqual(new Uint8Array(await req.arrayBuffer()), new Uint8Array([0, 128, 255]));
+        return Response.json({ bytes: 3, stdinClosed: false });
+      }
+      if (path.endsWith('/stdin')) return Response.json({ bytes: 0, stdinClosed: true });
+      if (path.endsWith('/signal')) { assert.deepEqual(await req.json(), { signal: 'SIGINT' }); return Response.json(record, { status: 202 }); }
+      return Response.json({ executions: [record] });
+    } };
+  } } as unknown as DurableObjectNamespace;
+  const write = new Request(request(`/${executionId}/stdin`, 'POST', 'placeholder'), { body: new Uint8Array([0, 128, 255]) });
+  assert.equal((await handleRequest(write, f.env)).status, 200);
+  assert.equal(calls[0].headers.get('x-exec-created-at'), GENERATION_ONE);
+  assert.equal(calls[0].headers.get('content-type'), 'application/octet-stream');
+  assert.ok(calls[0].headers.get('x-exec-expires-at'));
+  assert.equal(calls[0].headers.get('cookie'), null);
+  f.setBillingMode('failure');
+  assert.equal((await handleRequest(request('', 'GET'), f.env)).status, 200);
+  assert.equal((await handleRequest(request(`/${executionId}/stdin`, 'DELETE'), f.env)).status, 200);
+  assert.equal((await handleRequest(request(`/${executionId}/signal`, 'POST', '{"signal":"SIGINT"}'), f.env)).status, 202);
+  assert.equal((await handleRequest(new Request(write, { body: new Uint8Array([0, 128, 255]) }), f.env)).status, 503);
+  assert.ok(f.machineNames.every(name => name === 'user:account-one'));
+  assert.ok(calls.slice(1).every(call => call.headers.get('x-exec-expires-at') === null));
+});
+
+test('managed input/signal validation rejects oversized bytes, arbitrary PID targets and stale writes', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const tooLarge = new Request(request(`/${executionId}/stdin`, 'POST', 'placeholder'), { body: new Uint8Array(MAX_STDIN_CHUNK_BYTES + 1) });
+  assert.equal((await handleRequest(tooLarge, f.env)).status, 413);
+  for (const body of ['{"signal":"SIGSTOP"}', '{"signal":"SIGKILL","pid":1}', 'null', 'true']) {
+    assert.equal((await handleRequest(request(`/${executionId}/signal`, 'POST', body), f.env)).status, 400);
+  }
+  assert.equal((await handleRequest(request(`/${executionId}/signal`, 'POST', '{"signal":"SIGINT"}', { Origin: '' }), f.env)).status, 403);
+  assert.equal((await handleRequest(request(`/${executionId}/stdin`, 'GET'), f.env)).status, 405);
+  f.containers.get(USER_ONE)![0].createdAt = GENERATION_TWO;
+  assert.equal((await handleRequest(request(`/${executionId}/stdin`, 'POST', 'input'), f.env)).status, 409);
+  assert.equal(f.machineCalls.length, 0);
+});
+
+test('PTY resize validates dimensions, running paid generation and private forwarding', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const calls: Request[] = [];
+  f.env.USER_CONTAINER = { idFromName(name: string) { f.machineNames.push(name); return name; }, get() { return {
+    async fetch(req: Request) { calls.push(req); assert.deepEqual(await req.json(), { cols: 132, rows: 40 }); return Response.json({ id: executionId, pty: { cols: 132, rows: 40 } }); },
+  }; } } as unknown as DurableObjectNamespace;
+  const resize = () => request(`/${executionId}/resize`, 'POST', '{"cols":132,"rows":40}');
+  assert.equal((await handleRequest(resize(), f.env)).status, 200);
+  assert.equal(calls[0].headers.get('x-exec-created-at'), GENERATION_ONE);
+  assert.ok(calls[0].headers.get('x-exec-expires-at'));
+  assert.equal(calls[0].headers.get('cookie'), null);
+  for (const body of ['{"cols":0,"rows":24}', '{"cols":80,"rows":1001}', '{"cols":80}', '{"cols":80,"rows":24,"pid":1}', 'true']) {
+    assert.equal((await handleRequest(request(`/${executionId}/resize`, 'POST', body), f.env)).status, 400);
+  }
+  f.containers.get(USER_ONE)![0].createdAt = GENERATION_TWO;
+  assert.equal((await handleRequest(resize(), f.env)).status, 409);
+  assert.equal(calls.length, 1);
+  f.containers.get(USER_ONE)![0].createdAt = GENERATION_ONE; f.setBillingMode('failure');
+  assert.equal((await handleRequest(resize(), f.env)).status, 503);
 });

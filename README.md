@@ -365,15 +365,15 @@ The runtime bounds each operation by 30 seconds and the hard deadline.
 
 No database migration or image rebuild is needed for catalog/base images, which
 already include `/bin/sh` and GNU coreutils. Deploy the container Worker, then API,
-then web. The doctor checks that both file routes are advertised, and verification
-now checks a binary write/read as well as command execution and generation cleanup.
-Until the API rollout, the new doctor reports missing file routes.
+then web. The doctor checks both file routes, and verification checks binary transfer, command execution and generation cleanup.
 
 `node --test containers/files.test.mjs` runs real local filesystem/process checks.
 Write tests require GNU coreutils on PATH, as provided by the Linux catalog images;
 on macOS, prepend an available coreutils `libexec/gnubin` directory to PATH. Without
 it those tests explicitly skip. `npx tsx --test worker/app/files.test.ts` verifies
 public authentication, account ownership, error handling and binary forwarding.
+
+Directory metadata/listing and mkdir/remove/move/chmod use the separate `/containers/files/*` routes. They share authorization, the generation-bound operation pool and bounded execution. Images must include GNU stat/find/sed/coreutils. Filesystem watchers remain unsupported. See API.md for symlink, pagination and partial-mutation semantics.
 
 ## Agent API and local SDKs
 
@@ -392,7 +392,9 @@ generation; it never replays a command. See [API.md](API.md) for the full contra
 The dependency-free packages in [sdk/javascript](sdk/javascript/README.md) and
 [sdk/python](sdk/python/README.md) install locally. They are not published to npm
 or PyPI. Both support creation, generation-specific cleanup, binary files,
-foreground commands, managed execution, cancellation and streamed output.
+foreground commands, filesystem metadata/mutations, managed argv/cwd/env, stdin, signals, PTY resize, retained-job listing and streamed reconnect. Commands and environment values are not retained. Guest-wide OS process listing is not implemented.
+
+`npm run sdk:qualify` creates versioned archives, clean-installs them and writes hashes and qualification evidence. `npm run docs:package` creates the installable skill/reference bundle. See [the release runbook](docs/sdk-release.md); registry publication and paid deployed qualification remain separate gates. The backend API.md/SKILL.md and SDK READMEs are authoritative; run web `npm run docs:sync` after changing them. Both repositories check public contract agreement in CI.
 
 Protected application previews now have a private runtime, isolated gateway and
 authenticated `/containers/previews` API, with hash-only routing in a separate
@@ -400,13 +402,17 @@ database. They remain disabled until an isolated domain/database is configured
 and qualified. `npm run check:previews` bundles the disabled gateway without
 deployment. The default deploy command does not publish it. See
 [the ingress handoff](docs/preview-ingress.md) for configuration, sharing semantics,
-failure reconciliation and live release gates. SDK/dashboard helpers remain next.
+failure reconciliation and live release gates. SDK helpers and capability-gated dashboard controls exist locally; isolated-domain qualification remains.
 
 `npm run verify:agent` exercises create, execution, files, streaming and cleanup,
 consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs
 bounded foreground samples and saves raw results with their methodology. Both
 require a provisioned `MAINBRELLA_API_KEY` and pass account/capability checks before
 launching. They preserve all pre-existing containers.
+
+## Workload observability
+
+Generation-bound `/containers/events` reads a bounded seven-day lifecycle journal. Runtime monitor/status observations record natural stops without guest exec or idle renewal. `/containers/metrics` uses opaque provider labels; `/containers/webhook` configures signed callback delivery with encrypted signing keys, durable retries, deduplication identities and bounded retention. Metrics and webhooks are disabled until explicitly configured and qualified. Arbitrary customer webhook destinations remain unsupported; only trusted operator-controlled HTTPS relays are allowed. SDKs expose these operations and signature verification. See [the observability runbook](docs/workload-observability.md).
 
 ## Operational status
 

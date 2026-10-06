@@ -11,10 +11,13 @@ import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
 import { handleCommandRequest } from "./commands";
 import { handleFileRequest } from "./files";
+import { handleFilesystemRequest } from './filesystem';
 import { handleCapabilitiesRequest } from './capabilities';
 import { handleExecutionRequest } from './executions';
 import { handlePreviewRequest } from './previews';
 import { handleStatusRequest } from './status';
+import { handleObservationRequest } from './observations';
+import { handleWebhookRequest } from './webhooks';
 
 async function handleLegacyRequest(
   request: Request,
@@ -24,6 +27,8 @@ async function handleLegacyRequest(
   const url = new URL(request.url);
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
+  if (['/containers/events', '/containers/metrics'].includes(url.pathname)) return handleObservationRequest(request, env);
+  if (url.pathname === '/containers/webhook' || url.pathname.startsWith('/containers/webhook/')) return handleWebhookRequest(request, env);
   if (url.pathname === '/containers/previews') return handlePreviewRequest(request, env);
   if (['/status', '/status/history', '/internal/status/observations', '/internal/status/incidents'].includes(url.pathname)) return handleStatusRequest(request, env);
   if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
@@ -36,6 +41,7 @@ async function handleLegacyRequest(
   if (url.pathname === "/containers/terminal") return handleTerminalRequest(request, env);
   if (url.pathname === "/containers/exec") return handleCommandRequest(request, env);
   if (url.pathname === "/containers/files") return handleFileRequest(request, env);
+  if (url.pathname.startsWith('/containers/files/')) return handleFilesystemRequest(request, env);
 
   if (url.pathname === "/containers/ssh" || url.pathname.startsWith("/ssh/")) {
     return handleSSHRequest(request, env);

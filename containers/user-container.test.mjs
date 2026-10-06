@@ -54,6 +54,18 @@ function fixture(initialTime = Date.UTC(2026, 9, 5, 12), timers = globalThis) {
   return { ctx, controller, request, read, setTime, now: () => now };
 }
 
+test('network feature discovery is inert and malformed internet policies never launch', async () => {
+  const f = fixture();
+  const features = await f.controller.fetch(new Request('https://internal/features'));
+  assert.deepEqual(await features.json(), { protocol: 1, internetControl: true });
+  assert.equal(f.ctx.storage.values.size, 0); assert.equal(f.ctx.container.starts, 0);
+  for (const internet of ['false', null, 0, {}, []]) {
+    const response = await f.controller.fetch(new Request('https://internal/container', { method: 'POST',
+      headers: { 'x-mainbrella-plan': 'builder', 'x-mainbrella-paid-until': String(f.now() + 86400_000) }, body: JSON.stringify({ internet }) }));
+    assert.equal(response.status, 400); assert.equal(f.ctx.container.starts, 0); assert.equal(f.ctx.storage.values.has('builderUsage'), false);
+  }
+});
+
 test("concurrent POSTs reject a second container and reserve only one monthly start", async () => {
   const f = fixture();
   let releaseReadiness;

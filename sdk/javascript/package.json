@@ -3,8 +3,34 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Mainbrella container automation client",
-  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } },
-  "files": ["index.js", "index.d.ts", "README.md"],
-  "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test *.test.mjs" }
+  "license": "GPL-3.0-only",
+  "homepage": "https://mainbrella.com/docs/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mainbrella/backend.git",
+    "directory": "sdk/javascript"
+  },
+  "bugs": "https://github.com/mainbrella/backend/issues",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE",
+    "cli.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "bin": {
+    "mainbrella": "cli.mjs"
+  }
 }

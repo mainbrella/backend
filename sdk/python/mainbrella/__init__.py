@@ -1,5 +1,7 @@
 """Synchronous Mainbrella client. No third-party runtime dependencies."""
 import json
+import hashlib
+import hmac
 import re
 import time
 import uuid
@@ -7,6 +9,20 @@ from datetime import datetime
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+def verify_webhook_signature(body, signature, signing_secret, now=None, tolerance=300):
+    now = time.time() if now is None else now
+    if (not isinstance(body, bytes) or len(body) > 16 * 1024 or not isinstance(signature, str)
+            or not isinstance(signing_secret, str) or not re.fullmatch(r"mbwh_[a-f0-9]{64}", signing_secret)
+            or type(tolerance) is not int or not 1 <= tolerance <= 900 or type(now) not in (int, float)
+            or not 0 <= now < float("inf")):
+        return False
+    match = re.fullmatch(r"t=([0-9]{1,13}),v1=([a-f0-9]{64})", signature)
+    if not match or abs(int(now) - int(match[1])) > tolerance:
+        return False
+    expected = hmac.new(signing_secret.encode(), match[1].encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, match[2])
 
 
 class MainbrellaError(Exception):
@@ -93,7 +109,7 @@ class Mainbrella:
     def connect(self, container_id, created_at):
         return Sandbox(self, container_id, created_at)
 
-    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None):
+    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None, internet=None):
         key = idempotency_key or str(uuid.uuid4())
         if catalog_id and image_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or wait_timeout <= 0 or poll_interval <= 0:
             raise MainbrellaError("invalid_creation_options")
@@ -102,6 +118,12 @@ class Mainbrella:
             if size not in ('lite', 'small', 'medium', 'large', 'xl'):
                 raise MainbrellaError('invalid_creation_options')
             body['size'] = size
+        if internet is not None:
+            if not isinstance(internet, bool):
+                raise MainbrellaError('invalid_creation_options')
+            if internet is False and self.capabilities().get('networking', {}).get('internetControl') is not True:
+                raise MainbrellaError('network_policy_unavailable', 503, idempotency_key=key)
+            body['internet'] = internet
         deadline = time.monotonic() + wait_timeout
         while time.monotonic() < deadline:
             try:
@@ -115,13 +137,16 @@ class Mainbrella:
                                      and c.get("createdAt") == creation.get("createdAt") and c.get("status") == "running"), None)
                     if not selected:
                         raise MainbrellaError("invalid_creation_response")
+                    if internet is False and selected.get('internet') is not False:
+                        raise MainbrellaError('network_policy_unconfirmed', 409)
                     sandbox = self.connect(selected["id"], selected["createdAt"])
                     sandbox.creation_id = creation["id"]
                     sandbox.image_digest = selected.get("imageDigest")
                     sandbox.instance = selected.get("instance")
+                    sandbox.internet = selected.get('internet')
                     return sandbox
             except MainbrellaError as error:
-                if error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
+                if error.code == 'network_policy_unavailable' or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
                     error.idempotency_key = key
                     raise
             time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
@@ -139,6 +164,36 @@ class _Files:
         if not isinstance(data, bytes):
             raise MainbrellaError("file_bytes_required")
         return self.sandbox.client.request(self.sandbox._path("/containers/files", path=path), "PUT", data)
+
+    def list(self, path, limit=None, offset=None):
+        extra = {"path": path}
+        if limit is not None:
+            extra["limit"] = limit
+        if offset is not None:
+            extra["offset"] = offset
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/list", **extra))
+
+    def stat(self, path, follow_symlinks=False):
+        if type(follow_symlinks) is not bool:
+            raise MainbrellaError("invalid_file_options")
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/stat", path=path, followSymlinks=str(follow_symlinks).lower()))
+
+    def mkdir(self, path, recursive=False, mode=None):
+        body = {"path": path, "recursive": recursive}
+        if mode is not None:
+            body["mode"] = mode
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/mkdir"), "POST", body)
+
+    def remove(self, path, recursive=False):
+        if type(recursive) is not bool:
+            raise MainbrellaError("invalid_file_options")
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/remove", path=path, recursive=str(recursive).lower()), "DELETE")
+
+    def move(self, path, destination):
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/move"), "POST", {"path": path, "destination": destination})
+
+    def chmod(self, path, mode):
+        return self.sandbox.client.request(self.sandbox._path("/containers/files/chmod", path=path), "PATCH", {"mode": mode})
 
 
 class _Previews:
@@ -163,6 +218,31 @@ class _Previews:
         return self.sandbox.client.request(self.sandbox._path("/containers/previews", previewId=preview_id), "DELETE")
 
 
+class _Webhook:
+    def __init__(self, sandbox):
+        self.sandbox = sandbox
+
+    def get(self):
+        return self.sandbox.client.request(self.sandbox._path("/containers/webhook"))
+
+    def configure(self, url, replay_from_cursor=None):
+        body = {"url": url}
+        if replay_from_cursor is not None:
+            body["replayFromCursor"] = replay_from_cursor
+        return self.sandbox.client.request(self.sandbox._path("/containers/webhook"), "PUT", body)
+
+    def remove(self):
+        return self.sandbox.client.request(self.sandbox._path("/containers/webhook"), "DELETE")
+
+    def deliveries(self):
+        return self.sandbox.client.request(self.sandbox._path("/containers/webhook/deliveries"))
+
+    def retry(self, event_id):
+        if not isinstance(event_id, str) or not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", event_id):
+            raise MainbrellaError("invalid_event_identity")
+        return self.sandbox.client.request(self.sandbox._path("/containers/webhook/retry"), "POST", {"eventId": event_id})
+
+
 class _Commands:
     def __init__(self, sandbox):
         self.sandbox = sandbox
@@ -173,17 +253,39 @@ class _Commands:
             body["timeoutMs"] = timeout_ms
         return self.sandbox.client.request(self.sandbox._path("/containers/exec"), "POST", body)
 
-    def start(self, command, timeout_ms=None, idempotency_key=None):
+    def list(self):
+        return self.sandbox.client.request(self.sandbox._path("/containers/executions"))
+
+    def attach(self, execution_id):
+        return Execution(self.sandbox, execution_id)
+
+    def start(self, command, timeout_ms=None, idempotency_key=None, stdin=None, cwd=None, env=None, pty=None):
         key = idempotency_key or str(uuid.uuid4())
-        body = {"command": command}
+        body = {"argv": command} if isinstance(command, list) else {"command": command}
         if timeout_ms is not None:
             body["timeoutMs"] = timeout_ms
+        for name, value in (("stdin", stdin), ("cwd", cwd), ("env", env), ("pty", pty)):
+            if value is not None:
+                body[name] = value
         try:
             record = self.sandbox.client.request(self.sandbox._path("/containers/executions"), "POST", body, {"Idempotency-Key": key})
             return Execution(self.sandbox, record["id"])
         except MainbrellaError as error:
             error.idempotency_key = key
             raise
+
+
+class _ExecutionInput:
+    def __init__(self, execution):
+        self.execution = execution
+
+    def write(self, data):
+        if not isinstance(data, bytes):
+            raise MainbrellaError("stdin_bytes_required")
+        return self.execution.sandbox.client.request(self.execution._path("/stdin"), "POST", data)
+
+    def close(self):
+        return self.execution.sandbox.client.request(self.execution._path("/stdin"), "DELETE")
 
 
 class Execution:
@@ -193,6 +295,7 @@ class Execution:
         self.sandbox = sandbox
         self.id = execution_id
         self.cursor = 0
+        self.stdin = _ExecutionInput(self)
 
     def _path(self, suffix="", **extra):
         return self.sandbox._path("/containers/executions/" + self.id + suffix, **extra)
@@ -202,6 +305,16 @@ class Execution:
 
     def cancel(self):
         return self.sandbox.client.request(self._path(), "DELETE")
+
+    def signal(self, signal):
+        if signal not in ("SIGINT", "SIGTERM", "SIGKILL"):
+            raise MainbrellaError("invalid_execution_signal")
+        return self.sandbox.client.request(self._path("/signal"), "POST", {"signal": signal})
+
+    def resize(self, cols, rows):
+        if any(type(value) is not int or not 1 <= value <= 1000 for value in (cols, rows)):
+            raise MainbrellaError("invalid_terminal_size")
+        return self.sandbox.client.request(self._path("/resize"), "POST", {"cols": cols, "rows": rows})
 
     def wait(self, timeout=900, poll_interval=1):
         if timeout <= 0 or poll_interval <= 0:
@@ -283,6 +396,15 @@ class Sandbox:
         self.files = _Files(self)
         self.commands = _Commands(self)
         self.previews = _Previews(self)
+        self.webhook = _Webhook(self)
+
+    def events(self, cursor=None, limit=None):
+        options = {name: value for name, value in (("cursor", cursor), ("limit", limit)) if value is not None}
+        return self.client.request(self._path("/containers/events", **options))
+
+    def metrics(self, from_time=None, to_time=None):
+        options = {name: value for name, value in (("from", from_time), ("to", to_time)) if value is not None}
+        return self.client.request(self._path("/containers/metrics", **options))
 
     def _path(self, endpoint, **extra):
         return endpoint + "?" + urlencode(dict(extra, id=self.id, createdAt=self.created_at))
