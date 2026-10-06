@@ -50,3 +50,26 @@ state. A wait timeout leaves the job running. `new Execution(sandbox, id)` recon
 to a known job. Preserve the idempotency key from a failed `commands.start()` call
 and retry the same options within the one-hour retention window. Runtime restart
 interrupts unfinished jobs and stops their matching container generation.
+
+Protected application previews are available only when
+`(await client.capabilities()).previews.supported` is true. Start your application's
+HTTP server in the sandbox first, then create a link for its listening port:
+
+```js
+const preview = await sandbox.previews.create(3000, { ttlSeconds: 900 });
+// Give preview.url to the intended recipient through a private channel.
+const { previews } = await sandbox.previews.list(); // Metadata only, no URLs.
+await sandbox.previews.revoke(preview.id);
+```
+
+Ports are 1024–65535, TTL is 60–3600 seconds (default 900), and at most eight
+grants are active per generation. `expiresAt` is Unix milliseconds, clipped to
+the container deadline. The URL is a bearer credential returned once; keep it
+out of logs and analytics. Listing and revocation work when new issuance is disabled.
+Creation is never retried automatically. After a lost response, list and revoke
+the unwanted grant before creating another link. A `preview_reconciliation_required`
+error exposes `error.previewId`; retry `sandbox.previews.revoke(error.previewId)`.
+Revocation closes active connections. Stopping or replacing the generation
+invalidates its links. Application cookies are stripped; cookie sessions, external
+Host semantics and absolute redirect rewriting are unsupported. Public previews
+remain disabled pending isolated-domain configuration and live qualification.

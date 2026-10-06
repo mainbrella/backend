@@ -2,10 +2,11 @@
 
 The local implementation supplies the private runtime, an isolated gateway,
 a separate routing-index schema and authenticated account API endpoints.
-Public previews remain disabled in the checked-in configuration; no preview
-domain or routing database has been selected/configured. SDK helpers and dashboard
-controls remain unfinished. `/capabilities` reports support only when explicitly
-enabled with a valid domain and both bindings. No deployment, provider experiment
+Public previews remain disabled in the local configuration. Routing database
+bindings are present in the API and gateway configs; migration and deployment
+are unverified, and no preview domain is configured. JavaScript/Python SDK
+helpers and capability-gated dashboard controls are implemented locally.
+`/capabilities` reports support only when explicitly enabled with a valid domain and both bindings. No deployment, provider experiment
 or paid start was performed.
 
 ## Provider boundary
@@ -128,8 +129,8 @@ only the account owner can issue/list/revoke it.
 ## Configuration and rollout
 
 `wrangler.previews.jsonc` is deliberately disabled, with no public routes,
-workers.dev or preview URL and no routing database binding. The API's optional
-preview bindings/variables are absent by default. `npm run check:previews` bundles
+workers.dev or preview URL. Local API and gateway configurations include the
+separate routing database binding; the API enablement/domain variables remain absent. `npm run check:previews` bundles
 this disabled gateway without deploying it. `npm run deploy` does not publish
 or enable the preview gateway.
 
@@ -141,9 +142,9 @@ Before enabling:
    URLs, wildcards and ports; it does not implement a public-suffix registry.
    The operator must verify the selected name is a privately owned registrable
    domain, rather than a public suffix or a shared tenant suffix.
-2. Create a dedicated routing D1 database. Add the same database to both the
-   API and gateway configurations with binding `PREVIEW_ROUTES`, its real
-   `database_name`/`database_id`, and `migrations_dir: "preview-migrations"`.
+2. Verify the dedicated routing D1 database identified by the local bindings
+   exists in the intended account. Both API and gateway must use the same
+   `PREVIEW_ROUTES` database and `migrations_dir: "preview-migrations"`.
    Apply `001_preview_routes.sql` there using Wrangler D1 migrations. Do not add
    the account database to the gateway or apply this schema to `delta`.
 3. Set matching `PREVIEW_DOMAIN` values in the two configs. Keep
@@ -168,12 +169,28 @@ through without following them. Preserve and qualify WebSocket Origin behavior
 with a real framework; do not bypass its checks or weaken the account site's
 origin policy. CSP and service workers remain live qualification items.
 
-## Next integration
+## SDK and dashboard integration
 
-Add JS/Python helpers returning the URL and grant metadata. A compact dashboard
-row should choose a port, create/open a link, show expiration and revoke it.
-Display controls only when configured deployment capabilities report support.
-Do not publish registry installation commands for the unpublished SDKs.
+Both SDKs expose `sandbox.previews.create`, `.list` and `.revoke`, bound to the
+sandbox's exact generation. Create returns URL and grant metadata; list returns
+metadata only. JavaScript accepts `create(port, {ttlSeconds})`; Python accepts
+`create(port, ttl_seconds=...)`. Neither retries issuance. Reconciliation failures
+preserve a validated `previewId` / `preview_id` for explicit revocation retry.
+Packages remain unpublished; installation instructions require a local checkout.
+
+The dashboard reads public capabilities without credentials and adds a compact
+Preview control only when support is advertised. Its expandable port form creates
+a default 15-minute link, shows expiration, opens with no referrer and revokes.
+One-time URLs remain in memory, survive container polling and disappear at expiry
+or generation replacement. After lost issuance, creation stays disabled until
+metadata is refreshed; an unrecovered URL can be revoked but cannot be reopened.
+If support is disabled during a session, existing controls retain list/revoke and
+disable creation. A fresh page without advertised support has no preview controls.
+
+Local controller/request tests and SDK/API integration cover lost responses,
+reconciliation, generation replacement and capability gating. Mocked-API browser
+checks passed at 390×844, 768×1024, 1280×800 and 1440×900, including expiry while
+open. These results do not establish deployed transport behavior.
 
 ## Qualification gates
 

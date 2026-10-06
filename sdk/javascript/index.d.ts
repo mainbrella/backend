@@ -1,6 +1,8 @@
 export type MachineSize = 'lite' | 'small' | 'medium' | 'large' | 'xl';
 export interface Size { id: MachineSize; name: string; instance: string; cpuVcpu: number; memoryMiB: number; diskGB: number; computeUnits: number }
 export interface ContainerIdentity { id: string; createdAt: string }
+export interface Preview { id: string; port: number; createdAt: string; expiresAt: number }
+export interface PreviewLink extends Preview { url: string }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; outputTruncated: boolean }
 export interface Container extends ContainerIdentity { status: 'starting' | 'running'; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | null; active: boolean; containers: Container[];
@@ -19,7 +21,7 @@ export interface Capabilities {
   images: { catalog: boolean; customBuilds: boolean; availableCatalogPath: string; limits: Record<string, number> };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
-export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; cursor?: number; constructor(code: string, status?: number, details?: Record<string, unknown>) }
+export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; cursor?: number; previewId?: string; constructor(code: string, status?: number, details?: Record<string, unknown>) }
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
@@ -31,6 +33,8 @@ export class Sandbox implements ContainerIdentity {
   constructor(client: Mainbrella, value: ContainerIdentity);
   client: Mainbrella; id: string; createdAt: string; creationId?: string; imageDigest?: string; instance?: string;
   files: { read(path: string): Promise<Uint8Array>; write(path: string, bytes: Uint8Array): Promise<{ path: string; size: number }> };
+  previews: { create(port: number, options?: { ttlSeconds?: number }): Promise<PreviewLink>;
+    list(): Promise<{ previews: Preview[] }>; revoke(previewId: string): Promise<{ revoked: true }> };
   commands: { run(command: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<CommandResult>;
     start(command: string, options?: { timeoutMs?: number; idempotencyKey?: string }): Promise<Execution> };
   kill(): Promise<AccountState>;

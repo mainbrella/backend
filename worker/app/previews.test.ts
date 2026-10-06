@@ -6,6 +6,8 @@ import { handlePreviewGateway } from '../preview-gateway';
 import { previewDatabase } from '../lib/preview-test-helpers';
 import { previewTokenHash } from '../lib/preview-routing';
 import { previewGrantSchema } from './openapi-previews';
+import { Mainbrella } from '../../sdk/javascript/index.js';
+import { hashToken } from './auth-core';
 import { paidContainerFixture, GENERATION_ONE, GENERATION_TWO, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 
 const token = 'a'.repeat(48);
@@ -83,6 +85,31 @@ test('issuance binds routing to owner and generation, stores only hashes, lists 
   assert.equal((await open()).status, 404);
   assert.equal(f.sqlite.prepare('SELECT * FROM preview_routes').get(), undefined);
   assert.ok(f.calls.every(call => call.name === 'user:account-one'));
+});
+
+test('SDK preview helpers use real API authorization and isolate generation-bound grants', async t => {
+  const f = await fixture(t);
+  const apiKey = `mb_${'a'.repeat(64)}`;
+  f.sqlite.prepare('INSERT INTO api_keys (id, user_id, name, token_hash, prefix, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('sdk-preview-key', USER_ONE, 'SDK previews', await hashToken(apiKey), 'mb_aaaa', GENERATION_ONE);
+  const client = new Mainbrella({ apiKey, fetch: (async (input: RequestInfo | URL, options?: RequestInit) =>
+    handleRequest(new Request(input, options), f.env)) as typeof fetch });
+  const sandbox = client.connect({ id: 'small', createdAt: GENERATION_ONE });
+  assert.equal((await client.capabilities()).previews.supported, true);
+  const preview = await sandbox.previews.create(3000);
+  assert.equal(preview.url, `https://${token}.preview.example/`);
+  const { previews } = await sandbox.previews.list();
+  assert.deepEqual(Object.keys(previews[0]).sort(), ['createdAt', 'expiresAt', 'id', 'port']);
+  await assert.rejects(client.connect({ id: 'small', createdAt: GENERATION_TWO }).previews.revoke(preview.id),
+    { code: 'container_not_running', status: 409 });
+  f.env.PREVIEWS_ENABLED = 'false';
+  assert.equal((await sandbox.previews.list()).previews.length, 1);
+  f.setRevokeFailure(true);
+  await assert.rejects(sandbox.previews.revoke(preview.id),
+    { code: 'preview_reconciliation_required', status: 503, previewId: preview.id });
+  f.setRevokeFailure(false);
+  assert.deepEqual(await sandbox.previews.revoke(preview.id), { revoked: true });
+  assert.equal((await sandbox.previews.list()).previews.length, 0);
 });
 
 test('validation rejects unsafe ports, malformed generations, duplicate queries and oversized bodies before runtime access', async t => {

@@ -10,11 +10,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 class MainbrellaError(Exception):
-    def __init__(self, code, status=0, idempotency_key=None):
+    def __init__(self, code, status=0, idempotency_key=None, preview_id=None):
         super().__init__(code)
         self.code = code
         self.status = status
         self.idempotency_key = idempotency_key
+        self.preview_id = preview_id
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -64,14 +65,18 @@ class Mainbrella:
         except Exception:
             raise MainbrellaError("transport_unavailable") from None
         if not 200 <= status < 300:
+            preview_id = None
             try:
                 value = json.loads(data)
                 code = value.get("error") if isinstance(value, dict) else None
+                candidate = value.get("previewId") if isinstance(value, dict) else None
+                if code == "preview_reconciliation_required" and isinstance(candidate, str) and re.fullmatch(r"[a-f0-9]{32}", candidate):
+                    preview_id = candidate
             except (ValueError, TypeError):
                 code = None
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
                 code = "request_failed"
-            raise MainbrellaError(code, status)
+            raise MainbrellaError(code, status, preview_id=preview_id)
         if binary:
             return data
         try:
@@ -134,6 +139,28 @@ class _Files:
         if not isinstance(data, bytes):
             raise MainbrellaError("file_bytes_required")
         return self.sandbox.client.request(self.sandbox._path("/containers/files", path=path), "PUT", data)
+
+
+class _Previews:
+    def __init__(self, sandbox):
+        self.sandbox = sandbox
+
+    def create(self, port, ttl_seconds=None):
+        if (type(port) is not int or not 1024 <= port <= 65535
+                or ttl_seconds is not None and (type(ttl_seconds) is not int or not 60 <= ttl_seconds <= 3600)):
+            raise MainbrellaError("invalid_preview_options")
+        body = {"port": port}
+        if ttl_seconds is not None:
+            body["ttlSeconds"] = ttl_seconds
+        return self.sandbox.client.request(self.sandbox._path("/containers/previews"), "POST", body)
+
+    def list(self):
+        return self.sandbox.client.request(self.sandbox._path("/containers/previews"))
+
+    def revoke(self, preview_id):
+        if not isinstance(preview_id, str) or not re.fullmatch(r"[a-f0-9]{32}", preview_id):
+            raise MainbrellaError("invalid_preview_identity")
+        return self.sandbox.client.request(self.sandbox._path("/containers/previews", previewId=preview_id), "DELETE")
 
 
 class _Commands:
@@ -255,6 +282,7 @@ class Sandbox:
         self.created_at = created_at
         self.files = _Files(self)
         self.commands = _Commands(self)
+        self.previews = _Previews(self)
 
     def _path(self, endpoint, **extra):
         return endpoint + "?" + urlencode(dict(extra, id=self.id, createdAt=self.created_at))

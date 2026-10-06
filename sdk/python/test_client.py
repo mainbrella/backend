@@ -10,6 +10,54 @@ GENERATION = "2026-10-05T12:00:00.000Z"
 
 
 class ClientTests(unittest.TestCase):
+    def test_previews_use_exact_generation_and_metadata_reconciliation(self):
+        calls = []
+        grant = {"id": "b" * 32, "port": 3000, "createdAt": GENERATION, "expiresAt": 2000000000000}
+        def transport(url, method, headers, body, timeout):
+            calls.append(method)
+            self.assertEqual(urlsplit(url).path, "/containers/previews")
+            query = parse_qs(urlsplit(url).query)
+            self.assertEqual(query["id"], ["small"])
+            self.assertEqual(query["createdAt"], [GENERATION])
+            if method == "POST":
+                self.assertEqual(json.loads(body), {"port": 3000, "ttlSeconds": 600})
+                return 201, json.dumps(dict(grant, url="https://" + "a" * 48 + ".preview.example/")).encode()
+            if method == "DELETE":
+                self.assertEqual(query["previewId"], [grant["id"]])
+                return 200, b'{"revoked":true}'
+            return 200, json.dumps({"previews": [grant]}).encode()
+        sandbox = Mainbrella(KEY, transport=transport).connect("small", GENERATION)
+        link = sandbox.previews.create(3000, ttl_seconds=600)
+        self.assertEqual(link["id"], grant["id"])
+        self.assertEqual(sandbox.previews.list(), {"previews": [grant]})
+        self.assertEqual(sandbox.previews.revoke(link["id"]), {"revoked": True})
+        for port in [22, 1023, 65536, 3000.5, "3000", True]:
+            with self.assertRaises(MainbrellaError):
+                sandbox.previews.create(port)
+        for ttl in [59, 3601, 60.5, "600", True]:
+            with self.assertRaises(MainbrellaError):
+                sandbox.previews.create(3000, ttl_seconds=ttl)
+        with self.assertRaises(MainbrellaError):
+            sandbox.previews.revoke("invalid")
+        self.assertEqual(len(calls), 3)
+
+    def test_preview_failure_is_not_retried_and_keeps_only_safe_cleanup_id(self):
+        calls = []
+        def transport(*args):
+            calls.append(args)
+            return 503, json.dumps({"error": "preview_reconciliation_required", "previewId": "b" * 32, "token": KEY}).encode()
+        sandbox = Mainbrella(KEY, transport=transport).connect("small", GENERATION)
+        with self.assertRaises(MainbrellaError) as error:
+            sandbox.previews.create(3000)
+        self.assertEqual(error.exception.preview_id, "b" * 32)
+        self.assertEqual(error.exception.status, 503)
+        self.assertEqual(len(calls), 1)
+        for code, preview_id in [("previews_unavailable", "b" * 32), ("preview_reconciliation_required", KEY)]:
+            client = Mainbrella(KEY, transport=lambda *args: (503, json.dumps({"error": code, "previewId": preview_id}).encode()))
+            with self.assertRaises(MainbrellaError) as error:
+                client.connect("small", GENERATION).previews.list()
+            self.assertIsNone(error.exception.preview_id)
+
     def test_creation_retries_and_generation_cleanup(self):
         calls = []
         def transport(url, method, headers, body, timeout):

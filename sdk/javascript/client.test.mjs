@@ -5,6 +5,52 @@ import { Mainbrella, MainbrellaError, Execution } from './index.js';
 const apiKey = `mb_${'a'.repeat(64)}`;
 const createdAt = '2026-10-05T12:00:00.000Z';
 
+test('previews preserve generation, return one-time URLs and revoke metadata-only grants', async () => {
+  const grant = { id: 'b'.repeat(32), port: 3000, createdAt, expiresAt: Date.now() + 900_000 };
+  const calls = [];
+  const client = new Mainbrella({ apiKey, fetch: async (url, options) => {
+    calls.push(options);
+    assert.equal(url.pathname, '/containers/previews');
+    assert.equal(url.searchParams.get('id'), 'c1');
+    assert.equal(url.searchParams.get('createdAt'), createdAt);
+    if (options.method === 'POST') {
+      assert.deepEqual(JSON.parse(options.body), { port: 3000, ttlSeconds: 600 });
+      return Response.json({ ...grant, url: `https://${'a'.repeat(48)}.preview.example/` }, { status: 201 });
+    }
+    if (options.method === 'DELETE') {
+      assert.equal(url.searchParams.get('previewId'), grant.id);
+      return Response.json({ revoked: true });
+    }
+    return Response.json({ previews: [grant] });
+  } });
+  const sandbox = client.connect({ id: 'c1', createdAt });
+  const link = await sandbox.previews.create(3000, { ttlSeconds: 600 });
+  assert.equal(link.id, grant.id);
+  assert.match(link.url, /^https:/);
+  assert.deepEqual(await sandbox.previews.list(), { previews: [grant] });
+  assert.deepEqual(await sandbox.previews.revoke(link.id), { revoked: true });
+  for (const port of [22, 1023, 65536, 3000.5, '3000']) assert.throws(() => sandbox.previews.create(port), { code: 'invalid_preview_options' });
+  for (const ttlSeconds of [59, 3601, 60.5, '600']) assert.throws(() => sandbox.previews.create(3000, { ttlSeconds }), { code: 'invalid_preview_options' });
+  assert.throws(() => sandbox.previews.revoke('not-an-id'), { code: 'invalid_preview_identity' });
+  assert.equal(calls.length, 3);
+});
+
+test('preview failures are never retried and expose only a valid reconciliation ID', async () => {
+  let calls = 0;
+  const id = 'b'.repeat(32);
+  const client = new Mainbrella({ apiKey, fetch: async () => {
+    calls++;
+    return Response.json({ error: 'preview_reconciliation_required', previewId: id, token: apiKey }, { status: 503 });
+  } });
+  await assert.rejects(client.connect({ id: 'small', createdAt }).previews.create(3000),
+    { code: 'preview_reconciliation_required', status: 503, previewId: id });
+  assert.equal(calls, 1);
+  for (const [error, previewId] of [['previews_unavailable', id], ['preview_reconciliation_required', apiKey]]) {
+    const bad = new Mainbrella({ apiKey, fetch: async () => Response.json({ error, previewId }, { status: 503 }) });
+    await assert.rejects(bad.connect({ id: 'small', createdAt }).previews.list(), cause => cause.previewId === undefined && !JSON.stringify(cause).includes(apiKey));
+  }
+});
+
 test('creation retries one key and selects returned identity among concurrent machines', async () => {
   const calls = [];
   const client = new Mainbrella({ apiKey, fetch: async (url, options) => {

@@ -1,47 +1,67 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "mainbrella-api",
-  "account_id": "2b7a9be82bb64187230703b024e25157",
-  "main": "worker/index.ts",
-  "compatibility_date": "2026-09-18",
-  "compatibility_flags": ["nodejs_compat"],
-  "cache": {
-    "enabled": true
-  },
-  "triggers": { "crons": ["*/5 * * * *"] },
-  "vars": {
-    "GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "delta",
-      "database_id": "41be6d7b-26fb-4701-a3fb-fdf3454e14f9",
-      "migrations_dir": "migrations",
-      "migrations_table": "schema_migrations"
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "CONTAINER_ACCOUNT", "class_name": "ContainerAccount" },
-      {
-        "name": "USER_CONTAINER",
-        "class_name": "UserContainer",
-        "script_name": "mainbrella-containers"
-      }
-    ]
-  },
-  "exports": { "ContainerAccount": { "type": "durable-object", "storage": "sqlite" } },
-  "observability": {
-    "logs": {
-      "enabled": true,
-      "invocation_logs": false
-    }
-  },
-  "routes": [
-    {
-      "pattern": "api.mainbrella.com",
-      "custom_domain": true
-    }
-  ]
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "mainbrella-api",
+	"account_id": "2b7a9be82bb64187230703b024e25157",
+	"main": "worker/index.ts",
+	"compatibility_date": "2026-09-18",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"cache": {
+		"enabled": true
+	},
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	},
+	"vars": {
+		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "delta",
+			"database_id": "41be6d7b-26fb-4701-a3fb-fdf3454e14f9",
+			"migrations_dir": "migrations",
+			"migrations_table": "schema_migrations"
+		},
+		{
+			"binding": "PREVIEW_ROUTES",
+			"database_name": "mainbrella-preview-routes",
+			"database_id": "d5f35d95-114c-4b71-9060-e99514136671",
+			"migrations_dir": "preview-migrations"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CONTAINER_ACCOUNT",
+				"class_name": "ContainerAccount"
+			},
+			{
+				"name": "USER_CONTAINER",
+				"class_name": "UserContainer",
+				"script_name": "mainbrella-containers"
+			}
+		]
+	},
+	"exports": {
+		"ContainerAccount": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		}
+	},
+	"observability": {
+		"logs": {
+			"enabled": true,
+			"invocation_logs": false
+		}
+	},
+	"routes": [
+		{
+			"pattern": "api.mainbrella.com",
+			"custom_domain": true
+		}
+	]
 }

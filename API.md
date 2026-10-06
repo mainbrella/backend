@@ -425,6 +425,14 @@ external Host semantics and absolute redirect rewriting are not supported.
 Framework compatibility, CSP and service workers still require live
 qualification. Operators can read `docs/preview-ingress.md` in the backend checkout.
 
+Local SDK helpers are `sandbox.previews.create(port, {ttlSeconds})`, `.list()` and
+`.revoke(previewId)` in JavaScript, and `sandbox.previews.create(port, ttl_seconds=…)`,
+`.list()` and `.revoke(preview_id)` in Python. Create returns the one-time URL
+and metadata; list returns `{previews: [...]}` without URLs. Reconciliation errors
+expose `previewId` in JavaScript and `preview_id` in Python. See the
+[JavaScript](https://mainbrella.com/sdk/javascript.md) and
+[Python](https://mainbrella.com/sdk/python.md) local SDK references.
+
 ## Managed execution and streaming
 
 Use `POST /containers/executions?id=<id>&createdAt=<generation>` with a required

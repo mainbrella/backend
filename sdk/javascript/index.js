@@ -55,7 +55,9 @@ export class Mainbrella {
       let data;
       try { data = await response.json(); } catch {}
       const code = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(data.error) ? data.error : 'request_failed';
-      throw new MainbrellaError(code, response.status);
+      const details = code === 'preview_reconciliation_required' && /^[a-f0-9]{32}$/.test(data?.previewId ?? '')
+        ? { previewId: data.previewId } : {};
+      throw new MainbrellaError(code, response.status, details);
     }
     if (stream) return response;
     try { return binary ? new Uint8Array(await response.arrayBuffer()) : await response.json(); }
@@ -108,6 +110,21 @@ export class Sandbox {
       write: (path, bytes) => {
         if (!(bytes instanceof Uint8Array)) throw new MainbrellaError('file_bytes_required');
         return this.client.request(this.path('/containers/files', { path }), { method: 'PUT', body: bytes });
+      },
+    };
+    this.previews = {
+      create: (port, { ttlSeconds } = {}) => {
+        if (!Number.isInteger(port) || port < 1024 || port > 65535
+          || ttlSeconds !== undefined && (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600)) {
+          throw new MainbrellaError('invalid_preview_options');
+        }
+        return this.client.request(this.path('/containers/previews'), { method: 'POST',
+          body: { port, ...(ttlSeconds !== undefined ? { ttlSeconds } : {}) } });
+      },
+      list: () => this.client.request(this.path('/containers/previews')),
+      revoke: previewId => {
+        if (!/^[a-f0-9]{32}$/.test(previewId ?? '')) throw new MainbrellaError('invalid_preview_identity');
+        return this.client.request(this.path('/containers/previews', { previewId }), { method: 'DELETE' });
       },
     };
     this.commands = {

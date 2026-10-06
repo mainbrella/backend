@@ -8,6 +8,14 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": { "PREVIEWS_ENABLED": "false", "PREVIEW_DOMAIN": "" },
+  "d1_databases": [
+    {
+      "binding": "PREVIEW_ROUTES",
+      "database_name": "mainbrella-preview-routes",
+      "database_id": "d5f35d95-114c-4b71-9060-e99514136671",
+      "migrations_dir": "preview-migrations"
+    }
+  ],
   "durable_objects": { "bindings": [
     { "name": "USER_CONTAINER", "class_name": "UserContainer", "script_name": "mainbrella-containers" }
   ] },
