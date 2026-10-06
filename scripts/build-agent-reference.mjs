@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { agentReferenceArchive } from './agent-reference-archive.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,6 +42,8 @@ const manifest = { version, source: 'mainbrella/backend', licenseSha256: createH
   [name, createHash('sha256').update(value).digest('hex')])) };
 await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const archive = join(output, `mainbrella-containers-${version}.tar.gz`);
-const result = spawnSync('tar', ['-czf', archive, '-C', output, 'mainbrella-containers'], { stdio: 'inherit' });
-if (result.error || result.status !== 0) throw new Error('Skill archive failed');
+await writeFile(archive, agentReferenceArchive({
+  'API.md': documents['API.md'], 'SKILL.md': documents['SKILL.md'],
+  ...references, LICENSE: await readFile(join(root, 'LICENSE')),
+}));
 console.log(`Agent reference package: ${output}`);
