@@ -1,7 +1,8 @@
 # SDK artifact qualification and release
 
-The JavaScript package `@mainbrella/sdk` and Python package `mainbrella` are version
-0.1.0, unpublished. Runtime dependencies are empty. Preserve the repository's
+The JavaScript package `@mainbrella/sdk` is version 0.1.0, unpublished. Python
+package `mainbrella` 0.1.0 was published to PyPI on October 6, 2026 and its registry
+downloads and clean installations were verified. Runtime dependencies are empty. Preserve the repository's
 GPL v3 license in both distributions; changing the SDK license is a separate
 owner decision. The backend SDK directories own their code, declarations and
 README instructions; the web SDK references are generated copies.
@@ -94,6 +95,68 @@ marks a loopback target explicitly; successful loopback runs do not satisfy the
 deployed release gate. The artifact CI job runs this smoke check after packaging.
 
 ## Publication
+
+### October 6, 2026 candidate
+
+The current locally qualified candidate is
+`artifacts/sdk-release-0.1.0-20261006-r2`. Its manifest records source revision
+`7b8f96a28135db85eea636fbe6c99a8bf055a239` with a dirty checkout containing the
+Python User-Agent fix subsequently committed as `cb549a6`. The manifest's
+individual source hashes identify the actual qualified inputs. A later PTY test
+adapter correction does not change SDK distribution contents.
+
+| Exact archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `mainbrella-sdk-0.1.0.tgz` | 28333 | `4916a82ed535ac11432e3605be4f1741b1bde0a597122a6d5337628c353074a6` |
+| `mainbrella-0.1.0.tar.gz` | 26939 | `130a9f1522e886af13fbc061746e18ac8f873b9bc342dc29541e402d83ddb5d3` |
+| `mainbrella-0.1.0-py3-none-any.whl` | 23236 | `d3f674a4630fea3e226682ff0309cfb21f367e02695ab6ef3e623798e7f329b3` |
+
+Local qualification passed the archive/license/declaration checks, 22 JavaScript
+contract tests, 13 Python contract tests for each installed wheel/source archive,
+and each artifact's real-handler HTTP/runtime workflow. The original candidate
+also passed all 15 deployed-runner loopback tests.
+
+Production qualification consumed exactly two SDK starts. The original run in
+`.wrangler/sdk-deployed-qualification-0.1.0-20261006` passed JavaScript and cleaned
+up its generation, then failed Python preflight before a creation key or start.
+The default `Python-urllib/3.14` User-Agent received an HTTP 403; the explicit SDK
+User-Agent resolved that blocker for both ordinary requests and output streams.
+The corrected wheel was installed in a clean environment and only the Python
+workflow was run, using the remaining one-start budget. It passed all five
+deployed checks and confirmed generation cleanup. The original failed report
+remains intact. The successful hashed reconciliation report is
+`.wrangler/sdk-deployed-reconciled-0.1.0-20261006/deployed-reconciliation.json`;
+it verifies that the corrected candidate's JavaScript tarball is identical to the
+one already qualified live. Deployment revisions are operator supplied:
+API `7836036`, private runtime source `aab6053`.
+
+These SDK deployed workflows cover admission, stdout/stderr, binary transfer,
+reconnect and cancellation. They do not exercise SDK workspace save/restore/export
+against production; the separate two-start workspace API qualification and the
+local SDK workspace contract tests are separate evidence, not an equivalent SDK
+deployed workspace test.
+
+The Python wheel and source archive above were published unchanged. PyPI metadata
+and fresh downloads match both SHA-256 checksums, declare Python 3.10+ and
+`GPL-3.0-only`, and have no runtime dependencies. A fresh `pip install
+mainbrella==0.1.0` and a separate installation from the registry-downloaded source
+archive each passed all 13 contract tests with isolated imports. Evidence is in
+`.wrangler/sdk-pypi-verification-0.1.0-20261006/registry-verification.json`.
+
+The npm token authenticated as `andrewarrow`, but publishing the qualified tarball
+returned `E403`: "Two-factor authentication or granular access token with bypass
+2fa enabled is required to publish packages." The npm package remains unpublished.
+Use an authorized publishing token with the required 2FA permission or interactive
+OTP to release this exact tarball; do not rebuild or repeat the SDK start gate.
+
+```sh
+npm publish artifacts/sdk-release-0.1.0-20261006-r2/mainbrella-sdk-0.1.0.tgz --access public
+pip install mainbrella==0.1.0
+```
+
+The isolated `.wrangler/sdk-publish-tools` environment already contains Twine.
+Supply registry credentials only through the release environment. Do not rerun
+the full two-start gate to reproduce the reconciliation without a new start budget.
 
 After artifact and deployed qualification, confirm registry ownership, the
 intended version and release scope. Publish the exact qualified archives rather

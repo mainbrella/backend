@@ -1,9 +1,9 @@
 # Mainbrella Python SDK
 
-Local package, not published to PyPI yet. Python 3.10+; standard-library runtime.
+Published on PyPI as `mainbrella` 0.1.0. Python 3.10+; standard-library runtime.
 
 ```sh
-python -m pip install /absolute/path/to/backend/sdk/python
+pip install mainbrella==0.1.0
 ```
 
 ```python
