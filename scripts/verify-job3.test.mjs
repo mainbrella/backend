@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { validExecution } from '../containers/execution-contract.js';
-import { accessChecks, compareNetworkControls, verifyJob3 } from './verify-job3.mjs';
+import { accessChecks, compareNetworkControls, replacementChecks, verifyJob3 } from './verify-job3.mjs';
 
 const names = ['dnsA', 'dnsAAAA', 'dnsTXT', 'publicHttp', 'publicHttps', 'hostnameHttps', 'directIpv4', 'directIpv6', 'alternateTcpPort', 'udpDns'];
 const network = value => ({ uid: 0, results: Object.fromEntries(names.map(name => [name, value])) });
@@ -18,7 +18,7 @@ test('an unreachable control never counts as a denial, and any offline success f
   assert.equal(compareNetworkControls(online, offline).ok, false);
   assert.throws(() => compareNetworkControls({}, {}));
 });
-function fixture({ enabled = true, webhooksEnabled = enabled, failCreate = false, failCleanup = false, failAccess = false, failWebhook = false, npmTimedOut = false } = {}) {
+function fixture({ enabled = true, webhooksEnabled = enabled, failCreate = false, failCleanup = false, failAccess = false, failWebhook = false, npmTimedOut = false, replayReplacement = false } = {}) {
   const previous = { id: 'c1', createdAt: '2026-10-01T00:00:00.000Z' }, admitted = new Map();
   const calls = [], checkpoints = [], receivers = new Map(); let active, starts = 3, keys = 0, webhook;
   const list = async () => ({ active: true, containers: [previous, ...(active ? [active] : [])], imageCatalog: [{ id: 'node' }],
@@ -27,9 +27,9 @@ function fixture({ enabled = true, webhooksEnabled = enabled, failCreate = false
   const capabilities = async () => ({ apiVersion: '2026-10-05', networking: { internetControl: enabled }, observability: { webhooks: webhooksEnabled }, previews: { supported: true },
     containers: { idempotentCreate: true, generationRequired: true }, execution: { foreground: true, background: true, streaming: true, reconnect: true, cancellation: true },
     files: { read: true, write: true, binary: true } });
-  const client = { list, capabilities, async create({ internet, idempotencyKey }) {
+  const client = { list, capabilities, connect: value => value, async create({ internet, idempotencyKey }) {
     const cached = admitted.get(idempotencyKey);
-    if (cached) { if (cached.internet !== internet) throw Object.assign(new Error('conflict'), { status: 409 }); return cached; }
+    if (cached) { if (cached.internet !== internet) throw Object.assign(new Error('conflict'), { status: 409 }); return replayReplacement ? { ...cached, createdAt: '2026-10-05T13:00:00.000Z' } : cached; }
     calls.push('create');
     if (failCreate) throw new Error('credential-must-not-leak');
     starts++;
@@ -53,6 +53,7 @@ function fixture({ enabled = true, webhooksEnabled = enabled, failCreate = false
   };
   return { client, calls, checkpoints, options: { secondary, receiverRequest,
     exerciseAccess: async () => { if (failAccess) throw new Error('credential-must-not-leak'); },
+    exerciseReplacement: async (old, current) => { assert.equal(old.id, current.id); assert.notEqual(old.createdAt, current.createdAt); },
     exerciseNetwork: async sandbox => network(sandbox.internet), checkpoint: async report => { checkpoints.push(report); } } };
 }
 test('disabled capabilities spend no starts and successful runs preserve preexisting guests and record recovery before admission', async () => {
@@ -118,7 +119,8 @@ test('network mode works with disabled webhooks and never contacts the receiver 
   assert.equal(report.cleanup, 'completed'); assert.deepEqual(report.receiverRuns, []);
   assert.equal(f.calls.includes('webhook_remove'), false);
   assert.equal(report.pendingGates.some(gate => /webhook|metrics/.test(gate)), false);
-  assert.ok(report.pendingGates.includes('replacement_generation_fencing'));
+  assert.equal(report.checks.replacementGenerationFencing, true);
+  assert.equal(report.pendingGates.includes('replacement_generation_fencing'), false);
   const combined = fixture({ webhooksEnabled: false });
   assert.equal((await verifyJob3(combined.client, combined.options)).startsRequested, 0);
 });
@@ -144,6 +146,56 @@ test('unknown verification modes are rejected before admission', async () => {
   const f = fixture();
   const report = await verifyJob3(f.client, { ...f.options, mode: 'typo' });
   assert.equal(report.ok, false); assert.equal(report.startsRequested, 0); assert.deepEqual(f.calls, []);
+});
+
+test('truthy capability values cannot authorize paid network qualification', async () => {
+  const f = fixture({ enabled: 'true' });
+  const report = await verifyJob3(f.client, { ...f.options, mode: 'network' });
+  assert.equal(report.ok, false); assert.equal(report.startsRequested, 0);
+  assert.deepEqual(f.calls, []);
+});
+
+test('an unexpected replay identity is preserved for reconciliation and prohibits another start', async () => {
+  const f = fixture({ replayReplacement: true });
+  const report = await verifyJob3(f.client, { ...f.options, mode: 'network' });
+  assert.equal(report.ok, false); assert.equal(report.startsRequested, 1);
+  assert.equal(report.cleanup, 'reconcile_manually');
+  assert.deepEqual(report.unexpectedGeneration, { id: 'small', createdAt: '2026-10-05T13:00:00.000Z' });
+  assert.equal(f.calls.filter(call => call === 'create').length, 1);
+  const resumed = await verifyJob3(f.client, { ...f.options, mode: 'network', previous: report });
+  assert.equal(resumed.startsRequested, 0);
+});
+
+test('replacement fencing rejects stale reads, writes, execution and deletion while preserving the offline guest', async () => {
+  for (const bypass of [undefined, 'read', 'write', 'run', 'kill', 'corrupt', 'internet', 'slot']) {
+    const calls = [], storage = new Map();
+    const deny = async name => { calls.push(name); if (bypass !== name) throw Object.assign(new Error('stale'), { status: 409 }); };
+    const old = { id: 'small', createdAt: '2026-10-05T00:00:00.000Z',
+      files: { read: () => deny('read'), write: () => deny('write') }, commands: { run: () => deny('run') }, kill: () => deny('kill') };
+    const current = { id: bypass === 'slot' ? 'c1' : 'small', createdAt: '2026-10-06T00:00:00.000Z', internet: false,
+      files: { write: async (path, value) => storage.set(path, value),
+        read: async path => bypass === 'corrupt' ? new Uint8Array([1]) : storage.get(path),
+        remove: async path => storage.delete(path) } };
+    const client = { list: async () => ({ containers: [{ ...current, internet: bypass === 'internet' }] }) };
+    if (bypass) await assert.rejects(replacementChecks(old, current, client));
+    else {
+      await replacementChecks(old, current, client);
+      assert.deepEqual(calls, ['read', 'write', 'run', 'kill']);
+      assert.equal(storage.size, 0);
+    }
+  }
+});
+
+test('a fencing bypass fails the run and still cleans the admitted replacement', async () => {
+  const f = fixture();
+  const report = await verifyJob3(f.client, { ...f.options, mode: 'network',
+    exerciseReplacement: async () => { throw new Error('credential-must-not-leak'); } });
+  assert.equal(report.ok, false); assert.equal(report.startsRequested, 2);
+  assert.equal(report.error, 'replacement_generation_fencing_failed');
+  assert.equal(report.cleanup, 'completed');
+  assert.equal(report.pendingGates.includes('replacement_generation_fencing'), true);
+  assert.equal(report.checks.replacementGenerationFencing, undefined);
+  assert.equal(JSON.stringify(report).includes('credential-must-not-leak'), false);
 });
 
 test('network access checks omit cross-account webhook reads', async () => {

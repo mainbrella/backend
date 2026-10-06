@@ -82,8 +82,38 @@ containers must remain unchanged. The report is `job3-verification.json`; its
 start. Resume reports must match the selected mode and pinned deployments; do not
 use the historical combined run as a network-mode continuation.
 
+The offline start must reuse the preceding stopped slot with a different
+generation. The runner checks that the old generation cannot read or overwrite
+the replacement's binary file, execute a command, or stop it. It then verifies
+the replacement's bytes and advertised offline policy remain intact. Successful
+checks remove only `replacement_generation_fencing` from the report's pending
+gates. An unexpected idempotent-replay identity is retained for manual
+reconciliation and blocks continuation, even if the expected generation was
+cleaned up. No third start is used to force slot reuse.
+
+Package-manager evidence includes elapsed time. An offline command that times
+out, truncates output, or takes more than ten seconds leaves the DNS-failure
+latency gate open. The runner does not alter guest DNS settings to manufacture
+a fast failure.
+
+For a verifier-only change, the existing compatible runtime needs no redeploy.
+Read its active version with `npx wrangler deployments list --config
+wrangler.containers.jsonc`. After the local suites and deployment preflight pass,
+and only within the agreed two-start budget, temporarily enable issuance with
+`npm run deploy:api -- --var NETWORK_INTERNET_CONTROL_ENABLED:true`. Record the
+new API version from the deployment output and use it in the command above,
+along with the active runtime version and a new evidence directory. Both
+qualification accounts must have no concurrent admission during the run.
+
+After success or failure, withdraw issuance with `npm run deploy:api -- --var
+NETWORK_INTERNET_CONTROL_ENABLED:false` and confirm public discovery reports
+`networking.internetControl: false`. Confirm both admitted generations absent
+and start deltas before attempting another run. If withdrawal fails or a
+response is ambiguous, reconcile the active API version and capability before
+retrying; do not consume a new start to recover.
+
 `ok: true` establishes these checks only; `releaseQualified` remains false.
-Browser terminal/tmux, SSH, replacement-generation fencing, runtime
+Browser terminal/tmux, SSH, runtime
 upgrade/downgrade, lifecycle expiry/retention and offline package-manager latency
 remain explicit gates. An unreachable online control cannot establish denial.
 Turn the API flag off after this bounded check while any release gate remains

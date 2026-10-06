@@ -37,6 +37,21 @@ async function guestNetwork(sandbox, source) {
   const evidence = JSON.parse(result.stdout); requireCheck(probes.every(name => typeof evidence.results?.[name] === 'boolean'));
   return evidence;
 }
+export async function replacementChecks(previous, current, client) {
+  // Reuse the stopped slot; a different slot cannot establish replacement fencing.
+  requireCheck(previous.id === current.id && previous.createdAt !== current.createdAt);
+  const path = `/tmp/mainbrella-network-fence-${randomUUID()}.bin`;
+  const bytes = new Uint8Array([0, 128, 255, 10]);
+  await current.files.write(path, bytes);
+  await expectedFailure(() => previous.files.read(path), 409);
+  await expectedFailure(() => previous.files.write(path, new Uint8Array([1])), 409);
+  await expectedFailure(() => previous.commands.run('printf stale-generation'), 409);
+  await expectedFailure(() => previous.kill(), 409);
+  requireCheck(Buffer.from(await current.files.read(path)).equals(Buffer.from(bytes)));
+  const listed = await client.list();
+  requireCheck(listed.containers.some(value => same(value, current) && value.internet === false));
+  await current.files.remove(path);
+}
 export async function accessChecks(sandbox, secondary, appSource, checks, { webhooks = true } = {}) {
   const bytes = new Uint8Array([0, 1, 127, 128, 255, 10]);
   await sandbox.files.write('/tmp/mainbrella-job3.bin', bytes);
@@ -69,7 +84,7 @@ export async function accessChecks(sandbox, secondary, appSource, checks, { webh
   checks.previewRevocation = true;
 }
 
-export async function verifyJob3(client, { secondary, receiverRequest, networkSource, appSource, previous, maxStarts = 2, mode = 'combined', checkpoint = async () => {}, exerciseAccess = accessChecks, exerciseNetwork = guestNetwork } = {}) {
+export async function verifyJob3(client, { secondary, receiverRequest, networkSource, appSource, previous, maxStarts = 2, mode = 'combined', checkpoint = async () => {}, exerciseAccess = accessChecks, exerciseNetwork = guestNetwork, exerciseReplacement = replacementChecks } = {}) {
   const webhooks = mode === 'combined';
   const report = { formatVersion: 1, mode, ok: false, releaseQualified: false, maxStarts, startsRequested: 0,
     stage: 'preflight', cleanup: 'not_needed', checks: {}, generations: [], receiverRuns: [],
@@ -77,12 +92,12 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
       'runtime_upgrade_downgrade', 'lifecycle_expiry_retention_and_disabled_policy_cleanup',
       ...(webhooks ? ['dedicated_metrics_token_and_deployed_metrics', 'webhook_restart_lease_recovery_and_inflight_removal'] : [])] };
   const save = () => checkpoint(structuredClone(report));
-  let sandbox, online, offline;
+  let sandbox, online, offline, stoppedSandbox;
   try {
     requireCheck(['combined', 'network'].includes(mode) && [2, 3].includes(maxStarts) && (maxStarts === 2 || previous));
     const capabilities = await client.capabilities();
-    requireCheck(capabilities.networking?.internetControl && capabilities.previews?.supported
-      && (!webhooks || capabilities.observability?.webhooks));
+    requireCheck(capabilities.networking?.internetControl === true && capabilities.previews?.supported === true
+      && (!webhooks || capabilities.observability?.webhooks === true));
     const before = await deploymentPreflight(client, { starts: previous ? 1 : 2 }); report.preexisting = before.existing;
     const usage = { primary: (await client.list()).usage.starts, secondary: (await secondary.list()).usage.starts };
     report.before = usage;
@@ -96,6 +111,7 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
         && before.existing.length === previous.preexisting?.length && before.existing.every(current => previous.preexisting.some(old => same(current, old))));
       report.generations = structuredClone(previous.generations); report.startsRequested = previous.startsRequested; report.before = previous.before;
       online = previous.generations[0].network; report.reusedOnlineControl = true;
+      stoppedSandbox = client.connect(previous.generations.at(-1).container);
     }
     await save();
     for (const internet of previous ? [false] : [true, false]) {
@@ -106,7 +122,11 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
       requireCheck(!before.existing.some(previous => same(previous, created))); sandbox = created;
       generation.container = { id: sandbox.id, createdAt: sandbox.createdAt, imageDigest: sandbox.imageDigest, instance: sandbox.instance };
       generation.cleanup = 'pending'; requireCheck(sandbox.instance === 'lite' && sandbox.internet === internet); await save();
-      const replay = await client.create({ catalogId: 'node', size: 'lite', internet, idempotencyKey: generation.creationKey }); requireCheck(same(replay, sandbox));
+      const replay = await client.create({ catalogId: 'node', size: 'lite', internet, idempotencyKey: generation.creationKey });
+      if (!same(replay, sandbox)) {
+        report.unexpectedGeneration = { id: replay.id, createdAt: replay.createdAt };
+        throw new Error('idempotency_failed');
+      }
       await expectedFailure(() => client.create({ catalogId: 'node', size: 'lite', internet: !internet, idempotencyKey: generation.creationKey }), 409);
       generation.checks.idempotencyAndPolicyConflict = true;
       const history = await sandbox.events(); requireCheck(history.events.some(event => event.type === 'starting') && history.events.some(event => event.type === 'started'));
@@ -118,12 +138,20 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
         report.networkComparison = compareNetworkControls(online, offline); await save();
         requireCheck(report.networkComparison.ok); report.checks.networkDenial = true;
       }
+      const npmStartedAt = Date.now();
       const npm = await sandbox.commands.run('npm view npm version --fetch-retries=0 --fetch-timeout=3000', { timeoutMs: 15_000 });
-      generation.packageManager = { exitCode: npm.exitCode, timedOut: npm.timedOut, outputTruncated: npm.outputTruncated };
+      generation.packageManager = { exitCode: npm.exitCode, timedOut: npm.timedOut, outputTruncated: npm.outputTruncated, elapsedMs: Date.now() - npmStartedAt };
       await save();
       requireCheck(typeof npm.timedOut === 'boolean' && (internet ? npm.exitCode === 0 && !npm.timedOut : npm.timedOut || npm.exitCode !== null && npm.exitCode !== 0));
       generation.checks.packageManager = true;
-      if (npm.timedOut && !report.pendingGates.includes('offline_package_manager_dns_failure_latency')) report.pendingGates.push('offline_package_manager_dns_failure_latency');
+      if (!internet && (npm.timedOut || npm.outputTruncated || generation.packageManager.elapsedMs > 10_000)) report.pendingGates.push('offline_package_manager_dns_failure_latency');
+      if (!internet && stoppedSandbox) {
+        report.stage = 'replacement_generation_fencing'; await save();
+        await exerciseReplacement(stoppedSandbox, sandbox, client);
+        generation.checks.replacementGenerationFencing = true;
+        report.checks.replacementGenerationFencing = true;
+        report.pendingGates = report.pendingGates.filter(gate => gate !== 'replacement_generation_fencing');
+      }
       report.stage = internet ? 'online_access' : 'offline_access'; await save();
       await exerciseAccess(sandbox, secondary, appSource, generation.checks, { webhooks });
       let receiver;
@@ -156,7 +184,7 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
         await sandbox.webhook.remove(); requireCheck((await sandbox.webhook.get()).webhook === null && !(await sandbox.webhook.deliveries()).deliveries.length);
         report.checks.webhookRemoval = true;
       }
-      sandbox = undefined;
+      stoppedSandbox = sandbox; sandbox = undefined;
     }
     report.stage = 'network_comparison'; report.networkComparison = compareNetworkControls(online, offline); requireCheck(report.networkComparison.ok);
     report.checks.networkDenial = true;
@@ -194,6 +222,7 @@ export async function verifyJob3(client, { secondary, receiverRequest, networkSo
       catch { report.cleanup = 'failed'; }
     }
   }
+  if (report.unexpectedGeneration) report.cleanup = 'reconcile_manually';
   report.ok = !report.error && report.cleanup === 'completed'; report.stage = 'finished'; await save(); return report;
 }
 
