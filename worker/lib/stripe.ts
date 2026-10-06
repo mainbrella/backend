@@ -28,6 +28,7 @@ export interface CheckoutSession {
   status: string;
   client_secret?: string;
   ui_mode?: string;
+  allow_promotion_codes?: boolean | null;
   metadata?: Record<string, string>;
   client_reference_id: string;
   customer: string;

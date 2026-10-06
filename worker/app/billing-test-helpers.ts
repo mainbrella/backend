@@ -48,7 +48,7 @@ export async function billingFixture(t: TestContext, plan: Plan = 'builder', rec
     subscriptions: [paidSubscription(plan)] as StripeSubscription[], invoices: [paidInvoice(plan)],
     payments: [{ id: 'inpay_paid', invoice: 'in_paid', status: 'paid', amount_paid: 500, payment: { type: 'payment_intent', payment_intent: 'pi_paid', charge: undefined as string | undefined } }],
     intent: { id: 'pi_paid', status: 'succeeded', amount_received: 500, latest_charge: paidCharge() },
-    checkout: { id: 'cs_old', status: 'open', ui_mode: 'custom', client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
+    checkout: { id: 'cs_old', status: 'open', ui_mode: 'embedded', allow_promotion_codes: true, client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
     schedules: new Map<string, Record<string, any>>(),
     override: null as null | ((url: URL, init: RequestInit | undefined) => Promise<Response | undefined> | Response | undefined),
   };
