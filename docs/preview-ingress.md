@@ -341,7 +341,8 @@ false.
 
 Evidence: [preview-verification.json](../.wrangler/preview-qualification-2026-10-06T03-14-00-127Z/preview-verification.json)
 and [rollout.json](../.wrangler/preview-rollout-20261006/rollout.json). These files
-are local, private and ignored by Git. They record verifier/source hashes,+deployment metadata and recovery identities without API keys or bearer URLs.
+are local, private and ignored by Git. They record verifier/source hashes,
+deployment metadata and recovery identities without API keys or bearer URLs.
 The source revision is operator supplied; actual deployed version IDs are
 recorded separately. Both API and gateway were restored to disabled issuance
 after the test. The next live run needs a separately bounded budget and a second
