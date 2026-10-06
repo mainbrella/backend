@@ -168,6 +168,15 @@ node .wrangler/stage-qualified-npm.mjs --output=.wrangler/sdk-npm-stage-0.1.0-20
 pip install mainbrella==0.1.0
 ```
 
+After the `mainbrella` npm organization was created, the second staging attempt
+succeeded. Stage ID: `43d48f80-5495-44f9-9568-8af8aeff1d36`, package
+`@mainbrella/sdk`, version `0.1.0`, tag `latest`, public access. The staged archive
+was downloaded and matched the exact qualified SHA-256 above (28,333 bytes).
+Evidence: `.wrangler/sdk-npm-stage-0.1.0-20261006-r2/stage-verification.json`.
+It awaits npm registry validation and maintainer approval in the npmjs.com profile
+menu → Staged Packages. Browser 2FA approval is npm's required final publication
+step; 0.1.0 is not publicly installable until that completes. Do not stage it again.
+
 The isolated `.wrangler/sdk-publish-tools` environment already contains Twine.
 Supply registry credentials only through the release environment. Do not rerun
 the full two-start gate to reproduce the reconciliation without a new start budget.
