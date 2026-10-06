@@ -1,0 +1,13 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-webhook-qualification",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "main": "webhook-receiver-worker.js",
+  "compatibility_date": "2026-10-05",
+  "compatibility_flags": ["enable_request_signal"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "durable_objects": { "bindings": [{ "name": "RECEIVER", "class_name": "WebhookQualificationReceiver" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WebhookQualificationReceiver"] }]
+}

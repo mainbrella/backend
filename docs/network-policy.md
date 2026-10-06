@@ -1,6 +1,6 @@
 # Outbound network control rollout
 
-Internet-off creation is implemented locally and disabled by default. Its tests exercise actual API handlers, account admission, the private controller and the exact native start option through an adapted local provider. No paid provider start, deployment or remote configuration was performed.
+Internet-off creation is implemented and remains disabled pending the complete release gate. The October 6 UTC live qualification verified public egress denial and required programmatic access on Cloudflare, as detailed below. Local tests also exercise actual API handlers, account admission and the private start option.
 
 ## Implemented boundary
 
@@ -24,6 +24,32 @@ Record API/private versions, installed SDK/archive hashes, image digest, size, g
 - No denied traffic charges can renew compute or cross an old generation into its replacement.
 
 Check provider documentation and observed behavior rather than treating a mock start option as isolation evidence. Keep the flag disabled if any bypass or ingress regression is unresolved. Do not promise domain/CIDR filtering or safe secret injection based on this result.
+
+## October 6 UTC live evidence
+
+The pinned qualification API `05aaaf48-f5e4-4364-b443-7144faa751f6` and private
+runtime `8e57ea75-8b66-4519-9297-bcbe3d100fcd` consumed three Lite Node starts:
+one internet-on control and two internet-off generations. Every generation was
+cleaned up; primary usage increased from 17 to 20 starts, secondary usage stayed
+at zero, and both accounts have zero containers. Two verifier issues (stdin EOF
+racing exit and bounded npm DNS timeout handling) required the continuations.
+
+The root guest's ten positive controls all passed online and all failed offline:
+A/AAAA/TXT DNS, public HTTP/HTTPS, hostname HTTPS, direct IPv4/IPv6 TCP,
+alternate-port TCP and UDP DNS. The final offline generation passed binary
+files, stdin EOF, native PTY resize/SIGTERM, cancellation, loopback, protected
+preview HTTP/WebSockets/revocation, same-key replay and policy conflict, and
+cross-account observation/configuration checks. Offline npm remained denied
+but reached the execution timeout; fast package-manager DNS failure remains a
+usability gate. Browser terminal/tmux, SSH, replacement-generation fencing and
+expiry/retention compatibility still require live evidence.
+
+The combined verifier stopped at webhook delivery, before its final aggregate
+checks. Compare the recorded online and offline network fields directly; do
+not describe the combined report as a release pass. Evidence:
+[job3-verification.json](../.wrangler/job3-20261006/workload-final/job3-verification.json).
+Production enablement was reverted while the remaining gates are incomplete.
+The separate native interception/credential-injection experiment remains unrun.
 
 ## Next policy and secrets work
 

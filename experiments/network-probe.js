@@ -23,7 +23,7 @@ export async function relayRequest(request, env, props, fetcher = fetch, now = D
   target.searchParams.set('runId', props.runId);
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(5000)]);
   try {
-    const response = await fetcher(target, { method: 'GET', redirect: 'error', credentials: 'omit', signal,
+    const response = await fetcher(target, { method: 'GET', redirect: 'manual', credentials: 'omit', signal,
       headers: { Authorization: `Bearer ${env.NETWORK_PROBE_RELAY_TOKEN}`, Accept: 'application/json' } });
     const bytes = await readFileBytes(response.body, 4096, signal);
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));

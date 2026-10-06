@@ -44,7 +44,7 @@ test('one-time secrets are encrypted at rest and signed replay delivery excludes
   const read = await (await f.hooks.fetch(request())).json(); assert.ok(!('signingSecret' in read)); assert.ok(!JSON.stringify(read).includes('iv'));
   await f.hooks.tick(); assert.equal(calls.length, 2);
   for (const call of calls) {
-    assert.equal(call.url, 'https://relay.example.com/customer'); assert.equal(call.options.redirect, 'error'); assert.equal(call.options.credentials, 'omit');
+    assert.equal(call.url, 'https://relay.example.com/customer'); assert.equal(call.options.redirect, 'manual'); assert.equal(call.options.credentials, 'omit');
     const signature = call.options.headers['Mainbrella-Signature'], match = /^t=(\d+),v1=([a-f0-9]{64})$/.exec(signature);
     assert.equal(match[2], createHmac('sha256', secret).update(`${match[1]}.${call.options.body}`).digest('hex'));
     const payload = JSON.parse(call.options.body); assert.equal(payload.container.createdAt, generation);
@@ -142,4 +142,29 @@ test('concurrent stop and webhook rotation use lifecycle-first locks and reject 
   assert.equal(stopped.status, 200); assert.equal(rotated.status, 409);
   assert.equal((await f.deliveries()).length, 1);
   assert.equal(f.values.get('workloadWebhooks').deliveries[0].event.type, 'stopped');
+});
+
+test('the default transport calls global fetch with its platform receiver instead of the outbox instance', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async function () {
+    assert.ok(this === undefined || this === globalThis, 'Cloudflare rejects an arbitrary fetch receiver');
+    calls++; return new Response(null, { status: 204 });
+  });
+  const f = await fixture();
+  const hooks = new WorkloadWebhooks(f.controller, { ...env });
+  assert.equal((await hooks.fetch(request('PUT', { url: 'https://relay.example.com/customer', replayFromCursor: 0 }))).status, 201);
+  await hooks.tick(); assert.equal(calls, 2);
+  const result = await (await hooks.fetch(request('GET', undefined, '/deliveries'))).json();
+  assert.ok(result.deliveries.every(delivery => delivery.status === 'delivered'));
+});
+
+test('redirect responses remain failed deliveries and never follow the destination', async () => {
+  const calls = [];
+  const f = await fixture(async (url, options) => {
+    calls.push(url); assert.equal(options.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://foreign.example/collect' } });
+  });
+  await f.configure({ replayFromCursor: 1 }); await f.hooks.tick();
+  assert.deepEqual(calls, ['https://relay.example.com/customer']);
+  const [delivery] = await f.deliveries(); assert.equal(delivery.status, 'pending'); assert.equal(delivery.httpStatus, 302);
 });

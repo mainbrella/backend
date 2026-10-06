@@ -38,7 +38,7 @@ test('metric queries filter provider identity, bound generation/time and never e
   const f = await fixture(t); let queries = 0;
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
     queries++; assert.equal(String(input), 'https://api.cloudflare.com/client/v4/graphql');
-    assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer private-analytics-token'); assert.equal(options?.redirect, 'error');
+    assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer private-analytics-token'); assert.equal(options?.redirect, 'manual');
     const body = JSON.parse(options!.body as string); assert.equal(body.variables.label, `mb_generation=${telemetryId}`);
     assert.equal(body.variables.from, GENERATION_ONE); assert.equal(body.variables.to, new Date(now).toISOString());
     assert.match(body.query, /datetime_lt/); return Response.json(metricData([row]));
@@ -68,4 +68,15 @@ test('empty and legacy metric evidence stays unobserved; malformed, cross-genera
   let calls = 0; t.mock.method(globalThis, 'fetch', async () => { calls++; return Response.json({}); });
   const response = await handleRequest(request('metrics'), f.env); assert.equal(response.status, 200); assert.equal(calls, 0);
   assert.equal((await response.json() as { state: string }).state, 'unobserved');
+});
+
+test('provider redirects fail closed without sending the analytics credential to another destination', async t => {
+  const f = await fixture(t); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    calls++; assert.equal(String(input), 'https://api.cloudflare.com/client/v4/graphql');
+    assert.equal(options?.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://foreign.example/collect' } });
+  });
+  const response = await handleRequest(request('metrics'), f.env);
+  assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'metrics_unavailable' }); assert.equal(calls, 1);
 });

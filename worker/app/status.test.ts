@@ -67,7 +67,8 @@ test('observations and incidents require the dedicated credential and reject mal
 
 test('scheduled probes persist failures without claiming synthetic provisioning health or launching work', async t => {
   const f = fixture(t), targets: string[] = [];
-  await collectStatus(f.env, (async (url: string | URL | Request) => {
+  await collectStatus(f.env, (async (url: string | URL | Request, options?: RequestInit) => {
+    assert.equal(options?.redirect, 'manual');
     targets.push(String(url));
     return String(url).endsWith('/health') ? Response.json({ ok: false }) : new Response('homepage');
   }) as typeof fetch);
@@ -102,4 +103,15 @@ test('an older active incident remains visible when recent resolved incidents fi
   const result = await (await handleRequest(request(), f.env)).json() as any;
   assert.equal(result.state, 'degraded'); assert.equal(result.incidents.length, 50);
   assert.equal(result.incidents[0].id, activeId);
+});
+
+test('scheduled reachability treats redirects as failure without following another host', async t => {
+  const f = fixture(t); let calls = 0;
+  await collectStatus(f.env, (async (_url: RequestInfo | URL, options?: RequestInit) => {
+    calls++; assert.equal(options?.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://foreign.example/' } });
+  }) as typeof fetch);
+  const result = await (await handleRequest(request(), f.env)).json() as any;
+  assert.equal(calls, 2);
+  for (const component of ['website', 'api']) assert.equal(result.components.find((c: any) => c.component === component).state, 'outage');
 });

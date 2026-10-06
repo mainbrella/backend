@@ -43,7 +43,7 @@ export function decodeMetrics(data: unknown, telemetryId: string, from: number, 
 export async function queryMetrics(env: Env, telemetryId: string, from: number, to: number, signal: AbortSignal): Promise<MetricBucket[]> {
   const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
   const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST', redirect: 'error', signal: boundedSignal,
+    method: 'POST', redirect: 'manual', signal: boundedSignal,
     headers: { Authorization: `Bearer ${env.WORKLOAD_METRICS_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ query, variables: { accountTag: env.WORKLOAD_METRICS_ACCOUNT_ID, from: new Date(from).toISOString(),
       to: new Date(to).toISOString(), label: `mb_generation=${telemetryId}` } }),

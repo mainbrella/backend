@@ -9,7 +9,7 @@ const configView = config => ({ id: config.id, url: config.url, createdAt: confi
 const deliveryView = ({ configId, event, ...delivery }) => delivery;
 
 export class WorkloadWebhooks {
-  constructor(controller, env, fetcher = fetch) { Object.assign(this, { controller, env, fetcher }); this.tail = Promise.resolve(); this.inflight = new Map(); }
+  constructor(controller, env, fetcher = (...args) => fetch(...args)) { Object.assign(this, { controller, env, fetcher }); this.tail = Promise.resolve(); this.inflight = new Map(); }
   configured() { return webhooksConfigured(this.env) && /^[a-f0-9]{64}$/.test(this.env.WEBHOOK_ENCRYPTION_KEY ?? ''); }
   async serialized(fn) {
     const previous = this.tail; let release; this.tail = new Promise(resolve => { release = resolve; }); await previous;
@@ -144,7 +144,7 @@ export class WorkloadWebhooks {
         if (abort.signal.aborted || !current.configs.some(item => item.id === configId)) throw new Error('webhook_removed');
         // Launch under the short configuration lock, then await outside it so
         // removal can abort transport without waiting for the receiver.
-        pending = this.fetcher(target, { method: 'POST', redirect: 'error', credentials: 'omit',
+        pending = this.fetcher(target, { method: 'POST', redirect: 'manual', credentials: 'omit',
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(10_000)]),
           headers: { 'Content-Type': 'application/json', 'Mainbrella-Event-Id': delivery.id, 'Mainbrella-Signature': `t=${timestamp},v1=${signature}` }, body });
       });

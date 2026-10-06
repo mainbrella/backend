@@ -11,17 +11,19 @@ stop. The report records `releaseQualified: true` and confirmed cleanup.
 
 Current deployed versions:
 
-- API: `b966bff2-9ad0-4263-bdc3-72765fb076c8`
-- Private runtime: `582003e9-0346-4f49-8425-5e752e96e480`
+- API: `b3f683e5-8277-442f-9ab4-f1bf2b1baca5`
+- Private runtime: `560bf176-6e61-4555-b0ed-48b98332d0b2`
 - Gateway: `6ea1bc44-2aa1-404b-89d7-074a876e35ce`
 
-Both enablement flags are true. Public `/capabilities` confirms support; the
-final account checks confirm zero running containers, primary starts increased
-from 16 to 17, and secondary starts stayed at zero. The generation was stopped
+Both preview enablement flags are true. The pair above includes the job-3
+transport compatibility fixes; metrics, webhooks and internet control remain
+disabled. Public `/capabilities` confirms preview support. Job 3 consumed three
+additional Lite starts with confirmed cleanup; final primary usage is 20,
+secondary usage is zero, and both accounts have zero containers. The earlier
+preview follow-up increased primary starts from 16 to 17. The generation was stopped
 78 seconds after its creation request, within the approved 30-minute cap.
 JavaScript/Python SDK helpers and capability-gated dashboard controls are
-implemented locally; the deployed authenticated dashboard remains a separate
-integration check. Cookie sessions and absolute redirect rewriting remain
+implemented, and the operator confirms the deployed preview dashboard works. Cookie sessions and absolute redirect rewriting remain
 unsupported. Historical checkpoints below describe earlier rollout states.
 
 Evidence is local and ignored by Git:

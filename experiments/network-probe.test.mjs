@@ -24,7 +24,7 @@ test('relay injection stays outside guest requests and receiver responses are re
   let calls = 0;
   const response = await relayRequest(request(undefined, { headers: { Authorization: 'guest', Cookie: 'guest', 'X-Secret': 'guest' } }), env, props, async (url, options) => {
     calls++; assert.equal(url.href, env.NETWORK_PROBE_RELAY_URL + '?runId=' + runId);
-    assert.equal(options.redirect, 'error'); assert.equal(options.credentials, 'omit');
+    assert.equal(options.redirect, 'manual'); assert.equal(options.credentials, 'omit');
     assert.deepEqual(options.headers, { Authorization: 'Bearer ' + env.NETWORK_PROBE_RELAY_TOKEN, Accept: 'application/json' });
     return Response.json({ authenticated: true, runId, reflectedToken: env.NETWORK_PROBE_RELAY_TOKEN }, { headers: { 'Set-Cookie': env.NETWORK_PROBE_RELAY_TOKEN } });
   });

@@ -95,7 +95,7 @@ export async function collectStatus(env: Env, fetcher: typeof fetch = fetch) {
     const start = Date.now();
     let state: Observation['state'] = 'outage';
     try {
-      const response = await fetcher(target, { redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
       if (component === 'api') { if (response.ok && (await response.json() as { ok?: boolean }).ok === true) state = 'operational'; }
       else { if (response.ok) state = 'operational'; await response.body?.cancel(); }
     } catch {}
