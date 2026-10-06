@@ -13,8 +13,8 @@ the relevant topic when the full contract is unnecessary.
 Use `https://api.mainbrella.com` unless the user specifies another environment.
 Mainbrella uses REST for lifecycle, foreground command execution, and file transfer.
 The Python SDK is published as `mainbrella` 0.1.0: `pip install mainbrella==0.1.0`.
-The JavaScript SDK remains unpublished; install from `sdk/javascript` when the
-backend checkout is available. See the SDK references for the actual APIs.
+The JavaScript SDK is published as `@mainbrella/sdk` 0.1.0: `npm install @mainbrella/sdk@0.1.0`.
+See the SDK references for the actual APIs.
 Use public `GET /capabilities` to discover deployment support before choosing an
 execution mode. Obtain account allowances and deployed images from `/containers`.
 

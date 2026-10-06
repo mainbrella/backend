@@ -260,7 +260,7 @@ sandbox's exact generation. Create returns URL and grant metadata; list returns
 metadata only. JavaScript accepts `create(port, {ttlSeconds})`; Python accepts
 `create(port, ttl_seconds=...)`. Neither retries issuance. Reconciliation failures
 preserve a validated `previewId` / `preview_id` for explicit revocation retry.
-Python 0.1.0 is published on PyPI. JavaScript remains unpublished and requires a local checkout or qualified archive. Follow each SDK reference for installation.
+Python 0.1.0 is published on PyPI and JavaScript 0.1.0 on npm. Follow each SDK reference for installation.
 
 The dashboard reads public capabilities without credentials and adds a compact
 Preview control only when support is advertised. Its expandable port form creates

@@ -1,8 +1,8 @@
 # SDK artifact qualification and release
 
-The JavaScript package `@mainbrella/sdk` is version 0.1.0, unpublished. Python
-package `mainbrella` 0.1.0 was published to PyPI on October 6, 2026 and its registry
-downloads and clean installations were verified. Runtime dependencies are empty. Preserve the repository's
+The JavaScript package `@mainbrella/sdk` 0.1.0 and Python package `mainbrella`
+0.1.0 were published to npm and PyPI on October 6, 2026. Registry downloads and
+clean installations of both packages were verified. Runtime dependencies are empty. Preserve the repository's
 GPL v3 license in both distributions; changing the SDK license is a separate
 owner decision. The backend SDK directories own their code, declarations and
 README instructions; the web SDK references are generated copies.
@@ -145,7 +145,7 @@ archive each passed all 13 contract tests with isolated imports. Evidence is in
 
 The npm token authenticated as `andrewarrow`, but publishing the qualified tarball
 returned `E403`: "Two-factor authentication or granular access token with bypass
-2fa enabled is required to publish packages." The npm package remains unpublished.
+2fa enabled is required to publish packages." The npm package was unpublished at that point.
 Use [staged publishing](https://docs.npmjs.com/staged-publishing/) for this release:
 submit the exact qualified tarball with the existing token, then review and approve
 it on npmjs.com with browser 2FA. Submission requires no 2FA bypass. Staging supports
@@ -173,9 +173,14 @@ succeeded. Stage ID: `43d48f80-5495-44f9-9568-8af8aeff1d36`, package
 `@mainbrella/sdk`, version `0.1.0`, tag `latest`, public access. The staged archive
 was downloaded and matched the exact qualified SHA-256 above (28,333 bytes).
 Evidence: `.wrangler/sdk-npm-stage-0.1.0-20261006-r2/stage-verification.json`.
-It awaits npm registry validation and maintainer approval in the npmjs.com profile
-menu → Staged Packages. Browser 2FA approval is npm's required final publication
-step; 0.1.0 is not publicly installable until that completes. Do not stage it again.
+The maintainer subsequently approved the stage through the npmjs.com profile
+menu → Staged Packages with browser 2FA. Version 0.1.0 is now publicly installable.
+Do not stage or publish that version again.
+
+Fresh npm registry downloads match the exact qualified SHA-256 above and npm's
+SHA-512 integrity metadata. A clean `npm install @mainbrella/sdk@0.1.0` passed all
+22 installed contract tests, the TypeScript declaration check, and CLI version
+verification. Evidence: `.wrangler/sdk-npm-registry-verification-0.1.0-20261006/registry-verification.json`.
 
 The isolated `.wrangler/sdk-publish-tools` environment already contains Twine.
 Supply registry credentials only through the release environment. Do not rerun

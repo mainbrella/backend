@@ -1,9 +1,9 @@
 # Mainbrella JavaScript SDK
 
-Local package, not published to npm yet. Requires Node 22+; no dependencies.
+Published as `@mainbrella/sdk` 0.1.0 on npm. Requires Node 22+; no runtime dependencies.
 
 ```sh
-npm install /absolute/path/to/backend/sdk/javascript
+npm install @mainbrella/sdk@0.1.0
 ```
 
 ```js
@@ -51,9 +51,9 @@ operations share the four-operation pool and 30-second file deadline. Recursive
 deletion and moves across filesystems may partly complete before interruption;
 inspect state before retrying a mutation. Watchers remain unsupported.
 
-Versioned local archives can be built and checked with backend `npm run sdk:qualify`.
-Install its `.tgz` with `npm install /path/to/mainbrella-sdk-0.1.0.tgz`; this remains
-an archive installation, not an npm registry release. See the backend
+Release candidates are built and checked with backend `npm run sdk:qualify`.
+Version 0.1.0 passed artifact and bounded deployed qualification; fresh npm
+downloads match the qualified archive and pass clean-install checks. See the backend
 [SDK release runbook](https://github.com/mainbrella/backend/blob/main/docs/sdk-release.md)
 for artifact and deployed-workflow gates.
 
