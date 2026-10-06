@@ -36,6 +36,13 @@
 			"migrations_dir": "preview-migrations"
 		}
 	],
+	"ratelimits": [
+		{
+			"name": "EMAIL_AUTH_LIMIT",
+			"namespace_id": "1002",
+			"simple": { "limit": 20, "period": 60 }
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{

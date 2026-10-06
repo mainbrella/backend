@@ -223,14 +223,19 @@ export async function findOrCreateGoogleUser(
     "SELECT id, email, name, dob, google_sub, created_at FROM users WHERE google_sub = ? LIMIT 1",
   ).bind(identity.googleSub).first<AuthUser>();
   const existing = byGoogleSub || await env.DB.prepare(
-    "SELECT id, email, name, dob, google_sub, created_at FROM users WHERE email = ? LIMIT 1",
-  ).bind(identity.email).first<AuthUser>();
+    "SELECT id, email, name, dob, google_sub, created_at, password_hash FROM users WHERE lower(email) = ? LIMIT 1",
+  ).bind(identity.email).first<AuthUser & { password_hash: string | null }>();
 
   if (existing) {
     if (existing.google_sub && existing.google_sub !== identity.googleSub) {
       throw new AuthError("Google identity is already linked to another account.", 409);
     }
     if (!existing.google_sub) {
+      // Unverified email signup must never silently become a Google account:
+      // the password could belong to someone other than the Google owner.
+      if ("password_hash" in existing && existing.password_hash) {
+        throw new AuthError("Sign in with the password for this account.", 409);
+      }
       await env.DB.prepare("UPDATE users SET google_sub = ?, name = ? WHERE id = ?")
         .bind(identity.googleSub, normalizeUserName(identity.name, identity.email), existing.id)
         .run();
@@ -254,11 +259,7 @@ export async function findOrCreateGoogleUser(
     return { user, created: true };
   } catch (error) {
     if (!String(error instanceof Error ? error.message : error).toLowerCase().includes("unique")) throw error;
-    const concurrentUser = await env.DB.prepare(
-      "SELECT id, email, name, dob, google_sub, created_at FROM users WHERE email = ? LIMIT 1",
-    ).bind(identity.email).first<AuthUser>();
-    if (!concurrentUser) throw error;
-    return { user: concurrentUser, created: false };
+    return findOrCreateGoogleUser(env, identity);
   }
 }
 

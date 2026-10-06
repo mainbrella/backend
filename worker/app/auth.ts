@@ -32,6 +32,10 @@ export async function handleAuthRequest(request: Request, env: Env): Promise<Res
     return handleGoogleLogin(request, env, corsHeaders);
   }
   if (pathname === "/auth/email" && request.method === "POST") {
+    const address = request.headers.get("CF-Connecting-IP");
+    if (!env.EMAIL_AUTH_LIMIT || !address) return authJson({ error: "auth_unavailable" }, 503, corsHeaders);
+    const { success } = await env.EMAIL_AUTH_LIMIT.limit({ key: `email:${address}` });
+    if (!success) return authJson({ error: "rate_limited" }, 429, { ...corsHeaders, "retry-after": "60" });
     return handleEmailLogin(request, env, corsHeaders);
   }
   if (pathname === "/auth/app/google" && request.method === "POST") {

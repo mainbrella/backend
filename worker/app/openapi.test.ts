@@ -192,7 +192,7 @@ test("fallback preserves preflight, unsupported methods, and unknown paths", asy
   assert.equal(head.status, 405);
   const unknown = await handleRequest(new Request("https://api.mainbrella.com/images/not-an-id"), {} as Env);
   assert.equal(unknown.status, 404);
-  const invalid = await handleRequest(new Request("https://api.mainbrella.com/auth/email", { method: "POST", headers: { "content-type": "application/json" }, body: "invalid JSON" }), {} as Env);
+  const invalid = await handleRequest(new Request("https://api.mainbrella.com/auth/email", { method: "POST", headers: { "content-type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: "invalid JSON" }), { EMAIL_AUTH_LIMIT: { limit: async () => ({ success: true }) } } as unknown as Env);
   assert.equal(invalid.status, 400);
   assert.deepEqual(await invalid.json(), { error: "invalid_request" });
 });

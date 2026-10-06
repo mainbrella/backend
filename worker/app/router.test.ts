@@ -114,16 +114,16 @@ test("production auth origins retain credentialed CORS for empty, expired and un
   }
 });
 
-test("email auth rejects invalid credentials before touching the database", async () => {
+test("email auth rejects malformed input before touching the database", async () => {
   const response = await handleRequest(
     new Request("https://api.groupicorn.com/auth/email", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "wrong@example.com", password: "wrong" }),
+      headers: { "content-type": "application/json", "CF-Connecting-IP": "192.0.2.1" },
+      body: JSON.stringify({ email: "not-an-email", password: "wrong" }),
     }),
-    {} as Env,
+    { EMAIL_AUTH_LIMIT: { limit: async () => ({ success: true }) } } as unknown as Env,
   );
 
-  assert.equal(response.status, 401);
-  assert.deepEqual(await response.json(), { error: "invalid_credentials" });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_request" });
 });
