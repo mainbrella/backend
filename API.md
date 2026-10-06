@@ -182,10 +182,11 @@ that account's existing containers.
 
 All plans offer five sizes with bash, tmux and outbound internet. `POST /containers` accepts `size`: `lite` (default), `small`, `medium`, `large`, or `xl`. Size is included in the idempotency fingerprint. The default image includes Node 24; other runtimes depend on the selected image. All include SSH and browser terminals. A container permits four concurrent
 terminal connections (browser/SSH combined). An account permits ten live SSH
-access tokens, each lasting at most 15 minutes or the machine deadline. Snapshots,
-resume after stop, custom resources, SDKs, teams, advanced logs/audits and priority
-capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
-The filesystem is lost when a container stops.
+access tokens, each lasting at most 15 minutes or the machine deadline. Process
+resume after stop, custom resources, published SDKs, teams, advanced logs/audits and
+priority capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
+Ordinary stop discards unsaved filesystem changes; save a workspace explicitly
+to restore its filesystem into a fresh container.
 
 Ownership and resources come from the authenticated account and server policy.
 Request bodies and client headers cannot override the owner, plan, registry image, raw resource configuration,
@@ -255,7 +256,8 @@ directory operations below when supported by the deployment.
 Runtime file operations are bounded by 30 seconds and the hard container deadline,
 share the four-command execution pool, and renew idle activity. Disconnect or stop
 requests cancellation. A lost response may hide a completed write; read to reconcile
-before retrying. Files are ephemeral and disappear when the machine stops. Custom
+before retrying. Ordinary stop discards unsaved files; save a workspace or export
+outputs first. Custom
 images must retain `/bin/sh` and GNU coreutils, supplied by Mainbrella's base image.
 
 ```js
@@ -621,7 +623,7 @@ Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowa
 
 ## Saved workspaces and portable export
 
-Discover `capabilities.persistence.snapshots` before issuing saves or restores. Issuance is disabled until the runtime and API deployment have passed live qualification. Ordinary stop remains destructive; save explicitly before stopping.
+Discover `capabilities.persistence.snapshots` before issuing saves or restores. Saved-workspace issuance is enabled in the qualified production deployment; other deployments may disable it. Ordinary stop remains destructive; save explicitly before stopping.
 
 `POST /workspaces` accepts `{id, createdAt, name, stop?}` and requires an `Idempotency-Key`. The source identity must match a running generation owned by the authenticated account. Save captures the writable root filesystem, commits its private provider handle, and optionally stops that exact generation. Persist the request body and key before sending: repeat the identical request after a lost response. Recovery receipts last 24 hours. A capture whose provider result cannot be recovered fails closed rather than silently taking another snapshot.
 
