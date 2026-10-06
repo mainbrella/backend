@@ -71,13 +71,13 @@ test('scheduled probes persist failures without claiming synthetic provisioning 
     assert.equal(options?.redirect, 'manual');
     targets.push(String(url));
     return String(url).endsWith('/health') ? Response.json({ ok: false }) : new Response('homepage');
-  }) as typeof fetch);
+  }) as typeof fetch, async () => {});
   const result = await (await handleRequest(request(), f.env)).json() as any;
   assert.equal(result.components.find((c: any) => c.component === 'api').state, 'outage');
   assert.equal(result.components.find((c: any) => c.component === 'website').scope, 'reachability');
   assert.equal(result.components.find((c: any) => c.component === 'auth').scope, 'control_plane');
   assert.equal(result.components.find((c: any) => c.component === 'provisioning').state, 'unknown');
-  assert.equal(targets.length, 2);
+  assert.equal(targets.length, 4);
 });
 
 test('history cursors preserve equal timestamps and hide expired evidence before maintenance', async t => {
@@ -110,8 +110,28 @@ test('scheduled reachability treats redirects as failure without following anoth
   await collectStatus(f.env, (async (_url: RequestInfo | URL, options?: RequestInit) => {
     calls++; assert.equal(options?.redirect, 'manual');
     return new Response(null, { status: 302, headers: { Location: 'https://foreign.example/' } });
-  }) as typeof fetch);
+  }) as typeof fetch, async () => {});
   const result = await (await handleRequest(request(), f.env)).json() as any;
-  assert.equal(calls, 2);
+  assert.equal(calls, 6);
   for (const component of ['website', 'api']) assert.equal(result.components.find((c: any) => c.component === component).state, 'outage');
+});
+
+test('scheduled checks recover from deployment interruptions before recording an outage', async t => {
+  const f = fixture(t), attempts = new Map<string, number>(), waits: number[] = [];
+  await collectStatus(f.env, (async (url: RequestInfo | URL) => {
+    const target = String(url), count = (attempts.get(target) ?? 0) + 1;
+    attempts.set(target, count);
+    if (count === 1) throw new Error('connection reset during deployment');
+    if (count === 2) return new Response('temporarily unavailable', { status: 503 });
+    return target.endsWith('/health') ? Response.json({ ok: true }) : new Response('homepage');
+  }) as typeof fetch, async ms => { waits.push(ms); });
+  const result = await (await handleRequest(request(), f.env)).json() as any;
+  for (const component of ['website', 'api']) assert.equal(result.components.find((c: any) => c.component === component).state, 'operational');
+  assert.deepEqual(waits, [1000, 2000, 1000, 2000]);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM status_observations WHERE state = 'outage'").get()!.count, 0);
+});
+
+test('API Worker enables public fetch routing for its own health probe', () => {
+  const config = JSON.parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8'));
+  assert.ok(config.compatibility_flags.includes('global_fetch_strictly_public'));
 });

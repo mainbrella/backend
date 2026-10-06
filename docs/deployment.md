@@ -79,7 +79,12 @@ of `deploy` and has no recurring schedule.
 
 Check `/capabilities`, `/status` and `/status/history`, then observe the
 five-minute collector producing fresh reachability/database evidence. These
-checks do not prove login, SSH, image builds or billing. Publish web integrations
+reachability checks retry failures twice, after one and two seconds, before
+recording an outage. API Worker configuration must retain
+`global_fetch_strictly_public` so its public `/health` self-request reaches the
+Worker rather than failing inside Cloudflare's same-zone routing. Deployments
+do not create incidents; a sustained failed health check still records an outage.
+These checks do not prove login, SSH, image builds or billing. Publish web integrations
 and feature claims only after the appropriate live workflow passes.
 
 Protected previews have a separate, disabled gateway configuration and routing

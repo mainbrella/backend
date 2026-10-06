@@ -89,16 +89,23 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
 
 // These inexpensive checks do not establish provisioning/SSH/build health. Those
 // components remain unknown until an operator or bounded synthetic probe reports.
-export async function collectStatus(env: Env, fetcher: typeof fetch = fetch) {
+export async function collectStatus(env: Env, fetcher: typeof fetch = fetch,
+  pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {
   const observations: Observation[] = [];
   for (const [component, target] of [['website', 'https://mainbrella.com/'], ['api', 'https://api.mainbrella.com/health']] as const) {
     const start = Date.now();
     let state: Observation['state'] = 'outage';
-    try {
-      const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
-      if (component === 'api') { if (response.ok && (await response.json() as { ok?: boolean }).ok === true) state = 'operational'; }
-      else { if (response.ok) state = 'operational'; await response.body?.cancel(); }
-    } catch {}
+    // Confirm failures before recording them: a short deployment interruption
+    // should not leave a five-minute outage sample after service has recovered.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await pause(attempt * 1000);
+      try {
+        const response = await fetcher(target, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+        if (component === 'api') { if (response.ok && (await response.json() as { ok?: boolean }).ok === true) state = 'operational'; }
+        else { if (response.ok) state = 'operational'; await response.body?.cancel(); }
+      } catch {}
+      if (state === 'operational') break;
+    }
     observations.push({ component, state, scope: 'reachability', latencyMs: Date.now() - start });
   }
   const start = Date.now();
