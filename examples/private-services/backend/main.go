@@ -26,7 +26,7 @@ func main() {
 	if err != nil { log.Fatal(err) }
 	http.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet { w.WriteHeader(http.StatusMethodNotAllowed); return }
-		rows, err := db.QueryContext(r.Context(), "SELECT id, name, email FROM users ORDER BY id")
+		rows, err := db.QueryContext(r.Context(), "SELECT * FROM users ORDER BY id")
 		if err != nil { http.Error(w, "Database unavailable", http.StatusServiceUnavailable); return }
 		defer rows.Close()
 		users := make([]user, 0, 3)

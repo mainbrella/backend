@@ -21,7 +21,14 @@ execution mode. Obtain account allowances and deployed images from `/containers`
 ## Quick Setup
 
 1. Read `MAINBRELLA_API_KEY` from the project's existing environment loading or
-   secret manager. It starts with `mb_`. If missing, ask the user to sign in at
+   secret manager. Honor an explicitly supplied credential variable and API origin
+   as a pair throughout setup, verification, and deployment. For example, use
+   `MAINBRELLA_LOCAL_API_KEY` only with the specified localhost API; map it to
+   `MAINBRELLA_API_KEY` in the local tool process, without rewriting `.env` or
+   sending it to production. Do not ask for the default variable when the supplied
+   variable already contains a valid key. It starts with `mb_`. If the selected
+   credential is missing, ask the user to provision it for that environment.
+   For production, ask them to sign in at
    `https://mainbrella.com/api-keys/`, create a named key, and provision it locally
    as `MAINBRELLA_API_KEY`. For an existing ignored `.env`, Node 22+ supports
    `node --env-file=.env mainbrella-doctor.mjs` without dependencies or shell
@@ -52,6 +59,10 @@ execution mode. Obtain account allowances and deployed images from `/containers`
    infrastructure tasks. Only choose IDs actually advertised by this deployment.
    For user-requested custom environments, read `/images` and use an owned `ready`
    image. `buildsEnabled` determines whether new builds can be submitted.
+   If the requested runtime image is unavailable, a compiled application may run
+   on an advertised image without its build toolchain. Confirm the guest OS,
+   architecture, and runtime-library requirements before choosing this fallback;
+   read [Compiled application deployment](references/compiled-application-deployment.md).
 
 ## Integrate
 
@@ -59,6 +70,14 @@ Use native HTTP facilities (`fetch` in Node, `urllib.request` in Python). Follow
 create, status, HTTP execution, file read/write, and deletion. Keep credentials server-side.
 If agent/tool-calling code already exists, add Mainbrella where execution occurs;
 otherwise add a small example matching the detected language.
+
+For multiple containers that need HTTP communication, require
+`networking.privateServices: true` and read
+[Private Services between machines](references/private-services-between-machines.md)
+for network creation and exact-generation membership. This feature is locally
+verified; production support has not been qualified. A caller can use
+`http://api.internal` after both guests are attached to the same network; issue
+a browser preview for the frontend separately.
 
 Create with a unique `Idempotency-Key` header (UUID recommended). Retry the same
 key and image selection within 24 hours after an ambiguous result. Use the
@@ -153,6 +172,13 @@ checks the retained result, then starts `sleep 30`, cancels it and polls for
 `canceled`. All checks share that one start. It requires foreground, background,
 streaming, reconnect, cancellation and binary file read/write capabilities, and
 deletes **only that container generation** in a `finally` block.
+
+Verification cleanup is separate from deployment cleanup. When both setup
+verification and a two-container deployment are requested, budget three starts:
+one temporary verifier and two app containers. Clean up the verifier in `finally`;
+keep successfully deployed app containers running for the requested preview,
+with saved generation-qualified cleanup instructions. Report their remaining
+leases and preview expiration. Do not run another full verifier for each app guest.
 
 Pass requires `ok: true`, `stdout: "hello from mainbrella"`, `exitCode: 0`,
 `files: "verified"`, `managed: "verified"`, `cancellation: "verified"`, and

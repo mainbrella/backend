@@ -495,3 +495,37 @@ Cloudflare's published marginal rates (checked 2026-10-05) are $0.072 per active
 Sources: [Cloudflare pricing](https://developers.cloudflare.com/containers/platform/pricing/), [E2B pricing](https://e2b.dev/pricing), [Daytona pricing](https://www.daytona.io/pricing).
 
 Deploy the private containers Worker before the API Worker, then publish the web build. This ensures the runtime enforces compute deadlines before the API advertises larger sizes and allowances. The `deploy` script uses that order.
+
+## Private Services between machines
+
+The October 7 commits add an account-owned HTTP service registry, native
+`*.internal` routing, exact-generation membership, and dashboard management.
+Create a network, register a backend port as `api`, and attach a frontend as a
+caller; `http://api.internal/users` connects them without exposing the backend
+through a public preview or putting a Mainbrella API key in the guest. Membership
+and machine lifecycles are independent. This is a local prototype; require
+`networking.privateServices: true` in `/capabilities` before using it.
+
+See [the API contract](API.md#private-services-between-machines) for requests,
+cleanup and limits. It supports bounded plain HTTP, not arbitrary TCP, HTTPS,
+WebSockets, private IPs or direct database connections.
+
+The saved October 7 local reports confirm private HTTP between two machines and
+a backend with no preview. Both full runs failed later at frontend preview
+checks, with cleanup recorded; they do not establish complete qualification.
+`scripts/verify-private-services.mjs` is the bounded local verifier.
+
+The separate [local users demo](examples/private-services/README.md) subsequently
+passed private Go/SQLite access, frontend preview HTML/API, and browser rendering
+of three rows at 390×844, 768×1024, 1280×800, and 1440×900 without horizontal
+overflow. Its launcher leaves the two Lite app generations running and provides
+explicit cleanup. This successful deployment does not replace the broader
+isolation verifier or establish production qualification.
+
+For competitor copy, compare against Daytona's [linked sandboxes](https://www.daytona.io/docs/en/sandboxes/#linked-sandboxes),
+reviewed October 7, 2026: same-runner parent/child networking, DNS aliases,
+ephemeral children and cascading parent deletion. Mainbrella's implemented
+advantage for HTTP services is explicit membership among independently managed
+machines, including attachment after creation. Daytona also documents direct
+port connections; our HTTP prototype does not establish transport parity,
+performance superiority, or production availability.

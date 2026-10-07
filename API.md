@@ -90,6 +90,14 @@ for a failure. `MAINBRELLA_API_URL` can select another HTTPS API origin, or HTTP
 localhost for development. `MAINBRELLA_CATALOG_ID` selects an advertised image for
 verification; it defaults to `node`.
 
+When the user supplies a credential variable and origin explicitly, keep that
+pair throughout doctor, verification, and deployment. For a local key stored as
+`MAINBRELLA_LOCAL_API_KEY`, load the existing `.env` and map that value to
+`MAINBRELLA_API_KEY` only in the tool process, with
+`MAINBRELLA_API_URL=http://localhost:8787`. The tools still read their standard
+variable names. Do not rewrite `.env`, request a second key, or fall back to the
+production origin with the local credential.
+
 Verification runs `echo "hello from mainbrella"`, checks stdout and exit code 0,
 writes and reads a six-byte binary probe under `/tmp`, and compares every byte.
 It also starts a managed job, consumes SSE output (resuming the last cursor if
@@ -108,6 +116,35 @@ on a lost response or a `starting` result. Unresolved startup produces
 `creation_ambiguous` and `cleanup: "reconcile_manually"`, with `creationKey` for
 recovery: repeat the same POST body and key within 24 hours. It never deletes a
 machine by guesswork. Cleanup failures include the created ID and generation.
+
+Budget verification and deployment separately. Setup verification followed by a
+two-container app consumes three starts: the verifier cleans up its own generation
+in `finally`, while a successful deployment leaves its two app generations running
+for use. Save identities and provide an explicit cleanup command; report the app
+leases and preview expiration separately from the verifier's cleanup result.
+
+## Compiled application deployment
+
+An advertised image can run a compiled binary even when it lacks the source
+language's compiler. This is an optional fallback when the requested runtime
+image is unavailable. Confirm the guest OS and architecture (for example with
+`uname -s` and `uname -m`) and any shared-library requirements. Do not infer the
+guest architecture from the local computer or assume every binary is portable.
+
+Build locally using the project's existing toolchain and dependency conventions,
+targeting the guest platform. The local Go/SQLite example uses a pure-Go SQLite
+driver and `GOOS=linux GOARCH=amd64 CGO_ENABLED=0`; a CGO-based driver may need a
+different build environment and matching runtime libraries. Local compilation
+also avoids putting a build workload into a 256 MiB Lite guest.
+
+Upload through generation-qualified `PUT /containers/files` in chunks of at most
+1 MiB, concatenate in order, and verify the complete binary's SHA-256 against the
+local artifact before execution. File uploads create mode 0600; set executable
+permissions explicitly. Reconcile uncertain writes before retrying. Start the
+server with an execution mode appropriate to its lifetime: managed jobs are
+limited to 15 minutes; the detached `setsid nohup` pattern in the static-site
+recipe remains bounded by the container lease. Check HTTP readiness before
+issuing a preview, and save generation-qualified cleanup instructions.
 
 ## Static-site deployment over HTTP
 
@@ -568,6 +605,58 @@ Use authenticated `GET /containers` for account allowances, usage, running
 generations and the deployed `imageCatalog`. New generations include
 `imageDigest`, the server-resolved image reference; older generations may omit it.
 Capability discovery does not contact Stripe or reserve a start.
+
+## Private Services between machines
+
+Private Services is a local HTTP prototype, enabled by `LOCAL_DEV=true` or
+explicit `PRIVATE_SERVICES_ENABLED=true` with both runtime bindings. Before
+creating networks or attaching machines, require
+`GET /capabilities` to return `networking.privateServices: true`; an absent or
+false value means it is unavailable. Production support has not been qualified.
+
+Create an account-owned named network, then attach exact running generations.
+Register a backend as `api` with application port `8080`, and attach a frontend
+as `web` without a port for caller-only access. From that frontend,
+`curl http://api.internal/users` reaches the backend's registered port. The
+platform supplies account and generation identity; guests need no Mainbrella
+API key or public preview URL for this connection.
+
+| Request | Body / behavior |
+| --- | --- |
+| `POST /private-services/networks` | `{"name":"app"}` creates an empty network (201). |
+| `GET /private-services/networks` | Returns `{networks:[{name,members}]}` for the authenticated account. |
+| `PUT /private-services/members?network=app` | `{"id":"<backend-id>","createdAt":"<exact-generation>","name":"api","port":8080}` registers a service (200). Omit `port` for a caller-only member. |
+| `DELETE /private-services/members?network=app` | Send the member's exact `id`, `createdAt`, and `name` to detach it without stopping it. |
+| `DELETE /private-services/networks?network=app` | Deletes an empty network; detach all members first. |
+
+API keys and browser sessions are accepted; cookie mutations require a trusted
+Origin. Creation and attachment require paid access and deployment enablement.
+Listing and cleanup remain available when issuance is disabled. Network and
+service names match `[a-z][a-z0-9-]{0,62}`. Each account has at most 16 networks,
+each with at most 32 members; each generation belongs to one network. Service
+names are unique within that network. Registered ports are 1024–65535.
+
+Only plain HTTP on port 80 to `http://NAME.internal` is routed. Requests and
+responses are each limited to 1 MiB, with a 10-second request timeout. HTTPS,
+WebSockets, CONNECT, arbitrary TCP/UDP, private IPs and direct database protocols
+are unsupported. Redirects are returned without being followed. This is service
+routing, not a general private LAN or an egress firewall.
+
+Both source and destination must be current, running, paid generations in the
+same account-owned network. Stale membership cannot reach a stopped or replaced
+generation; reattach a replacement explicitly. Delayed detach for an old
+generation cannot remove its replacement. Detach does not undo an application
+request already accepted. Membership never starts a machine, changes its internet
+policy, or issues public previews. Machines retain independent deadlines and
+stop behavior; deleting a member does not cascade to peers. To share a frontend
+with a browser, issue a separate protected preview for that frontend only.
+
+The repository's [local users demo](https://github.com/mainbrella/backend/tree/main/examples/private-services)
+provides the Node frontend → private Go backend → SQLite recipe and explicit
+cleanup command. It seeds three users and renders the results of
+`SELECT * FROM users ORDER BY id`. Its launcher verifies private HTTP, rendered
+rows, and frontend preview HTML/API while preserving unrelated containers.
+This local evidence does not establish production support.
 
 ## Protected application previews
 
