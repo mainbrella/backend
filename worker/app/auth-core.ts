@@ -12,6 +12,7 @@ const AUTH_ORIGINS = new Set([
   "https://mainbrella.com",
   "https://www.mainbrella.com",
   "https://raincoat.mainbrella.com",
+  "https://raindrop.mainbrella.com",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5174",

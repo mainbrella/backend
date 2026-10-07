@@ -58,12 +58,12 @@ test("admin users require a current allowlisted session and a trusted origin", a
   assert.equal((await call("/admin/users", memberToken)).status, 403);
   assert.equal((await call("/admin/users", adminToken, "GET", "https://example.com")).status, 403);
   assert.equal((await call("/admin/users", adminToken, "POST")).status, 405);
-  const preflight = await call("/admin/users", undefined, "OPTIONS", "https://raincoat.mainbrella.com");
+  const preflight = await call("/admin/users", undefined, "OPTIONS", "https://raindrop.mainbrella.com");
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("access-control-allow-credentials"), "true");
-  const response = await call("/admin/users", adminToken, "GET", "https://raincoat.mainbrella.com");
+  const response = await call("/admin/users", adminToken, "GET", "https://raindrop.mainbrella.com");
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("access-control-allow-origin"), "https://raincoat.mainbrella.com");
+  assert.equal(response.headers.get("access-control-allow-origin"), "https://raindrop.mainbrella.com");
   assert.equal(response.headers.get("cache-control"), "no-store");
   sqlite.prepare("UPDATE users SET email = 'new@example.com' WHERE id = ?").run(adminID);
   assert.equal((await call("/admin/users", adminToken)).status, 403);

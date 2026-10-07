@@ -80,7 +80,7 @@ test("auth me returns an empty session without a cookie", async () => {
 });
 
 test("production auth origins retain credentialed CORS for empty, expired and unavailable sessions", async () => {
-  for (const origin of ["https://mainbrella.com", "https://www.mainbrella.com", "https://raincoat.mainbrella.com", "http://localhost:5174", "http://127.0.0.1:5174"]) {
+  for (const origin of ["https://mainbrella.com", "https://www.mainbrella.com", "https://raincoat.mainbrella.com", "https://raindrop.mainbrella.com", "http://localhost:5174", "http://127.0.0.1:5174"]) {
     for (const state of ["empty", "expired", "unavailable"]) {
       const env = state === "empty" ? {} : { DB: {
         prepare() { return { bind() { return { async first() {
