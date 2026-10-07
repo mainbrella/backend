@@ -236,3 +236,12 @@ test("fallback preserves preflight, unsupported methods, and unknown paths", asy
   assert.equal(invalid.status, 400);
   assert.deepEqual(await invalid.json(), { error: "invalid_request" });
 });
+
+test("signup schemas document welcome email behavior and public authentication", async () => {
+  const { paths } = await document();
+  for (const path of ["/auth/email", "/auth/google", "/auth/app/google", "/auth/app/apple"]) {
+    assert.match(paths[path].post.description, /welcome email/);
+    assert.match(paths[path].post.description, /delivery failures do not fail signup/);
+    assert.deepEqual(paths[path].post.security, []);
+  }
+});

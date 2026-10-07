@@ -1,3 +1,4 @@
+import { welcomeNewUser } from "./welcome-email";
 import { scrypt, randomBytes, timingSafeEqual } from "node:crypto";
 import { AuthError, type AuthUser } from "./auth-core";
 
@@ -27,7 +28,7 @@ async function verifyPassword(password: string, hash: string | null): Promise<bo
   return timingSafeEqual(actual, expected) && Boolean(valid);
 }
 
-export async function signInOrCreateEmailUser(env: Env, email: unknown, password: unknown): Promise<{ user: AuthUser; created: boolean }> {
+export async function signInOrCreateEmailUser(env: Env, email: unknown, password: unknown, ctx?: ExecutionContext): Promise<{ user: AuthUser; created: boolean }> {
   if (typeof email !== "string" || typeof password !== "string") throw new AuthError("invalid_request", 400);
   const normalizedEmail = email.trim().toLowerCase();
   if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
@@ -65,5 +66,6 @@ export async function signInOrCreateEmailUser(env: Env, email: unknown, password
   if (saved.id !== user.id && !await verifyPassword(password, saved.password_hash)) {
     throw new AuthError("invalid_credentials");
   }
+  if (saved.id === user.id) await welcomeNewUser(env, saved, ctx);
   return { user: saved, created: saved.id === user.id };
 }

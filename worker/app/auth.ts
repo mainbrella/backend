@@ -11,7 +11,7 @@ import { handleNativeEmailLogin, handleNativeGoogleLogin } from "./auth-login";
 import { handleAppAnonymous, handleAppDelete, handleAppLogout, handleAppMe, handleAppRefresh } from "./auth-app";
 import { handleNativeAppleLogin } from "./auth-apple";
 
-export async function handleAuthRequest(request: Request, env: Env): Promise<Response> {
+export async function handleAuthRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const corsHeaders = authCorsHeaders(request);
   if (corsHeaders === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
@@ -29,23 +29,23 @@ export async function handleAuthRequest(request: Request, env: Env): Promise<Res
     return handleAppAnonymous(env, corsHeaders);
   }
   if (pathname === "/auth/google" && request.method === "POST") {
-    return handleGoogleLogin(request, env, corsHeaders);
+    return handleGoogleLogin(request, env, corsHeaders, ctx);
   }
   if (pathname === "/auth/email" && request.method === "POST") {
     const address = request.headers.get("CF-Connecting-IP");
     if (!env.EMAIL_AUTH_LIMIT || !address) return authJson({ error: "auth_unavailable" }, 503, corsHeaders);
     const { success } = await env.EMAIL_AUTH_LIMIT.limit({ key: `email:${address}` });
     if (!success) return authJson({ error: "rate_limited" }, 429, { ...corsHeaders, "retry-after": "60" });
-    return handleEmailLogin(request, env, corsHeaders);
+    return handleEmailLogin(request, env, corsHeaders, ctx);
   }
   if (pathname === "/auth/app/google" && request.method === "POST") {
-    return handleNativeGoogleLogin(request, env, corsHeaders);
+    return handleNativeGoogleLogin(request, env, corsHeaders, ctx);
   }
   if (pathname === "/auth/app/email" && request.method === "POST") {
     return handleNativeEmailLogin(request, env, corsHeaders);
   }
   if (pathname === "/auth/app/apple" && request.method === "POST") {
-    return handleNativeAppleLogin(request, env, corsHeaders);
+    return handleNativeAppleLogin(request, env, corsHeaders, ctx);
   }
   if (pathname === "/auth/app/me" && request.method === "GET") {
     return handleAppMe(request, env, corsHeaders);

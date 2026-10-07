@@ -64,7 +64,7 @@ async function handleLegacyRequest(
   }
 
   if (url.pathname.startsWith("/auth/")) {
-    return handleAuthRequest(request, env);
+    return handleAuthRequest(request, env, ctx);
   }
 
   if (url.pathname.startsWith("/admin/")) {

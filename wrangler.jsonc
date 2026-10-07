@@ -23,6 +23,9 @@
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
 	},
+	"send_email": [
+		{ "name": "WELCOME_EMAIL", "allowed_sender_addresses": ["andrew@mainbrella.com"] }
+	],
 	"d1_databases": [
 		{
 			"binding": "DB",

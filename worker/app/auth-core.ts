@@ -1,3 +1,4 @@
+import { welcomeNewUser } from "./welcome-email";
 import { jsonResponse } from "../shared/http";
 
 const AUTH_COOKIE_NAME = "mainbrella_session";
@@ -219,6 +220,7 @@ export function publicUser(user: AuthUser): Record<string, unknown> {
 export async function findOrCreateGoogleUser(
   env: Env,
   identity: GoogleIdentity,
+  ctx?: ExecutionContext,
 ): Promise<{ user: AuthUser; created: boolean }> {
   if (!env.DB) throw new AuthError("Authentication is unavailable.", 503);
 
@@ -259,10 +261,11 @@ export async function findOrCreateGoogleUser(
     await env.DB.prepare(
       "INSERT INTO users (id, email, name, google_sub) VALUES (?, ?, ?, ?)",
     ).bind(user.id, user.email, user.name, user.google_sub).run();
+    await welcomeNewUser(env, user, ctx);
     return { user, created: true };
   } catch (error) {
     if (!String(error instanceof Error ? error.message : error).toLowerCase().includes("unique")) throw error;
-    return findOrCreateGoogleUser(env, identity);
+    return findOrCreateGoogleUser(env, identity, ctx);
   }
 }
 

@@ -92,6 +92,18 @@ Local authentication and trial/subscription records are separate from production
 The local container configuration includes the Node image; the other catalog
 images are configured by the production deployment workflow.
 
+## Welcome emails
+
+New email, Google, and Apple accounts receive a plain-text welcome email from
+Andrew Arrow <andrew@mainbrella.com>. Existing sign-ins, provider linking,
+anonymous accounts, and the app-review account do not send a welcome email.
+The `WELCOME_EMAIL` Workers binding in `wrangler.jsonc` handles sending without
+an API token and restricts the sender to `andrew@mainbrella.com`. Before deploying,
+onboard `mainbrella.com` under Cloudflare Email Service → Email Sending.
+Production sends run through `ctx.waitUntil`; failures are logged as
+`welcome_email_failed` and do not prevent signup. Delivery is best effort with
+no automatic retries. Local Wrangler development simulates sending.
+
 ## Verification
 
 ```sh

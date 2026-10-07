@@ -70,22 +70,25 @@ test("Apple identity tokens require a valid signature, app audience, and nonce",
         };
       },
     } as unknown as D1Database;
+    const emails: EmailMessageBuilder[] = [];
+    const emailBinding = { async send(message: EmailMessageBuilder) { emails.push(message); return { messageId: "apple-welcome" }; } };
     async function signIn() {
       return handleRequest(new Request("https://api.groupicorn.com/auth/app/apple", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ identity_token: valid, nonce }),
-      }), { DB: db } as Env);
+      }), { DB: db, WELCOME_EMAIL: emailBinding } as unknown as Env);
     }
     const first = await signIn();
     assert.equal(first.status, 200);
     const firstTokens = await first.json() as { access_token: string; user: { id: string } };
     assert.equal((await signIn()).status, 200);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 1);
+    assert.deepEqual(emails.map(message => message.to), ["person@example.com"]);
     assert.equal(sqlite.prepare("SELECT apple_sub FROM users WHERE id = ?").get(firstTokens.user.id)?.apple_sub, "apple-user-id");
     const me = await handleRequest(new Request("https://api.groupicorn.com/auth/app/me", {
       headers: { Authorization: `Bearer ${firstTokens.access_token}` },
-    }), { DB: db } as Env);
+    }), { DB: db, WELCOME_EMAIL: emailBinding } as unknown as Env);
     assert.equal(me.status, 200);
   } finally {
     globalThis.fetch = originalFetch;

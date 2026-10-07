@@ -1,3 +1,4 @@
+import { welcomeNewUser } from "./welcome-email";
 import { AuthError, authJson, readJSON, type AuthUser, type StringHeaders } from "./auth-core";
 import { issueAppTokens } from "./auth-app";
 import { absorbAnonymousHerds } from "./auth-anonymous";
@@ -86,7 +87,7 @@ export async function verifyAppleIdentityToken(
   return { sub: claims.sub, email: email && email.includes("@") && email.length <= 320 ? email : null };
 }
 
-export async function handleNativeAppleLogin(request: Request, env: Env, headers: StringHeaders): Promise<Response> {
+export async function handleNativeAppleLogin(request: Request, env: Env, headers: StringHeaders, ctx?: ExecutionContext): Promise<Response> {
   if (!env.DB) return authJson({ error: "auth_unavailable" }, 503, headers);
   const body = await readJSON(request, 20_000);
   if (!body) return authJson({ error: "invalid_request" }, 400, headers);
@@ -116,6 +117,7 @@ export async function handleNativeAppleLogin(request: Request, env: Env, headers
       user = await env.DB.prepare(
         "SELECT id, email, name, dob, google_sub, created_at FROM users WHERE id = ? LIMIT 1",
       ).bind(id).first<AuthUser>();
+      if (user) await welcomeNewUser(env, user, ctx);
     }
     if (!user?.email) return authJson({ error: "email_required" }, 400, headers);
     await absorbAnonymousHerds(env, request, user.id);

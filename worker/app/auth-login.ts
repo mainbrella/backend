@@ -20,13 +20,14 @@ export async function handleGoogleLogin(
   request: Request,
   env: Env,
   corsHeaders: StringHeaders,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const body = await readJSON(request, 20_000);
   if (!body) return authJson({ error: "invalid_request" }, 400, corsHeaders);
 
   try {
     const identity = await verifyGoogleIdToken(body.credential, env);
-    const { user, created } = await findOrCreateGoogleUser(env, identity);
+    const { user, created } = await findOrCreateGoogleUser(env, identity, ctx);
     return authJson(
       { user: publicUser(user), created },
       200,
@@ -47,11 +48,12 @@ export async function handleEmailLogin(
   request: Request,
   env: Env,
   corsHeaders: StringHeaders,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   try {
     const body = await readJSON(request, 2_000);
     if (!body) return authJson({ error: "invalid_request" }, 400, corsHeaders);
-    const { user, created } = await signInOrCreateEmailUser(env, body.email, body.password);
+    const { user, created } = await signInOrCreateEmailUser(env, body.email, body.password, ctx);
     return authJson(
       { user: publicUser(user), created },
       200,
@@ -68,12 +70,13 @@ export async function handleNativeGoogleLogin(
   request: Request,
   env: Env,
   corsHeaders: StringHeaders,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const body = await readJSON(request, 20_000);
   if (!body) return authJson({ error: "invalid_request" }, 400, corsHeaders);
   try {
     const identity = await verifyGoogleIdToken(body.credential, env);
-    const { user } = await findOrCreateGoogleUser(env, identity);
+    const { user } = await findOrCreateGoogleUser(env, identity, ctx);
     await absorbAnonymousHerds(env, request, user.id);
     return authJson(await issueAppTokens(env, user), 200, corsHeaders);
   } catch (error) {
