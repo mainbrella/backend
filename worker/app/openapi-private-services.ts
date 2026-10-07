@@ -13,8 +13,14 @@ const description = 'Private Services HTTP prototype. Account-owned registry; ex
 export function registerPrivateServiceRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/private-services/networks', {
     operationId: 'listPrivateServiceNetworks', tags: ['Private Services'], summary: 'List owned networks and registered machine generations',
-    security: containerSecurity, description: `${description} Registry entries may outlive stopped generations; stale entries cannot route. Listing remains available when issuance is disabled and does not start machines.`,
-    request: { headers }, responses: { 200: jsonResponse(z.object({ networks: z.array(network).max(MAX_PRIVATE_NETWORKS) })), ...errors(400, 401, 403, 405, 503) },
+    security: containerSecurity, description: `${description} Registry entries may outlive stopped generations; stale entries cannot route. With search, page, or limit, returns pagination metadata; page defaults to 1 and limit to 10. Pages beyond the last page clamp to the last page. Without query parameters returns the complete registry for compatibility. Listing remains available when issuance is disabled and does not start machines.`,
+    request: { headers, query: z.object({
+      search: z.string().max(63).optional().describe('Case-insensitive substring of the network name.'),
+      page: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }) }, responses: { 200: jsonResponse(z.object({ networks: z.array(network).max(MAX_PRIVATE_NETWORKS),
+      total: z.number().int().nonnegative().optional(), totalNetworks: z.number().int().nonnegative().optional(),
+      page: z.number().int().positive().optional(), limit: z.number().int().positive().optional() })), ...errors(400, 401, 403, 405, 503) },
   }, handler);
   register(api, 'post', '/private-services/networks', {
     operationId: 'createPrivateServiceNetwork', tags: ['Private Services'], summary: 'Create an account-owned Private Services network',

@@ -3,7 +3,7 @@ import { containerUser } from './container-auth';
 import { runningContainer, containerError } from '../lib/container-service';
 import { resolveEntitlement } from '../lib/entitlements';
 import { validContainerId } from '../../containers/container-account-core.js';
-import { boundedPrivateBody, validServiceName, validPrivateMember } from '../../containers/private-services-contract.js';
+import { boundedPrivateBody, validServiceName, validPrivateMember, privateNetworkQuery } from '../../containers/private-services-contract.js';
 
 export function privateServicesConfigured(env: Env): boolean {
   return Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && (env.PRIVATE_SERVICES_ENABLED === 'true' || env.LOCAL_DEV === 'true'));
@@ -19,7 +19,7 @@ export async function handlePrivateServicesRequest(request: Request, env: Env): 
   if (!methods.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: [...methods, 'OPTIONS'].join(', ') });
   if (request.method !== 'GET' && !request.headers.has('Origin') && !request.headers.has('Authorization')) return authJson({ error: 'origin_required' }, 403, cors);
   const network = url.searchParams.get('network'), needsNetwork = members || request.method === 'DELETE';
-  if (needsNetwork ? !validServiceName(network) || url.searchParams.size !== 1 : url.search !== '') return authJson({ error: 'invalid_request' }, 400, cors);
+  if (needsNetwork ? !validServiceName(network) || url.searchParams.size !== 1 : request.method === 'GET' ? !privateNetworkQuery(url.searchParams) : url.search !== '') return authJson({ error: 'invalid_request' }, 400, cors);
   try {
     const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);

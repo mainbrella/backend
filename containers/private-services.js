@@ -1,5 +1,5 @@
 import { MAX_PRIVATE_NETWORKS, MAX_PRIVATE_MEMBERS, PRIVATE_TIMEOUT_MS, validServiceName,
-  validPrivateMember, privateTarget, privateHeaders } from './private-services-contract.js';
+  validPrivateMember, privateTarget, privateHeaders, privateNetworkQuery } from './private-services-contract.js';
 import { validContainerId } from './container-account-core.js';
 
 const KEY = 'privateServiceNetworks';
@@ -43,7 +43,15 @@ export class PrivateServicesController {
       if (!owner) await this.ctx.storage.put('privateServiceOwner', userId);
       const url = new URL(request.url), networkName = url.searchParams.get('network');
       if (path === '/private-services/networks') {
-        if (request.method === 'GET') return respond({ networks });
+        if (request.method === 'GET') {
+          const query = privateNetworkQuery(url.searchParams);
+          if (!query) return respond({ error: 'invalid_request' }, 400);
+          if (!url.search) return respond({ networks });
+          const matches = networks.filter(network => network.name.includes(query.search));
+          const page = Math.min(query.page, Math.max(1, Math.ceil(matches.length / query.limit)));
+          return respond({ networks: matches.slice((page - 1) * query.limit, page * query.limit),
+            total: matches.length, totalNetworks: networks.length, page, limit: query.limit });
+        }
         if (request.method === 'POST') {
           const body = await request.json();
           if (!body || Object.keys(body).length !== 1 || !validServiceName(body.name)) return respond({ error: 'invalid_request' }, 400);

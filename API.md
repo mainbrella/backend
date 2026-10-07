@@ -624,7 +624,7 @@ API key or public preview URL for this connection.
 | Request | Body / behavior |
 | --- | --- |
 | `POST /private-services/networks` | `{"name":"app"}` creates an empty network (201). |
-| `GET /private-services/networks` | Returns `{networks:[{name,members}]}` for the authenticated account. |
+| `GET /private-services/networks` | Returns `{networks:[{name,members}]}` for the authenticated account. Optional `search` filters network names by case-insensitive substring; `page` (default 1) and `limit` (default 10, maximum 100) paginate results. Any of these parameters adds `total` (matching count), `totalNetworks`, `page`, and `limit` to the response. Out-of-range pages clamp to the last page. No parameters returns the complete registry. |
 | `PUT /private-services/members?network=app` | `{"id":"<backend-id>","createdAt":"<exact-generation>","name":"api","port":8080}` registers a service (200). Omit `port` for a caller-only member. |
 | `DELETE /private-services/members?network=app` | Send the member's exact `id`, `createdAt`, and `name` to detach it without stopping it. |
 | `DELETE /private-services/networks?network=app` | Deletes an empty network; detach all members first. |

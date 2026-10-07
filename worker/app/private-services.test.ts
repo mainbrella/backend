@@ -93,3 +93,27 @@ test('issuance gating and paid access preserve list/detach/delete cleanup withou
   f.setBillingMode('past_due');
   assert.equal((await handleRequest(request('networks', 'POST', { name: 'unpaid' }), f.env)).status, 402);
 });
+
+test('network listing filters before pagination, clamps pages, and preserves owner isolation', async t => {
+  const f = await fixture(t);
+  for (const name of ['app-z', 'demo', 'app-a', 'app-b']) {
+    assert.equal((await handleRequest(request('networks', 'POST', { name }), f.env)).status, 201);
+  }
+  const list = async (query: string, session = SESSION_ONE) =>
+    (await handleRequest(request('networks', 'GET', undefined, query, session), f.env)).json();
+  assert.deepEqual(await list('?search=APP&page=2&limit=2'), {
+    networks: [{ name: 'app-b', members: [] }], total: 3, totalNetworks: 4, page: 2, limit: 2,
+  });
+  assert.deepEqual(await list('?search=app&page=99&limit=2'), await list('?search=app&page=2&limit=2'));
+  assert.deepEqual(await list('?search=missing'), { networks: [], total: 0, totalNetworks: 4, page: 1, limit: 10 });
+  assert.deepEqual(await list('?page=2', SESSION_TWO), { networks: [], total: 0, totalNetworks: 0, page: 1, limit: 10 });
+  assert.equal((await list('') as any).networks.length, 4);
+  for (const query of ['?page=0', '?page=-1', '?page=1.5', '?page=9007199254740992', '?limit=0', '?limit=101', '?limit=x', '?page=1&page=2', '?search=a&search=b', '?unknown=x', `?search=${'x'.repeat(64)}`]) {
+    assert.equal((await handleRequest(request('networks', 'GET', undefined, query), f.env)).status, 400, query);
+  }
+  assert.equal((await handleRequest(request('networks', 'GET', undefined, '?search=app', 'invalid'), f.env)).status, 401);
+  await handleRequest(request('networks', 'DELETE', undefined, '?network=app-b'), f.env);
+  assert.deepEqual(await list('?search=app&page=2&limit=2'), {
+    networks: [{ name: 'app-z', members: [] }, { name: 'app-a', members: [] }], total: 2, totalNetworks: 3, page: 1, limit: 2,
+  });
+});
