@@ -11,6 +11,7 @@ import { metricsConfigured, MAX_METRIC_RANGE_MS, METRIC_BUCKET_MS } from '../lib
 import { OBSERVATION_RETENTION_MS, MAX_LIFECYCLE_EVENTS } from '../../containers/observations.js';
 import { webhooksConfigured } from '../../containers/webhook-contract.js';
 import { activityConfigured } from './activity';
+import { privateServicesConfigured } from './private-services';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
@@ -37,7 +38,7 @@ export function capabilities(env: Env) {
     images: { catalog: true, availableCatalogPath: '/containers',
       customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
-    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), egressPolicies: false, regionSelection: false },
+    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: false, regionSelection: false },
     access: ACCESS_LIMITS,
   };
 }

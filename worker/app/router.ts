@@ -21,6 +21,7 @@ import { handleWebhookRequest } from './webhooks';
 import { handleActivityRequest } from './activity';
 import { handleWorkspacesRequest } from './workspaces';
 import { handleWorkspaceExportRequest } from './workspace-export';
+import { handlePrivateServicesRequest } from './private-services';
 
 async function handleLegacyRequest(
   request: Request,
@@ -28,6 +29,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
   if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);
   if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
 

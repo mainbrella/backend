@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { UserContainerController } from "./user-container-core.js";
 import { upgradeTerminal } from "./terminal.js";
 import { executeCommand } from "./commands.js";
@@ -10,11 +10,17 @@ import { WorkloadWebhooks } from './webhooks.js';
 import { exportWorkspace } from './workspace-export.js';
 import { publishActivity, validActivityUser } from './activity.js';
 import { validContainerId } from './container-account-core.js';
+import { ContainerPrivateServices, relayPrivateService } from './private-services-runtime.js';
+
+export class PrivateServiceOutbound extends WorkerEntrypoint {
+  fetch(request) { return relayPrivateService(request, this.env, this.ctx.props); }
+}
 
 export class UserContainer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.controller = new UserContainerController(ctx);
+    this.privateServices = new ContainerPrivateServices(this.controller, props => ctx.exports.PrivateServiceOutbound({ props }));
     this.terminals = new Set();
     this.commands = new Set();
     this.executions = new ManagedExecutions(this.controller, this.commands, ctx);
@@ -53,6 +59,8 @@ export class UserContainer extends DurableObject {
       if (!owner) await this.ctx.storage.put('activityOwner', { userId, containerId });
     }
     const path = new URL(request.url).pathname;
+    if (request.headers.has('x-private-network')) return this.privateServices.forward(request);
+    if (path.startsWith('/private-services/')) return this.privateServices.manage(request);
     if (path === '/features') return this.controller.fetch(request);
     if (path === '/workspaces/export-v1') return exportWorkspace(this.controller,request,this.commands);
     if (path.startsWith('/workspaces/')) return this.controller.fetch(request);

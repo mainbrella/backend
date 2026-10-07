@@ -4,6 +4,7 @@ import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
+  '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
   '/workspaces': ['get','post'], '/workspaces/{workspaceId}': ['get','patch','delete'], '/containers/export': ['get'],
   '/capabilities': ['get'],
   '/containers/activity': ['get'],
@@ -46,6 +47,19 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('Private Services schemas expose account authentication, exact generations, and HTTP-only registration', async () => {
+  const { paths, components } = await document();
+  const registration = paths['/private-services/members'].put;
+  assert.deepEqual(registration.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+  assert.ok(registration.parameters.some((p: any) => p.name === 'network' && p.required));
+  assert.deepEqual(components.schemas.PrivateServiceMember.required, ['id', 'createdAt', 'name']);
+  assert.equal(components.schemas.PrivateServiceMember.properties.port.minimum, 1024);
+  assert.equal(components.schemas.PrivateServiceMember.additionalProperties, false);
+  assert.match(registration.description, /No arbitrary TCP/);
+  assert.match(registration.description, /exact running generations/);
+  assert.ok(paths['/private-services/networks'].post.responses['201']);
+});
 
 test("admin users schema documents restricted cookie access and safe user fields", async () => {
   const { paths, components } = await document();

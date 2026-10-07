@@ -20,7 +20,7 @@ export const capabilitiesSchema = z.object({
   images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
   resources: z.array(machineSizeSchema),
-  networking: flags('outboundInternet', 'internetControl', 'egressPolicies', 'regionSelection'),
+  networking: flags('outboundInternet', 'internetControl', 'privateServices', 'egressPolicies', 'regionSelection'),
   access: z.object({ maxTerminalConnections: limit, maxSSHAccessTokens: limit, sshTokenLifetimeMs: limit }),
 }).openapi('Capabilities');
 

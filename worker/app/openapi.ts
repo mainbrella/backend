@@ -18,6 +18,7 @@ import { registerWorkspaceRoutes } from './openapi-workspaces';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerOperationsRoutes } from "./openapi-operations";
+import { registerPrivateServiceRoutes } from './openapi-private-services';
 import { forward, type LegacyHandler } from "./openapi-shared";
 
 export function createOpenAPIApp(handler: LegacyHandler) {
@@ -28,7 +29,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
       openapi: "3.1.0",
       info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
-      tags: ["Operations", "Authentication", "API Keys", "Subscriptions", "Containers", "Images", "Internal", "Admin"].map(name => ({ name })),
+      tags: ["Operations", "Authentication", "API Keys", "Subscriptions", "Containers", "Private Services", "Images", "Internal", "Admin"].map(name => ({ name })),
     },
   });
   const securitySchemes = {
@@ -50,6 +51,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerActivityRoutes(api, handler);
   registerExecutionRoutes(api, handler);
   registerPreviewRoutes(api, handler);
+  registerPrivateServiceRoutes(api, handler);
   registerStatusRoutes(api, handler);
   registerObservationRoutes(api, handler);
   registerWebhookRoutes(api, handler);
