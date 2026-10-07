@@ -12,7 +12,8 @@ interface InvoiceLine {
   pricing?: { price_details?: { price: string } };
   parent?: { subscription_item_details?: { subscription?: string; subscription_item?: string } };
 }
-interface Invoice { id: string; status: string; amount_paid: number; paid_out_of_band?: boolean; lines: { data: InvoiceLine[]; has_more?: boolean } }
+interface Invoice { id: string; status: string; amount_paid: number; amount_due?: number; total?: number; subtotal?: number;
+  total_discount_amounts?: { amount: number }[]; paid_out_of_band?: boolean; lines: { data: InvoiceLine[]; has_more?: boolean } }
 
 interface Charge { id: string; paid: boolean; captured?: boolean; status: string; amount: number; amount_refunded: number; refunded: boolean; disputed: boolean }
 interface InvoicePayment { id: string; invoice: string; status: string; amount_paid: number; payment: { type: string; payment_intent?: string; charge?: string } }
@@ -49,7 +50,15 @@ async function paidThrough(env: BillingEnv, subscription: StripeSubscription, pl
   while (true) {
     const page = await stripeRequest<{ data: Invoice[]; has_more: boolean }>(env, `/invoices?${params}`);
     for (const invoice of page.data) {
-      if (invoice.status !== "paid" || !(invoice.amount_paid > 0) || invoice.paid_out_of_band) continue;
+      if (invoice.status !== "paid" || invoice.paid_out_of_band) continue;
+      // Only a fully discounted invoice can authorize access without a charge.
+      // A zero balance from credits or a manually settled invoice is insufficient.
+      const fullyDiscounted = invoice.amount_paid === 0 && invoice.amount_due === 0 && invoice.total === 0
+        && Number.isSafeInteger(invoice.subtotal) && invoice.subtotal! > 0
+        && Boolean(invoice.total_discount_amounts?.length)
+        && invoice.total_discount_amounts!.every(discount => Number.isSafeInteger(discount.amount) && discount.amount >= 0)
+        && invoice.total_discount_amounts!.reduce((sum, discount) => sum + discount.amount, 0) === invoice.subtotal;
+      if (!fullyDiscounted && !(invoice.amount_paid > 0)) continue;
       const lines = [...invoice.lines.data];
       let hasMore = invoice.lines.has_more;
       while (hasMore && lines.length) {
@@ -65,7 +74,7 @@ async function paidThrough(env: BillingEnv, subscription: StripeSubscription, pl
           && details?.subscription === subscription.id
           && line.period.start <= now && line.period.end > now;
       });
-      if (proof && await actualStripePayment(env, invoice)) return proof.period.end;
+      if (proof && (fullyDiscounted || await actualStripePayment(env, invoice))) return proof.period.end;
     }
     if (!page.has_more || !page.data.length) return null;
     params.set("starting_after", page.data[page.data.length - 1].id);

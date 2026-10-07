@@ -27,7 +27,7 @@ export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandl
   }, handler);
   const mutations = [
     { path: "trial", id: "redeemTrialCoupon", summary: "Redeem a card-free trial coupon; one trial per account", body: z.object({ plan: planSchema, code: z.string().min(4).max(64) }), result: subscriptionState },
-    { path: "checkout", id: "createCheckout", summary: "Create or reuse custom Elements checkout with promotion codes", body: z.object({ plan: planSchema }),
+    { path: "checkout", id: "createCheckout", summary: "Create or reuse custom Elements checkout with promotion codes and optional card collection for zero totals", body: z.object({ plan: planSchema }),
       result: z.object({ client_secret: z.string(), publishable_key: z.string() }) },
     { path: "complete", id: "completeCheckout", summary: "Verify owned checkout and paid entitlement", body: z.object({ session_id: z.string() }), result: subscriptionState },
     { path: "portal", id: "createBillingPortal", summary: "Open billing portal or confirm an upgrade", body: z.object({ plan: planSchema.optional() }), result: z.object({ url: z.string() }) },

@@ -60,6 +60,7 @@ for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
     assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
     assert.equal(checkout.params.get('ui_mode'), 'custom');
     assert.equal(checkout.params.get('allow_promotion_codes'), 'true');
+    assert.equal(checkout.params.get('payment_method_collection'), 'if_required');
     assert.equal(checkout.params.has('customer_email'), false);
     assert.equal(checkout.params.get('client_reference_id'), TEST_USER);
     assert.equal(checkout.params.has('subscription_data[trial_period_days]'), false);
@@ -87,7 +88,8 @@ test('checkout reuses an open matching session and expires a session for a diffe
   assert.equal(f.calls.at(-1)?.params.get('line_items[0][price]'), PLAN_PRICES.scale);
 });
 
-for (const legacy of [{ ui_mode: 'embedded', allow_promotion_codes: true }, { ui_mode: 'custom', allow_promotion_codes: false }]) {
+for (const legacy of [{ ui_mode: 'embedded', allow_promotion_codes: true }, { ui_mode: 'custom', allow_promotion_codes: false },
+  { payment_method_collection: 'always' }, { payment_method_collection: null }]) {
   test(`checkout replaces incompatible session ${JSON.stringify(legacy)}`, async t => {
     const f = await billingFixture(t); f.state.subscriptions = [];
     Object.assign(f.state.checkout, legacy);
@@ -96,6 +98,7 @@ for (const legacy of [{ ui_mode: 'embedded', allow_promotion_codes: true }, { ui
     assert.ok(f.calls.some(c => c.url.pathname.endsWith('/cs_old/expire')));
     assert.equal(f.calls.at(-1)?.params.get('ui_mode'), 'custom');
     assert.equal(f.calls.at(-1)?.params.get('allow_promotion_codes'), 'true');
+    assert.equal(f.calls.at(-1)?.params.get('payment_method_collection'), 'if_required');
   });
 }
 
@@ -242,4 +245,18 @@ test('subscription discovery paginates past ended subscriptions and rejects ambi
   assert.equal(subscriptionPlan(await billingSubscription(f.env, TEST_CUSTOMER)), 'scale'); assert.equal(page, 2);
   f.state.override = null; f.state.subscriptions.push({ ...paidSubscription('pro'), id: 'sub_second' });
   await assert.rejects(billingSubscription(f.env, TEST_CUSTOMER), /multiple_subscriptions/);
+});
+
+test('completed fully discounted checkout grants access without a card payment', async t => {
+  const f = await billingFixture(t);
+  f.state.checkout.status = 'complete';
+  Object.assign(f.state.invoices[0], { amount_paid: 0, amount_due: 0, total: 0, total_discount_amounts: [{ amount: 500 }] });
+  f.state.payments = [];
+  const response = await handleSubscriptionRequest(post('/subscription/complete', { session_id: 'cs_old' }), f.env);
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.equal(body.active, true);
+  assert.equal(body.plan, 'builder');
+  assert.equal(body.valid_until, f.state.invoices[0].lines.data[0].period.end * 1000);
+  assert.ok(!f.calls.some(call => call.url.pathname === '/v1/invoice_payments'));
 });

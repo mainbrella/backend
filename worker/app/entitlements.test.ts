@@ -148,3 +148,28 @@ test('checkedAt records lookup start even when Stripe returns much later', async
   const result = await resolveEntitlement(f.env, TEST_USER);
   assert.equal(result.checkedAt, initial); assert.equal(Date.now(), initial + 1000);
 });
+
+test('discounted zero invoices still require a settled total and current matching plan coverage', async t => {
+  const f = await billingFixture(t);
+  const discounted = () => ({ ...paidInvoice(), amount_paid: 0, amount_due: 0, total: 0,
+    total_discount_amounts: [{ amount: 500 }] });
+  for (const patch of [
+    { status: 'open' }, { paid_out_of_band: true }, { amount_due: 1 }, { total: 1 },
+    { subtotal: 0 }, { total_discount_amounts: [] }, { total_discount_amounts: [{ amount: 499 }] },
+    { total_discount_amounts: [{ amount: 501 }, { amount: -1 }] },
+  ]) {
+    f.state.invoices = [Object.assign(discounted(), patch)];
+    assert.equal((await resolveEntitlement(f.env, TEST_USER)).active, false);
+  }
+  f.state.invoices = [discounted()];
+  f.state.invoices[0].lines.data[0].parent.subscription_item_details.subscription = 'sub_other';
+  assert.equal((await resolveEntitlement(f.env, TEST_USER)).active, false);
+  f.state.invoices = [discounted()];
+  const periodEnd = f.state.invoices[0].lines.data[0].period.end;
+  assert.equal((await resolveEntitlement(f.env, TEST_USER)).active, true);
+  // Once the discount's period expires, an unpaid renewal cannot extend access.
+  t.mock.method(Date, 'now', () => (periodEnd + 1) * 1000);
+  f.state.subscriptions[0].items.data[0].current_period_end = periodEnd + 86400;
+  f.state.invoices.unshift({ ...paidInvoice(), status: 'open', amount_paid: 0 });
+  assert.equal((await resolveEntitlement(f.env, TEST_USER)).active, false);
+});

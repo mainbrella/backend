@@ -15,7 +15,8 @@ export function paidSubscription(plan: Plan = 'builder'): StripeSubscription {
 }
 export function paidInvoice(plan: Plan = 'builder') {
   const now = Math.floor(Date.now() / 1000);
-  return { id: 'in_paid', status: 'paid', amount_paid: 500, paid_out_of_band: false,
+  return { id: 'in_paid', status: 'paid', amount_paid: 500, amount_due: 500, total: 500, subtotal: 500,
+    total_discount_amounts: [] as { amount: number }[], paid_out_of_band: false,
     lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: PLAN_PRICES[plan] } },
       parent: { subscription_item_details: { subscription: 'sub_paid', subscription_item: 'si_paid' } },
       period: { start: now - 3600, end: now + 86400 } }], has_more: false } };
@@ -48,7 +49,7 @@ export async function billingFixture(t: TestContext, plan: Plan = 'builder', rec
     subscriptions: [paidSubscription(plan)] as StripeSubscription[], invoices: [paidInvoice(plan)],
     payments: [{ id: 'inpay_paid', invoice: 'in_paid', status: 'paid', amount_paid: 500, payment: { type: 'payment_intent', payment_intent: 'pi_paid', charge: undefined as string | undefined } }],
     intent: { id: 'pi_paid', status: 'succeeded', amount_received: 500, latest_charge: paidCharge() },
-    checkout: { id: 'cs_old', status: 'open', ui_mode: 'custom', allow_promotion_codes: true, client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
+    checkout: { id: 'cs_old', status: 'open', ui_mode: 'custom', allow_promotion_codes: true, payment_method_collection: 'if_required' as string | null, client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
     schedules: new Map<string, Record<string, any>>(),
     override: null as null | ((url: URL, init: RequestInit | undefined) => Promise<Response | undefined> | Response | undefined),
   };
