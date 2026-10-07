@@ -127,6 +127,7 @@ test("schema describes optional container bodies, multipart image source, and We
   assert.ok(paths["/containers/terminal"].get.responses[101]);
   assert.ok(paths["/ssh/connect"].get.responses[101]);
   assert.deepEqual(paths["/subscription/checkout"].post.security, [{ cookieAuth: [] }]);
+  assert.match(paths["/subscription/checkout"].post.description, /Local development uses a separate hard-coded Stripe price for the builder plan/);
   assert.deepEqual(paths["/containers"].post.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
 });
 

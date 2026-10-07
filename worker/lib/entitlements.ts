@@ -1,5 +1,5 @@
 import { activeTrial, type Trial } from './trial-coupons';
-import { billingSubscription, PLAN_PRICES, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
+import { billingSubscription, planPrices, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
 
 export interface Entitlement { plan: Plan | null; active: boolean; validUntil: number | null; checkedAt?: number }
 export interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
@@ -69,7 +69,7 @@ async function paidThrough(env: BillingEnv, subscription: StripeSubscription, pl
       }
       const proof = lines.find((line) => {
         const details = line.parent?.subscription_item_details;
-        return (line.pricing?.price_details?.price ?? line.price?.id) === PLAN_PRICES[plan]
+        return (line.pricing?.price_details?.price ?? line.price?.id) === planPrices(env)[plan]
           && line.amount > 0 && line.quantity === 1
           && details?.subscription === subscription.id
           && line.period.start <= now && line.period.end > now;
@@ -82,7 +82,7 @@ async function paidThrough(env: BillingEnv, subscription: StripeSubscription, pl
 }
 
 export async function subscriptionEntitlement(env: BillingEnv, subscription: StripeSubscription | null): Promise<Entitlement> {
-  const plan = subscriptionPlan(subscription);
+  const plan = subscriptionPlan(subscription, env);
   const now = Date.now() / 1000;
   const periodEnd = subscription?.items.data[0]?.current_period_end;
   if (!plan || !subscription || subscription.status !== "active" || subscription.pause_collection
@@ -94,7 +94,7 @@ export async function subscriptionEntitlement(env: BillingEnv, subscription: Str
 }
 
 export async function syncSubscriptionRecord(env: BillingEnv, userId: string, subscription: StripeSubscription | null): Promise<void> {
-  const plan = subscriptionPlan(subscription);
+  const plan = subscriptionPlan(subscription, env);
   await env.DB.prepare(`UPDATE pro_billing SET plan = ?, stripe_subscription_id = ?,
     subscription_status = ?, cancel_at_period_end = ?, current_period_end = ?,
     synced_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`)

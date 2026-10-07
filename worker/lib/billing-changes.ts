@@ -1,4 +1,4 @@
-import { PLAN_PRICES, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
+import { planPrices, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
 
 export const PLAN_ORDER: Record<Plan, number> = { builder: 0, pro: 1, scale: 2 };
 interface SchedulePhase extends Record<string, unknown> {
@@ -17,7 +17,7 @@ export async function scheduledChange(env: BillingEnv, subscription: StripeSubsc
   const future = schedule.phases.find((phase) => phase.start_date > Date.now() / 1000);
   const price = future?.items[0]?.price;
   const priceId = typeof price === "string" ? price : price?.id;
-  const plan = (Object.keys(PLAN_PRICES) as Plan[]).find((key) => PLAN_PRICES[key] === priceId) ?? null;
+  const plan = (Object.keys(planPrices(env)) as Plan[]).find((key) => planPrices(env)[key] === priceId) ?? null;
   return { scheduled_plan: plan, scheduled_change_at: plan ? future!.start_date : null };
 }
 
@@ -96,7 +96,7 @@ export async function scheduleDowngrade(env: BillingEnv, subscription: StripeSub
   const future = writablePhase(current);
   const futureItem = (future.items as Record<string, unknown>[])[0];
   appendForm(params, "phases[1]", { ...future, start_date: end, iterations: 1, proration_behavior: "none",
-    items: [{ ...futureItem, price: PLAN_PRICES[plan], quantity: 1 }], metadata: { ...((current.metadata as Record<string, string>) ?? {}), plan, app_user_id: userId } });
+    items: [{ ...futureItem, price: planPrices(env)[plan], quantity: 1 }], metadata: { ...((current.metadata as Record<string, string>) ?? {}), plan, app_user_id: userId } });
   await stripeRequest(env, `/subscription_schedules/${encodeURIComponent(schedule.id)}`, params);
 }
 
@@ -107,22 +107,22 @@ export async function portalSession(env: BillingEnv, customer: string, returnUrl
     "features[subscription_update][enabled]": plan ? "true" : "false",
   });
   if (plan) {
-    const price = await stripeRequest<{ product: string }>(env, `/prices/${PLAN_PRICES[plan]}`);
+    const price = await stripeRequest<{ product: string }>(env, `/prices/${planPrices(env)[plan]}`);
     configParams.set("features[subscription_update][default_allowed_updates][0]", "price");
     configParams.set("features[subscription_update][proration_behavior]", "always_invoice");
     configParams.set("features[subscription_update][products][0][product]", price.product);
-    configParams.set("features[subscription_update][products][0][prices][0]", PLAN_PRICES[plan]);
+    configParams.set("features[subscription_update][products][0][prices][0]", planPrices(env)[plan]);
   }
   const config = await stripeRequest<{ id: string }>(env, "/billing_portal/configurations", configParams,
     `mainbrella-portal-v2-${plan ?? "manage"}-${Math.floor(Date.now() / 86_400_000)}`);
   const params = new URLSearchParams({ customer, return_url: returnUrl, configuration: config.id });
   if (plan && subscription) {
     const item = subscription.items.data[0];
-    if (!item.id || !subscriptionPlan(subscription)) throw new Error("billing_unavailable");
+    if (!item.id || !subscriptionPlan(subscription, env)) throw new Error("billing_unavailable");
     params.set("flow_data[type]", "subscription_update_confirm");
     params.set("flow_data[subscription_update_confirm][subscription]", subscription.id);
     params.set("flow_data[subscription_update_confirm][items][0][id]", item.id);
-    params.set("flow_data[subscription_update_confirm][items][0][price]", PLAN_PRICES[plan]);
+    params.set("flow_data[subscription_update_confirm][items][0][price]", planPrices(env)[plan]);
     params.set("flow_data[subscription_update_confirm][items][0][quantity]", "1");
     params.set("flow_data[after_completion][type]", "redirect");
     params.set("flow_data[after_completion][redirect][return_url]", returnUrl);

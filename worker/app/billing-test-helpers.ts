@@ -17,7 +17,7 @@ export function paidInvoice(plan: Plan = 'builder') {
   const now = Math.floor(Date.now() / 1000);
   return { id: 'in_paid', status: 'paid', amount_paid: 500, amount_due: 500, total: 500, subtotal: 500,
     total_discount_amounts: [] as { amount: number }[], paid_out_of_band: false,
-    lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: PLAN_PRICES[plan] } },
+    lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: PLAN_PRICES[plan] as string } },
       parent: { subscription_item_details: { subscription: 'sub_paid', subscription_item: 'si_paid' } },
       period: { start: now - 3600, end: now + 86400 } }], has_more: false } };
 }

@@ -1,6 +1,6 @@
 import { redeemTrial } from '../lib/trial-coupons';
 import { authCorsHeaders, authJson, currentUser, readJSON, type StringHeaders } from "./auth-core";
-import { PLAN_PRICES, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
+import { PLAN_PRICES, planPrices, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
 import { resolveBillingState, syncSubscriptionRecord, type BillingRecord, type BillingState } from "../lib/entitlements";
 import { PLAN_DETAILS } from "../../containers/plan-policy.js";
 import { PLAN_ORDER, portalSession, releaseScheduledChange, scheduleDowngrade, scheduledChange, scheduleID } from "../lib/billing-changes";
@@ -8,7 +8,7 @@ import { handleSubscriptionWebhook, type EntitlementChanged } from "./subscripti
 
 function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_PRICES, value); }
 async function stateResponse(env: BillingEnv, state: BillingState, cors: StringHeaders): Promise<Response> {
-  const plan = state.entitlement.plan || subscriptionPlan(state.subscription);
+  const plan = state.entitlement.plan || subscriptionPlan(state.subscription, env);
   return authJson({ subscription: state.subscription, trial: state.trial || null, plan, active: state.entitlement.active,
     valid_until: state.entitlement.validUntil, pro: state.entitlement.active && (plan === "pro" || plan === "scale"),
     configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
@@ -84,7 +84,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       if (path === "/subscription/portal") {
         const target = body?.plan as Plan | undefined;
         if (target) {
-          const currentPlan = subscriptionPlan(subscription);
+          const currentPlan = subscriptionPlan(subscription, env);
           if (!subscription || !currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
           if (PLAN_ORDER[target] <= PLAN_ORDER[currentPlan]) return authJson({ error: "use_scheduled_change" }, 409, cors);
           if (scheduleID(subscription)) return authJson({ error: "scheduled_change_exists" }, 409, cors);
@@ -95,7 +95,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       if (!subscription) return authJson({ error: "no_subscription" }, 409, cors);
       if (path === "/subscription/change") {
         const plan = body!.plan as Plan;
-        const currentPlan = subscriptionPlan(subscription);
+        const currentPlan = subscriptionPlan(subscription, env);
         if (!currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
         if (subscription.cancel_at_period_end) return authJson({ error: "cancellation_pending" }, 409, cors);
         if (PLAN_ORDER[plan] > PLAN_ORDER[currentPlan]) return authJson({ error: "use_upgrade_confirmation" }, 409, cors);
@@ -138,7 +138,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       mode: "subscription", ui_mode: "custom", allow_promotion_codes: "true", payment_method_collection: "if_required", "payment_method_types[0]": "card",
       "metadata[plan]": plan, "subscription_data[metadata][plan]": plan,
       customer: record.stripe_customer_id, client_reference_id: user.id,
-      "line_items[0][price]": PLAN_PRICES[plan], "line_items[0][quantity]": "1",
+      "line_items[0][price]": planPrices(env)[plan], "line_items[0][quantity]": "1",
       "metadata[app_user_id]": user.id, "subscription_data[metadata][app_user_id]": user.id,
       return_url: `${origin}/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing`,
     });

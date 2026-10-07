@@ -260,3 +260,40 @@ test('completed fully discounted checkout grants access without a card payment',
   assert.equal(body.valid_until, f.state.invoices[0].lines.data[0].period.end * 1000);
   assert.ok(!f.calls.some(call => call.url.pathname === '/v1/invoice_payments'));
 });
+
+const localBuilderPrice = 'price_1UNrymGgJdfq06ol4uXUV6Ao';
+for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
+  test(`local checkout selects the expected ${plan} price`, async t => {
+    const f = await billingFixture(t, plan, false);
+    f.env.LOCAL_DEV = 'true';
+    f.state.subscriptions = [];
+    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env)).status, 200);
+    const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
+    assert.equal(checkout.params.get('line_items[0][price]'), plan === 'builder' ? localBuilderPrice : PLAN_PRICES[plan]);
+  });
+}
+
+test('local builder subscription and invoices authorize paid access only in local mode', async t => {
+  const f = await billingFixture(t);
+  f.env.LOCAL_DEV = 'true';
+  const subscription = f.state.subscriptions[0];
+  subscription.items.data[0].price.id = localBuilderPrice;
+  f.state.invoices[0].lines.data[0].pricing.price_details.price = localBuilderPrice;
+  assert.equal(subscriptionPlan(subscription), null);
+  const response = await handleSubscriptionRequest(billingRequest(), f.env);
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.equal(body.plan, 'builder');
+  assert.equal(body.active, true);
+  assert.equal((f.sqlite.prepare('SELECT plan FROM pro_billing').get() as any).plan, 'builder');
+});
+
+test('local downgrade schedules and recognizes the local builder price', async t => {
+  const f = await billingFixture(t, 'scale');
+  f.env.LOCAL_DEV = 'true';
+  const response = await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as any).scheduled_plan, 'builder');
+  const write = f.calls.find(c => c.params.has('phases[1][items][0][price]'))!;
+  assert.equal(write.params.get('phases[1][items][0][price]'), localBuilderPrice);
+});

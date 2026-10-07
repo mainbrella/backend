@@ -5,13 +5,17 @@ export const PLAN_PRICES = {
   scale: "price_1UNAq1GSUs8K8zgHnt8PplRQ",
 } as const;
 export type Plan = keyof typeof PLAN_PRICES;
-export function subscriptionPlan(subscription: StripeSubscription | null): Plan | null {
+const LOCAL_PLAN_PRICES = { ...PLAN_PRICES, builder: "price_1UNrymGgJdfq06ol4uXUV6Ao" } as const;
+export function planPrices(env?: Pick<BillingEnv, "LOCAL_DEV">): Record<Plan, string> {
+  return env?.LOCAL_DEV === "true" ? LOCAL_PLAN_PRICES : PLAN_PRICES;
+}
+export function subscriptionPlan(subscription: StripeSubscription | null, env?: Pick<BillingEnv, "LOCAL_DEV">): Plan | null {
   if (!subscription || subscription.items.has_more || subscription.items.data.length !== 1 || subscription.items.data[0].quantity !== 1) return null;
   return (Object.keys(PLAN_PRICES) as Plan[]).find((plan) =>
-    subscription?.items.data.some((item) => item.price.id === PLAN_PRICES[plan]),
+    subscription?.items.data.some((item) => item.price.id === planPrices(env)[plan]),
   ) || null;
 }
-export type BillingEnv = Env & { STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string };
+export type BillingEnv = Env & { LOCAL_DEV?: string; STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string };
 export interface StripeSubscription {
   id: string;
   status: string;
@@ -68,7 +72,7 @@ export async function billingSubscription(env: BillingEnv, customer: string): Pr
     if (!page.has_more || !page.data.length) break;
     params.set("starting_after", page.data[page.data.length - 1].id);
   }
-  const knownPrices = new Set<string>(Object.values(PLAN_PRICES));
+  const knownPrices = new Set<string>(Object.values(planPrices(env)));
   const candidates = subscriptions.filter((subscription) => subscription.items.data.some((item) =>
     knownPrices.has(item.price.id))
     && !["canceled", "incomplete_expired"].includes(subscription.status));
