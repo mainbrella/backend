@@ -4,11 +4,36 @@ import { DatabaseSync } from 'node:sqlite';
 import { previewDatabase } from './lib/preview-test-helpers';
 import gateway, { handlePreviewGateway } from './preview-gateway';
 import { previewTokenHash, previewDomain, previewsConfigured, type PreviewRoutingEnv } from './lib/preview-routing';
+import { validPreviewOrigin } from '../containers/preview-contract.js';
 
 const domain = 'preview.example';
 const token = 'a'.repeat(48);
 const grantId = 'b'.repeat(32);
 const generation = '2026-10-05T12:00:00.000Z';
+
+test('HTTP localhost origins are accepted only by explicitly local container runtimes', () => {
+  const origin = `http://${token}.localhost:8787`;
+  assert.equal(validPreviewOrigin(origin, token), false);
+  assert.equal(validPreviewOrigin(origin, token, true), true);
+  for (const value of [`http://${token}.evil.example:8787`, `${origin}/`, `http://${'c'.repeat(48)}.localhost:8787`]) {
+    assert.equal(validPreviewOrigin(value, token, true), false);
+  }
+});
+
+test('local gateway routes isolated localhost hosts and preserves the local application origin', async t => {
+  const f = await fixture(t);
+  f.env.LOCAL_DEV = 'true';
+  const origin = `http://${token}.localhost:8787`;
+  const response = await handlePreviewGateway(new Request(`${origin}/assets/app.js?x=1`), f.env);
+  assert.equal(response.status, 200);
+  assert.equal(f.calls[0].headers.get('x-preview-origin'), origin);
+  assert.equal(f.calls[0].url, 'https://internal/preview/assets/app.js?x=1');
+  for (const url of [`https://${token}.localhost:8787/`, `http://${token}.localhost:9999/`, `https://${token}.${domain}/`]) {
+    assert.equal((await handlePreviewGateway(new Request(url), f.env)).status, 404);
+  }
+  delete f.env.LOCAL_DEV;
+  assert.equal((await handlePreviewGateway(new Request(`${origin}/`), f.env)).status, 404);
+});
 
 async function fixture(t: TestContext) {
   const sqlite = new DatabaseSync(':memory:');

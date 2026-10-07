@@ -19,7 +19,7 @@ export class UserContainer extends DurableObject {
     this.commands = new Set();
     this.executions = new ManagedExecutions(this.controller, this.commands, ctx);
     this.executions.onStatus = record => this.notifyActivity({ resource: 'executions', createdAt: record.createdAt, executionId: record.id });
-    this.previews = new ContainerPreviews(this.controller);
+    this.previews = new ContainerPreviews(this.controller, { allowLocal: env.LOCAL_DEV === 'true' });
     this.previews.onChange = createdAt => this.notifyActivity({ resource: 'previews', createdAt });
     this.webhooks = new WorkloadWebhooks(this.controller, env);
     this.controller.webhooks = this.webhooks;

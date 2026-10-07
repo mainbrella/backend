@@ -1,5 +1,6 @@
 # Generated with npm run docs:generate; live docs use the route schemas.
 .wrangler
+.wrangler-local-*.jsonc
 .preview-edge-probe.jsonc
 .wrangler-containers-*.json
 /openapi.json

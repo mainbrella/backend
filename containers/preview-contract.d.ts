@@ -9,5 +9,5 @@ export const MAX_PREVIEW_FRAME_BYTES: number;
 export function validPreviewPort(port: unknown): port is number;
 export function validPreviewToken(token: unknown): token is string;
 export function validPreviewId(id: unknown): id is string;
-export function validPreviewOrigin(value: unknown, token: unknown): value is string;
+export function validPreviewOrigin(value: unknown, token: unknown, allowLocal?: boolean): value is string;
 export function validPreviewOptions(body: unknown): body is { port: number; ttlSeconds?: number };

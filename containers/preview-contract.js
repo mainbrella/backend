@@ -13,10 +13,12 @@ export const validPreviewToken = token => typeof token === 'string' && /^[a-f0-9
 export const validPreviewId = id => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
 // This value is attested by the isolated gateway, never by client forwarding
 // headers. Bind its hostname to the grant token before exposing it to the app.
-export function validPreviewOrigin(value, token) {
+export function validPreviewOrigin(value, token, allowLocal = false) {
   if (typeof value !== 'string' || value.length > 260 || !validPreviewToken(token)) return false;
   try {
     const url = new URL(value);
+    if (allowLocal && url.protocol === 'http:' && url.hostname === `${token}.localhost`
+      && url.port && url.origin === value) return true;
     if (url.protocol !== 'https:' || url.port || url.origin !== value || !url.hostname.startsWith(`${token}.`)) return false;
     const domain = url.hostname.slice(token.length + 1);
     return domain.length <= 190 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)

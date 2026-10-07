@@ -50,6 +50,19 @@ async function fixture(t: TestContext) {
     setIssued(value: unknown, status = 201) { issued = value; runtimeStatus = status; } };
 }
 
+test('local issuance returns a localhost gateway URL instead of the production preview domain', async t => {
+  const f = await fixture(t);
+  f.env.LOCAL_DEV = 'true';
+  f.sqlite.prepare('DELETE FROM pro_billing WHERE user_id = ?').run(USER_ONE);
+  f.sqlite.prepare('INSERT INTO trial_coupons (code_hash, plan, trial_days, expires_at, max_redemptions) VALUES (?, ?, ?, ?, ?)')
+    .run('local-preview-test', 'builder', 1, Date.now() + 900_000, 1);
+  f.sqlite.prepare('INSERT INTO trial_redemptions (user_id, code_hash, plan, redeemed_at, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .run(USER_ONE, 'local-preview-test', 'builder', Date.now(), Date.now() + 900_000);
+  const response = await handleRequest(request('POST', '{"port":3000}'), f.env);
+  assert.equal(response.status, 201);
+  assert.equal((await response.json() as any).url, `http://${token}.localhost:8787/`);
+});
+
 test('issuance binds routing to owner and generation, stores only hashes, lists metadata and revokes idempotently', async t => {
   const f = await fixture(t);
   const created = await handleRequest(request('POST', '{"port":3000,"ttlSeconds":900}', undefined, {

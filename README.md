@@ -65,6 +65,14 @@ from `containers/Dockerfile` and starts containers on demand. This requires
 Wrangler 4.136.0 or newer. Press `r` in the dev terminal to rebuild the image.
 `npm run dev:lan` exposes the same setup on your local network.
 
+Local preview links use `http://<token>.localhost:8787/` and route through the
+local API Worker to the container, including WebSockets. Open them on the Mac
+running Wrangler. Reissue previews created before this setup to get local links.
+If overriding the dev server port, also pass `--var LOCAL_PREVIEW_PORT:<port>`.
+The dev launcher uses temporary copies of the Worker configurations with
+production routes removed and `LOCAL_DEV=true` on both Workers, preserving local
+preview subdomains. Restart dev after changing a Worker configuration.
+
 OrbStack works through its `orbstack` Docker context. If Wrangler cannot find its
 engine, select the context and set the socket explicitly before starting dev:
 

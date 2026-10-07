@@ -1,6 +1,8 @@
 import { validPreviewId, validPreviewPort } from '../../containers/preview-contract.js';
 
 export interface PreviewRoutingEnv {
+  LOCAL_DEV?: string;
+  LOCAL_PREVIEW_PORT?: string;
   PREVIEWS_ENABLED?: string;
   PREVIEW_DOMAIN?: string;
   PREVIEW_ROUTES?: D1Database;
@@ -11,6 +13,7 @@ export type PreviewGrant = { id: string; port: number; createdAt: string; expire
 export type PreviewRoute = { preview_id: string; container_name: string; created_at: string; expires_at: number };
 
 export function previewDomain(env: PreviewRoutingEnv): string | null {
+  if (env.LOCAL_DEV === 'true') return 'localhost';
   const domain = env.PREVIEW_DOMAIN;
   // Only an explicit, canonical DNS name; never a URL, port, wildcard or account
   // hostname. Operators must select a separate registrable domain before routing.
@@ -18,6 +21,15 @@ export function previewDomain(env: PreviewRoutingEnv): string | null {
     || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)
     || domain === 'mainbrella.com' || domain.endsWith('.mainbrella.com')) return null;
   return domain;
+}
+
+export function previewOrigin(env: PreviewRoutingEnv, token: string): string {
+  if (env.LOCAL_DEV === 'true') {
+    const port = env.LOCAL_PREVIEW_PORT ?? '8787';
+    if (!/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535) throw new Error('invalid_local_preview_port');
+    return `http://${token}.localhost:${port}`;
+  }
+  return `https://${token}.${previewDomain(env)}`;
 }
 
 export function previewsConfigured(env: PreviewRoutingEnv): boolean {

@@ -1,6 +1,8 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  LOCAL_DEV?: string;
+  LOCAL_PREVIEW_PORT?: string;
   ACTIVITY_WEBSOCKET_ENABLED?: string;
   WORKSPACE_PERSISTENCE_ENABLED?: string;
   NETWORK_INTERNET_CONTROL_ENABLED?: string;

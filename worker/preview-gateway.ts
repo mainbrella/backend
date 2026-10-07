@@ -1,5 +1,5 @@
 import { validPreviewId, validPreviewToken } from '../containers/preview-contract.js';
-import { previewDomain, previewsConfigured, previewTokenHash, prunePreviewRoutes, validPreviewGeneration,
+import { previewDomain, previewOrigin, previewsConfigured, previewTokenHash, prunePreviewRoutes, validPreviewGeneration,
   type PreviewRoute, type PreviewRoutingEnv } from './lib/preview-routing';
 
 function unavailable(status = 404): Response {
@@ -13,7 +13,8 @@ export async function handlePreviewGateway(request: Request, env: PreviewRouting
   const url = new URL(request.url);
   const domain = previewDomain(env);
   const host = request.headers.get('host');
-  if (!domain || url.protocol !== 'https:' || url.port || (host && host.toLowerCase() !== url.host)) return unavailable();
+  if (!domain || (host && host.toLowerCase() !== url.host)) return unavailable();
+  if (env.LOCAL_DEV !== 'true' && (url.protocol !== 'https:' || url.port)) return unavailable();
   if (url.hostname === domain) {
     const target = new URL('https://mainbrella.com/');
     target.pathname = url.pathname;
@@ -24,6 +25,7 @@ export async function handlePreviewGateway(request: Request, env: PreviewRouting
   const token = url.hostname.slice(0, -(domain.length + 1));
   if (!validPreviewToken(token)) return unavailable();
   try {
+    if (url.origin !== previewOrigin(env, token)) return unavailable();
     const route = await env.PREVIEW_ROUTES!.prepare(`SELECT preview_id, container_name, created_at, expires_at
       FROM preview_routes WHERE token_hash = ? AND expires_at > ?`)
       .bind(await previewTokenHash(token), Date.now()).first<PreviewRoute>();

@@ -135,6 +135,19 @@ test('HTTP preserves application path, body and redirect, strips platform creden
   assert.equal((await f.forward(grant)).status, 403);
 });
 
+test('local runtime forwards localhost host and HTTP protocol only when enabled', async () => {
+  const f = fixture();
+  const grant = await f.issue();
+  const host = `${grant.token}.localhost:8787`;
+  const options = { headers: { 'x-preview-origin': `http://${host}` } };
+  assert.equal((await f.forward(grant, options)).status, 403);
+  f.previews.allowLocal = true;
+  const response = await f.forward(grant, options);
+  assert.equal(await response.text(), 'app');
+  assert.equal(f.calls[0].request.headers.get('host'), host);
+  assert.equal(f.calls[0].request.headers.get('x-forwarded-proto'), 'http');
+});
+
 test('gateway-attested origin restores app host semantics without trusting client forwarding headers or rewriting Origin', async () => {
   const f = fixture();
   const grant = await f.issue();

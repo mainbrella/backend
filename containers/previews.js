@@ -11,6 +11,7 @@ const publicGrant = ({ id, port, createdAt, expiresAt }) => ({ id, port, created
 export class ContainerPreviews {
   constructor(controller, options = {}) {
     this.controller = controller;
+    this.allowLocal = options.allowLocal === true;
     this.timers = options.timers ?? globalThis;
     this.pairFactory = options.pairFactory ?? (() => new WebSocketPair());
     this.responseFactory = options.responseFactory ?? ((socket, headers) => new Response(null, { status: 101, webSocket: socket, headers }));
@@ -132,7 +133,7 @@ export class ContainerPreviews {
     const origin = request.headers.get('x-preview-origin');
     // Missing origin keeps older gateways compatible during runtime-first
     // rollout. A present but invalid attestation always fails closed.
-    if (origin !== null && !validPreviewOrigin(origin, token)) return c.respond({ error: 'preview_unavailable' }, 403);
+    if (origin !== null && !validPreviewOrigin(origin, token, this.allowLocal)) return c.respond({ error: 'preview_unavailable' }, 403);
     const tokenHash = await hash(token);
     const admission = await c.serialized(async () => {
       const metadata = await this.metadata(request.headers.get('x-preview-created-at'));
@@ -152,7 +153,7 @@ export class ContainerPreviews {
         const host = new URL(origin).host;
         headers.set('host', host);
         headers.set('x-forwarded-host', host);
-        headers.set('x-forwarded-proto', 'https');
+        headers.set('x-forwarded-proto', new URL(origin).protocol.slice(0, -1));
       }
       const target = new URL('http://container');
       target.pathname = url.pathname.slice('/preview'.length) || '/';

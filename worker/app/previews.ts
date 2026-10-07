@@ -3,7 +3,7 @@ import { containerUser } from './container-auth';
 import { runningContainer, containerError } from '../lib/container-service';
 import { machineName, validContainerId } from '../../containers/container-account-core.js';
 import { MAX_PREVIEW_GRANTS, validPreviewId, validPreviewOptions, validPreviewToken } from '../../containers/preview-contract.js';
-import { previewDomain, previewsConfigured, previewTokenHash, validPreviewGeneration, validPreviewGrant,
+import { previewOrigin, previewsConfigured, previewTokenHash, validPreviewGeneration, validPreviewGrant,
   type PreviewGrant } from '../lib/preview-routing';
 
 async function readOptions(request: Request): Promise<unknown> {
@@ -123,7 +123,7 @@ export async function handlePreviewRequest(request: Request, env: Env): Promise<
         (token_hash, preview_id, container_name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`)
         .bind(await previewTokenHash(result.token), result.id, name, createdAt, result.expiresAt).run();
       if (!inserted.success) throw new Error('preview_index_unavailable');
-      return authJson({ ...publicGrant(result), url: `https://${result.token}.${previewDomain(env)}/` }, 201, cors);
+      return authJson({ ...publicGrant(result), url: `${previewOrigin(env, result.token)}/` }, 201, cors);
     } catch {
       if (validPreviewId(result.id) && !await revoke(result.id)) {
         return authJson({ error: 'preview_reconciliation_required', previewId: result.id }, 503, cors);
