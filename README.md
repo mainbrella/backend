@@ -47,6 +47,36 @@ from the shell or ignored backend `.env` for the live image manifest.
 `/containers/ssh` accepts an explicit container ID; `007_ssh_container_id.sql`
 binds tokens to that slot as well as its generation. The SSH gateway protocol is unchanged.
 
+## Local development
+
+Start a Docker-compatible engine (OrbStack, Docker Desktop, or Colima), then run:
+
+```sh
+npm ci
+npm run db:migrate:local
+npx wrangler d1 migrations apply mainbrella-preview-routes --local
+npm run dev
+```
+
+`npm run dev` starts the API and private container Worker together, with local
+D1 and Durable Object storage in `.wrangler/state`. The API is available at
+`http://localhost:8787`; API docs are at `/docs`. Wrangler builds the Node image
+from `containers/Dockerfile` and starts containers on demand. This requires
+Wrangler 4.136.0 or newer. Press `r` in the dev terminal to rebuild the image.
+`npm run dev:lan` exposes the same setup on your local network.
+
+OrbStack works through its `orbstack` Docker context. If Wrangler cannot find its
+engine, select the context and set the socket explicitly before starting dev:
+
+```sh
+docker context use orbstack
+export DOCKER_HOST="$(docker context inspect orbstack --format '{{.Endpoints.docker.Host}}')"
+```
+
+Local authentication and trial/subscription records are separate from production.
+The local container configuration includes the Node image; the other catalog
+images are configured by the production deployment workflow.
+
 ## Verification
 
 ```sh

@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "coupon:create": "node scripts/create-trial-coupon.mjs",
-    "dev": "wrangler dev --local --var LOCAL_DEV:true",
-    "dev:lan": "wrangler dev --local --ip 0.0.0.0 --var LOCAL_DEV:true",
+    "dev": "wrangler dev --local --config wrangler.jsonc --config wrangler.containers.jsonc --var LOCAL_DEV:true",
+    "dev:lan": "npm run dev -- --ip 0.0.0.0",
     "db:migrate:local": "wrangler d1 migrations apply delta --local",
     "db:migrate:remote": "wrangler d1 migrations apply delta --remote",
     "generate-types": "wrangler types",
