@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Mainbrella } from '../sdk/javascript/index.js';
+import { fetchLocalPreview } from './local-preview.mjs';
 
 // Local platform prototype: three starts total, never more than two Lite guests
 // at once. The third start proves replacement fencing on the backend slot.
@@ -72,10 +73,9 @@ try {
   assert.deepEqual((await backend.previews.list()).previews, []);
   report.checks.backendHasNoPreview = true;
   const preview = await frontend.previews.create(3000, { ttlSeconds: 120 });
-  // Do not put the bearer preview URL into evidence/logs. A local request uses
-  // Host routing without depending on wildcard localhost DNS.
-  const previewUrl = new URL(preview.url);
-  const previewFetch = path => fetch(new URL(path, credentials.baseUrl), { headers: { host: previewUrl.host }, redirect: 'manual' });
+  // The helper preserves the preview URL authority and resolves only to loopback.
+  // Never put the bearer preview URL into evidence or logs.
+  const previewFetch = path => fetchLocalPreview(preview.url, path);
   const html = await previewFetch('/');
   assert.equal(html.status, 200);
   assert.match(await html.text(), /<h1>Users<\/h1>/);

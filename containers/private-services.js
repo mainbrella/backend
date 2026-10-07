@@ -114,15 +114,22 @@ export class PrivateServicesController {
       const response = await admission.response;
       // The runtime buffers bounded HTTP responses; recheck source and registry
       // before releasing bytes when a stop/detach races the application.
-      const current = (await this.ctx.storage.get(KEY)) ?? [];
-      const network = current.find(value => value.name === admission.network);
-      if (!network?.members.some(value => value.id === source.id && value.createdAt === source.createdAt)
-        || !network.members.some(value => JSON.stringify(value) === JSON.stringify(admission.destination))
-        || !await this.live(userId, source)) {
+      if (!await this.live(userId, source)) {
         void response.body?.cancel().catch(() => {});
         return respond({ error: 'private_service_denied' }, 403);
       }
-      return response;
+      // Read registry state after the asynchronous liveness check. Serialize
+      // the final membership decision and response release with detach/upsert.
+      return this.serialized(async () => {
+        const current = (await this.ctx.storage.get(KEY)) ?? [];
+        const network = current.find(value => value.name === admission.network);
+        if (request.signal.aborted || !network?.members.some(value => value.id === source.id && value.createdAt === source.createdAt)
+          || !network.members.some(value => JSON.stringify(value) === JSON.stringify(admission.destination))) {
+          void response.body?.cancel().catch(() => {});
+          return respond({ error: 'private_service_denied' }, 403);
+        }
+        return response;
+      });
     } catch { return respond({ error: 'private_service_unavailable' }, 502); }
   }
 }

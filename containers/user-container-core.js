@@ -215,7 +215,11 @@ export class UserContainerController {
   }
 
   async touchTerminalActivity(createdAt) {
-    return this.serialized(async () => {
+    return this.serialized(() => this.touchTerminalActivityLocked(createdAt));
+  }
+
+  // Internal caller must already hold the lifecycle lock, as with terminalMetadata.
+  async touchTerminalActivityLocked(createdAt) {
       if (!this.container.running) return false;
       const metadata = await this.ctx.storage.get(METADATA_KEY);
       if (!metadata || new Date(metadata.createdAt).toISOString() !== createdAt
@@ -229,7 +233,6 @@ export class UserContainerController {
       await this.ctx.storage.setAlarm(this.deadline(metadata));
       await this.container.setInactivityTimeout(metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs);
       return true;
-    });
   }
 
   async signalOperationGroup(createdAt, groupId, signal) {

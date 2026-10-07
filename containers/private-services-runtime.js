@@ -9,22 +9,32 @@ export async function relayPrivateService(request, env, props) {
   if (!privateTarget(request) || !env.CONTAINER_ACCOUNT || !props
     || !/^[A-Za-z0-9_-]{1,128}$/.test(props.userId ?? '') || !validContainerId(props.id ?? '')
     || !validPrivateGeneration(props.createdAt)) return denied();
-  try {
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(PRIVATE_TIMEOUT_MS)]);
+  let abort;
+  const deadline = new Promise((_, reject) => {
+    abort = () => reject(new Error('private_service_timeout'));
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  const operation = (async () => {
     const headers = privateHeaders(request.headers);
     // These attestations come from WorkerEntrypoint props installed by the DO,
     // never from guest headers or API credentials in the guest environment.
     headers.set('x-mainbrella-user', props.userId);
     headers.set('x-private-source-id', props.id);
     headers.set('x-private-source-generation', props.createdAt);
-    const bytes = await boundedPrivateBody(request.body);
+    const bytes = await boundedPrivateBody(request.body, undefined, signal);
     const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${props.userId}`));
-    return await account.fetch(new Request(request.url, { method: request.method, headers,
+    return account.fetch(new Request(request.url, { method: request.method, headers,
       body: ['GET', 'HEAD'].includes(request.method) ? undefined : bytes,
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(PRIVATE_TIMEOUT_MS)]), redirect: 'manual' }));
+      signal, redirect: 'manual' }));
+  })();
+  try {
+    return await Promise.race([operation, deadline]);
   } catch (error) {
     return Response.json({ error: error.message === 'request_too_large' ? 'request_too_large' : 'private_service_unavailable' },
       { status: error.message === 'request_too_large' ? 413 : 502 });
-  }
+  } finally { signal.removeEventListener('abort', abort); }
 }
 
 export class ContainerPrivateServices {
@@ -70,7 +80,7 @@ export class ContainerPrivateServices {
       if (signal.aborted) abort();
     });
     const operation = (async () => {
-      const bytes = await boundedPrivateBody(request.body);
+      const bytes = await boundedPrivateBody(request.body, undefined, signal);
       const admission = await c.serialized(async () => {
         const registration = await c.ctx.storage.get(KEY);
         if (signal.aborted || !registration || !await this.metadata(createdAt) || registration.createdAt !== createdAt
@@ -88,15 +98,18 @@ export class ContainerPrivateServices {
       upstream = await admission.response;
       if (upstream.status === 101 || upstream.webSocket) { upstream.webSocket?.close(); return denied(); }
       if (signal.aborted) { void upstream.body?.cancel().catch(() => {}); throw new Error('private_service_timeout'); }
-      const payload = await boundedPrivateBody(upstream.body);
-      const valid = await c.serialized(async () => !signal.aborted && await this.metadata(createdAt)
-        && JSON.stringify(await c.ctx.storage.get(KEY)) === JSON.stringify(admission.registration));
-      if (!valid) return denied();
-      await c.touchTerminalActivity(createdAt);
-      const headers = privateHeaders(upstream.headers);
-      headers.set('cache-control', 'no-store');
-      return new Response(['HEAD'].includes(request.method) || [204, 205, 304].includes(upstream.status) ? null : payload,
-        { status: upstream.status, headers });
+      const payload = await boundedPrivateBody(upstream.body, undefined, signal);
+      // Validate, renew activity, and construct the response under one lifecycle
+      // lock. Stop/replacement/configuration cannot slip between these steps.
+      return c.serialized(async () => {
+        if (signal.aborted || !await this.metadata(createdAt)
+          || JSON.stringify(await c.ctx.storage.get(KEY)) !== JSON.stringify(admission.registration)
+          || !await c.touchTerminalActivityLocked(createdAt) || signal.aborted) return denied();
+        const headers = privateHeaders(upstream.headers);
+        headers.set('cache-control', 'no-store');
+        return new Response(['HEAD'].includes(request.method) || [204, 205, 304].includes(upstream.status) ? null : payload,
+          { status: upstream.status, headers });
+      });
     })();
     try { return await Promise.race([operation, deadline]); }
     catch (error) {
