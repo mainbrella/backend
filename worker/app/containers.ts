@@ -3,7 +3,7 @@ import { ownedImage } from './images';
 import { containerUser } from './container-auth';
 import { resolveBillingState } from '../lib/entitlements';
 import { accountResponse, containerError, syncAccountEntitlement, type ContainerImageSelection } from '../lib/container-service';
-import { validContainerId, validIdempotencyKey } from '../../containers/container-account-core.js';
+import { validContainerId, validContainerName, validIdempotencyKey } from '../../containers/container-account-core.js';
 import { machineSize } from '../../containers/plan-policy.js';
 import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
 import { validWorkspaceId } from '../../containers/workspace-contract.js';
@@ -43,7 +43,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     }
     let selection: ContainerImageSelection | undefined;
     if (request.method === 'POST' && request.body) {
-      const body = await request.json().catch(() => null) as { imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown; workspaceId?: unknown } | null;
+      const body = await request.json().catch(() => null) as { name?: unknown; imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown; workspaceId?: unknown } | null;
       if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
       if(body.workspaceId!==undefined){
         if(!validWorkspaceId(body.workspaceId) || body.catalogId!==undefined || body.imageId!==undefined)return authJson({error:'invalid_request'},400,cors);
@@ -65,6 +65,10 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
         if (!image) return authJson({ error: 'image_not_found' }, 404, cors);
         if (image.status !== 'ready') return authJson({ error: 'image_not_ready' }, 409, cors);
         selection = { imageKey: image.image_key, imageId: image.id, imageName: image.name };
+      }
+      if (body.name !== undefined) {
+        if (!validContainerName(body.name)) return authJson({ error: 'invalid_container_name' }, 400, cors);
+        selection = { ...selection, name: (body.name as string).trim() };
       }
       if (body.size !== undefined) selection = { ...selection, size: String(body.size) };
       if (body.internet !== undefined) selection = { ...selection, internet: body.internet as boolean };

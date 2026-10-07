@@ -1,3 +1,4 @@
+export function validContainerName(name: unknown): boolean;
 export function validIdempotencyKey(key: unknown): boolean;
 export function validContainerId(id: string): boolean;
 export function machineName(userId: string, id: string): string;

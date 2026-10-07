@@ -733,3 +733,36 @@ test('an alarm can migrate legacy account state before the first new request', a
   assert.equal(result.data.containers.length, 1);
   assert.equal(result.data.usage.reservedComputeUnitHours, 1);
 });
+
+
+test('container names persist while starting, after restart and on keyed retries, and do not leak into reused slots', async () => {
+  const f = fixture(); let release;
+  f.machineFor('owner', 'small').ctx.container.gate = new Promise(resolve => { release = resolve; });
+  const headers = { 'Idempotency-Key': 'named-operation' };
+  const first = f.request('POST', undefined, headers, { name: '  My API  ' });
+  await new Promise(resolve => setImmediate(resolve));
+  const pending = await f.read();
+  assert.equal(pending.data.containers[0].status, 'starting');
+  assert.equal(pending.data.containers[0].name, 'My API');
+  release();
+  assert.equal((await (await first).json()).containers[0].name, 'My API');
+  f.restart();
+  assert.equal((await f.read()).data.containers[0].name, 'My API');
+  assert.equal((await f.read('POST', undefined, headers, { name: 'My API' })).status, 200);
+  for (const body of [{ name: 'Other' }, {}]) {
+    assert.equal((await f.read('POST', undefined, headers, body)).data.error, 'idempotency_key_conflict');
+  }
+  assert.equal((await f.read()).data.usage.starts, 1);
+  await f.read('DELETE', 'small');
+  assert.equal((await f.read('POST')).data.containers[0].name, 'Small container');
+});
+
+test('invalid container names spend no starts or compute', async () => {
+  const f = fixture();
+  for (const name of ['', '   ', 'a'.repeat(81), null, 123, 'bad\nname']) {
+    const result = await f.read('POST', undefined, {}, { name });
+    assert.equal(result.status, 400);
+    assert.equal(result.data.error, 'invalid_container_name');
+  }
+  assert.equal((await f.read()).data.usage.starts, 0);
+});

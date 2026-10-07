@@ -222,3 +222,22 @@ test('named sizes are validated and forwarded without trusting raw resource or b
   }
   assert.equal(f.accountCalls.length, calls);
 });
+
+
+test('container names are validated and trimmed before forwarding to the account', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const call = (name: unknown) => handleRequest(new Request('https://api.mainbrella.com/containers', {
+    method: 'POST', headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` },
+    body: JSON.stringify({ name, catalogId: 'node' }),
+  }), f.env);
+  for (const name of ['', '   ', 'a'.repeat(81), null, 123, 'bad\nname']) {
+    const response = await call(name);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'invalid_container_name' });
+  }
+  assert.equal(f.accountCalls.length, 0);
+  assert.equal((await call('  My API  ')).status, 200);
+  const body = await f.accountCalls.at(-1)!.request.json() as { name: string; imageName: string };
+  assert.equal(body.name, 'My API');
+  assert.ok(body.imageName);
+});

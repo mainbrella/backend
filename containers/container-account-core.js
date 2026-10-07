@@ -7,6 +7,7 @@ const KEY = 'containerAccount';
 const CREATION_PREFIX = 'creation:';
 const CREATION_RETENTION_MS = 24 * 60 * 60_000;
 export const validIdempotencyKey = key => typeof key === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(key);
+export const validContainerName = name => typeof name === 'string' && name.trim().length > 0 && name.trim().length <= 80 && !/[\u0000-\u001f\u007f]/.test(name);
 export const validContainerId = (id) => id === 'small' || /^c(?:[1-9]\d{0,2})$/.test(id) && Number(id.slice(1)) < 500;
 export const machineName = (userId, id) => id === 'small' ? `user:${userId}` : `user:${userId}:slot:${id.slice(1)}`;
 
@@ -177,7 +178,7 @@ export class ContainerAccountController {
         const reservation = state.pending[id];
         if (reservation && this.now() < reservation + 90_000) {
           this.clampLease(state, id, Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil));
-          return { id, name: id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`,
+          return { id, name: state.leases[id]?.name ?? (id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`),
             size: state.leases[id]?.size ?? 'lite', instance: machineSize(state.leases[id]?.size ?? 'lite').instance,
             computeUnits: machineSize(state.leases[id]?.size ?? 'lite').computeUnits, internet: state.leases[id]?.internet ?? true, status: 'starting', createdAt: new Date(reservation).toISOString(),
             expiresAt: new Date(Math.min(reservation + PLAN_LIMITS[entitlement.plan].maxSessionMs, entitlement.validUntil, state.leases[id]?.endAt ?? Infinity)).toISOString() };
@@ -205,7 +206,7 @@ export class ContainerAccountController {
           data.containers[0] = clamped.containers[0];
         }
         this.clampLease(state, id, Date.parse(data.containers[0].expiresAt));
-        return { ...data.containers[0], id, name: id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}` };
+        return { ...data.containers[0], id, name: state.leases[id]?.name ?? (id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`) };
       }));
       batch.forEach((result, index) => {
         if (result.status === 'rejected') unreadable.push(ids[index]);
@@ -281,8 +282,13 @@ export class ContainerAccountController {
       let size = machineSize(selection?.size ?? 'lite');
       if (!size) return this.respond({ error: 'invalid_size' }, 400);
       if (selection?.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
-      const fingerprint = selection?.workspaceId ? JSON.stringify(['workspace', selection.workspaceId, selection.size ?? null, selection.internet ?? null])
+      if (selection?.name !== undefined) {
+        if (!validContainerName(selection.name)) return this.respond({ error: 'invalid_container_name' }, 400);
+        selection.name = selection.name.trim();
+      }
+      const baseFingerprint = selection?.workspaceId ? JSON.stringify(['workspace', selection.workspaceId, selection.size ?? null, selection.internet ?? null])
         : JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id, ...(selection?.internet === false ? [false] : [])]);
+      const fingerprint = selection?.name === undefined ? baseFingerprint : JSON.stringify([baseFingerprint, selection.name]);
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
         await this.pruneCreations(state);
@@ -297,7 +303,7 @@ export class ContainerAccountController {
           if (idempotencyKey) {
             const record = await this.ctx.storage.get(CREATION_PREFIX + idempotencyKey);
             if (record && record.expiresAt > this.now()) {
-              const legacyFingerprint = size.id === 'lite' && selection?.internet !== false ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
+              const legacyFingerprint = selection?.name === undefined && size.id === 'lite' && selection?.internet !== false ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
               if (record.fingerprint !== fingerprint && record.fingerprint !== legacyFingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
               return this.creationResponse(state, containers, record);
             }
@@ -344,7 +350,7 @@ export class ContainerAccountController {
           state.slots.push(slot);
           const unitMs = (endAt - startAt) * size.computeUnits;
           state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
-          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true };
+          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true, ...(selection?.name === undefined ? {} : { name: selection.name }) };
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
