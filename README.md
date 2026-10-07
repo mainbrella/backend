@@ -73,6 +73,13 @@ The dev launcher uses temporary copies of the Worker configurations with
 production routes removed and `LOCAL_DEV=true` on both Workers, preserving local
 preview subdomains. Restart dev after changing a Worker configuration.
 
+The launcher checks for leftover project proxies at startup, every 15 seconds,
+and after Wrangler exits. During dev, a workload must have been stopped for at
+least 30 seconds and have no matching Docker app container before its proxy is
+removed. Cleanup preserves active workloads and unrelated Docker containers.
+Shutdown also removes orphan proxies created during that dev session. If the
+launcher is forcibly killed, the next dev startup cleans recorded stopped work.
+
 OrbStack works through its `orbstack` Docker context. If Wrangler cannot find its
 engine, select the context and set the socket explicitly before starting dev:
 
