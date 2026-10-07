@@ -261,7 +261,11 @@ test('completed fully discounted checkout grants access without a card payment',
   assert.ok(!f.calls.some(call => call.url.pathname === '/v1/invoice_payments'));
 });
 
-const localBuilderPrice = 'price_1UNrymGgJdfq06ol4uXUV6Ao';
+const localPrices = {
+  builder: 'price_1UNrymGgJdfq06ol4uXUV6Ao',
+  pro: 'price_1UNs6DGgJdfq06olo5rl4TS7',
+  scale: 'price_1UNs6sGgJdfq06olIK6KqNNf',
+};
 for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
   test(`local checkout selects the expected ${plan} price`, async t => {
     const f = await billingFixture(t, plan, false);
@@ -269,31 +273,49 @@ for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
     f.state.subscriptions = [];
     assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env)).status, 200);
     const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
-    assert.equal(checkout.params.get('line_items[0][price]'), plan === 'builder' ? localBuilderPrice : PLAN_PRICES[plan]);
+    assert.equal(checkout.params.get('line_items[0][price]'), localPrices[plan]);
+  });
+
+  test(`local ${plan} subscription and invoices authorize paid access only in local mode`, async t => {
+    const f = await billingFixture(t, plan);
+    f.env.LOCAL_DEV = 'true';
+    const subscription = f.state.subscriptions[0];
+    subscription.items.data[0].price.id = localPrices[plan];
+    f.state.invoices[0].lines.data[0].pricing.price_details.price = localPrices[plan];
+    assert.equal(subscriptionPlan(subscription), null);
+    const response = await handleSubscriptionRequest(billingRequest(), f.env);
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    assert.equal(body.plan, plan);
+    assert.equal(body.active, true);
+    assert.equal((f.sqlite.prepare('SELECT plan FROM pro_billing').get() as any).plan, plan);
   });
 }
 
-test('local builder subscription and invoices authorize paid access only in local mode', async t => {
-  const f = await billingFixture(t);
-  f.env.LOCAL_DEV = 'true';
-  const subscription = f.state.subscriptions[0];
-  subscription.items.data[0].price.id = localBuilderPrice;
-  f.state.invoices[0].lines.data[0].pricing.price_details.price = localBuilderPrice;
-  assert.equal(subscriptionPlan(subscription), null);
-  const response = await handleSubscriptionRequest(billingRequest(), f.env);
-  assert.equal(response.status, 200);
-  const body = await response.json() as any;
-  assert.equal(body.plan, 'builder');
-  assert.equal(body.active, true);
-  assert.equal((f.sqlite.prepare('SELECT plan FROM pro_billing').get() as any).plan, 'builder');
-});
+for (const plan of ['builder', 'pro'] as const) {
+  test(`local downgrade schedules and recognizes the local ${plan} price`, async t => {
+    const f = await billingFixture(t, 'scale');
+    f.env.LOCAL_DEV = 'true';
+    f.state.subscriptions[0].items.data[0].price.id = localPrices.scale;
+    f.state.invoices[0].lines.data[0].pricing.price_details.price = localPrices.scale;
+    const response = await handleSubscriptionRequest(post('/subscription/change', { plan, confirm: true }), f.env);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).scheduled_plan, plan);
+    const write = f.calls.find(c => c.params.has('phases[1][items][0][price]'))!;
+    assert.equal(write.params.get('phases[1][items][0][price]'), localPrices[plan]);
+  });
+}
 
-test('local downgrade schedules and recognizes the local builder price', async t => {
-  const f = await billingFixture(t, 'scale');
-  f.env.LOCAL_DEV = 'true';
-  const response = await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env);
-  assert.equal(response.status, 200);
-  assert.equal((await response.json() as any).scheduled_plan, 'builder');
-  const write = f.calls.find(c => c.params.has('phases[1][items][0][price]'))!;
-  assert.equal(write.params.get('phases[1][items][0][price]'), localBuilderPrice);
-});
+for (const plan of ['pro', 'scale'] as const) {
+  test(`local upgrade portal selects the local ${plan} price`, async t => {
+    const f = await billingFixture(t, 'builder');
+    f.env.LOCAL_DEV = 'true';
+    f.state.subscriptions[0].items.data[0].price.id = localPrices.builder;
+    f.state.invoices[0].lines.data[0].pricing.price_details.price = localPrices.builder;
+    const response = await handleSubscriptionRequest(post('/subscription/portal', { plan }), f.env);
+    assert.equal(response.status, 200);
+    assert.ok(f.calls.some(c => c.url.pathname === `/v1/prices/${localPrices[plan]}`));
+    const portal = f.calls.find(c => c.url.pathname === '/v1/billing_portal/sessions')!;
+    assert.equal(portal.params.get('flow_data[subscription_update_confirm][items][0][price]'), localPrices[plan]);
+  });
+}

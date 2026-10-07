@@ -38,7 +38,7 @@ export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandl
   for (const mutation of mutations) {
     register(api, "post", `/subscription/${mutation.path}`, {
       operationId: mutation.id, tags: ["Subscriptions"], summary: mutation.summary, security: cookieSecurity,
-      description: "Requires a browser session cookie and trusted Origin. Bearer automation credentials do not authorize billing mutations. Local development uses a separate hard-coded Stripe price for the builder plan.",
+      description: "Requires a browser session cookie and trusted Origin. Bearer automation credentials do not authorize billing mutations. Local development uses separate hard-coded Stripe prices for all plans.",
       request: { headers: z.object({ Origin: z.string() }), ...requestBody(mutation.body) },
       responses: { 200: jsonResponse(mutation.result), ...errors(400, 401, 402, 403, 409, 503) },
     }, handler);

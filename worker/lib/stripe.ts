@@ -5,7 +5,11 @@ export const PLAN_PRICES = {
   scale: "price_1UNAq1GSUs8K8zgHnt8PplRQ",
 } as const;
 export type Plan = keyof typeof PLAN_PRICES;
-const LOCAL_PLAN_PRICES = { ...PLAN_PRICES, builder: "price_1UNrymGgJdfq06ol4uXUV6Ao" } as const;
+const LOCAL_PLAN_PRICES = {
+  builder: "price_1UNrymGgJdfq06ol4uXUV6Ao",
+  pro: "price_1UNs6DGgJdfq06olo5rl4TS7",
+  scale: "price_1UNs6sGgJdfq06olIK6KqNNf",
+} as const;
 export function planPrices(env?: Pick<BillingEnv, "LOCAL_DEV">): Record<Plan, string> {
   return env?.LOCAL_DEV === "true" ? LOCAL_PLAN_PRICES : PLAN_PRICES;
 }
