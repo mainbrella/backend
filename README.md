@@ -89,8 +89,11 @@ export DOCKER_HOST="$(docker context inspect orbstack --format '{{.Endpoints.doc
 ```
 
 Local authentication and trial/subscription records are separate from production.
-The local container configuration includes the Node image; the other catalog
-images are configured by the production deployment workflow.
+`npm run dev` includes only the Node image. Use `npm run dev:all` to enable
+Node, Python, Rust, Go, and DevOps locally from their existing Dockerfiles.
+Stop the current dev server before switching; Wrangler builds the images and
+starts machines on demand. Additional Wrangler options can be passed through,
+for example `npm run dev:all -- --ip 0.0.0.0`.
 
 ## Welcome emails
 

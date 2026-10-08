@@ -3,9 +3,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { LocalProxyCleanup } from './local-proxy-cleanup.mjs';
+import { IMAGE_CATALOG } from '../containers/image-catalog.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const args = process.argv.slice(2);
+const allImages = process.argv.slice(2).includes('--all-images');
+const args = process.argv.slice(2).filter(arg => arg !== '--all-images');
 const persistIndex = args.indexOf('--persist-to');
 const persistPath = args.find(arg => arg.startsWith('--persist-to='))?.slice('--persist-to='.length)
   ?? (persistIndex >= 0 ? args[persistIndex + 1] : undefined);
@@ -31,6 +33,16 @@ await sweep();
 const configPaths = ['api', 'containers'].map(name => {
   const source = name === 'api' ? 'wrangler.jsonc' : 'wrangler.containers.jsonc';
   const config = JSON.parse(readFileSync(`${root}${source}`, 'utf8'));
+  if (name === 'containers' && allImages) {
+    for (const container of config.containers ?? []) {
+      if (container.class_name === 'UserContainer') {
+        container.images = {
+          ...container.images,
+          ...Object.fromEntries(IMAGE_CATALOG.map(image => [image.key, { dockerfile: `./${image.dockerfile}` }])),
+        };
+      }
+    }
+  }
   delete config.routes;
   delete config.route;
   config.vars = { ...config.vars, LOCAL_DEV: 'true' };
