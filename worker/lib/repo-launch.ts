@@ -47,7 +47,8 @@ async function github(path: string, missing: string): Promise<any> {
     operation: path.includes('/git/trees/') ? 'tree' : path.includes('/commits/') ? 'commit' : 'repository' };
   let response;
   try {
-    response = await fetch(`https://api.github.com${path}`, { redirect: 'error', signal: AbortSignal.timeout(10_000),
+    // Workers supports manual redirects; non-2xx responses below remain failures.
+    response = await fetch(`https://api.github.com${path}`, { redirect: 'manual', signal: AbortSignal.timeout(10_000),
       headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella-repo-launch', 'X-GitHub-Api-Version': '2026-03-10' } });
   } catch (cause) { throw new LaunchError('github_unavailable', 503, { cause, diagnostics }); }
   Object.assign(diagnostics, { upstreamStatus: response.status, upstreamRequestId: response.headers.get('x-github-request-id'),

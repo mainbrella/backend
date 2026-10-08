@@ -128,6 +128,30 @@ test('GitHub failures log upstream status, message, request ID and rate limit he
   assert.equal(f.accountCalls.length, 0);
 });
 
+test('GitHub requests use Worker-supported manual redirects and reject redirects before allocation', async t => {
+  const f = await fixture(t);
+  t.mock.method(console, 'error', () => {});
+  const delegate = globalThis.fetch;
+  let redirect = false;
+  let githubRequests = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname !== 'api.github.com') return delegate(input, init);
+    githubRequests++;
+    assert.equal(init?.redirect, 'manual');
+    return redirect ? new Response(null, { status: 301, headers: { Location: 'https://example.com/redirect' } }) : delegate(input, init);
+  });
+  assert.equal((await f.create()).phase, 'allocating');
+  assert.equal(githubRequests, 3); // Repository, commit and tree use the same policy.
+  redirect = true;
+  const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions, 'redirected-launch'), f.env);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'github_unavailable' });
+  assert.equal(githubRequests, 4);
+  assert.equal(f.accountCalls.length, 0);
+  assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM repo_launches').get() as any).count, 1);
+});
+
 test('transport failure retains nested causes while redacting credentials and submitted commands', async t => {
   const f = await fixture(t);
   const logs: unknown[][] = [];

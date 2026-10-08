@@ -13,7 +13,7 @@ const params = z.object({ launchId: z.uuid() });
 export function registerRepoLaunchRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/repo-launches/resolve', {
     operationId: 'resolvePublicRepository', tags: ['Containers'], summary: 'Validate a public GitHub repository and suggest a runtime', security: containerSecurity,
-    description: 'Read-only. Resolves a branch, tag or commit to an immutable commit and detects manifests in cwd. No GitHub authentication, allocation or execution. GitHub rate limits may return 429.',
+    description: 'Read-only. Resolves a branch, tag or commit to an immutable commit and detects manifests in cwd. No GitHub authentication, allocation or execution. GitHub rate limits may return 429. GitHub redirects are not followed and return github_unavailable (503).',
     request: { query: z.object({ repo: repoName, ref: repoRef.optional(), cwd: repoCwd.optional() }), headers },
     responses: { 200: jsonResponse(repository), ...errors(400, 401, 403, 429, 503) },
   }, handler);
