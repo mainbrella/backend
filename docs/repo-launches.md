@@ -11,6 +11,19 @@ commands already admitted continue after a tab closes. The next phase waits unti
 the owner reopens the private run URL and resumes polling. GET endpoints never
 allocate. Reloaded preview URLs require explicit creation/renewal.
 
+For failed API requests, look for `repo_launch_request_failed` in Wrangler or
+Worker logs. It includes a request ID, failing `stage`, elapsed time, HTTP status,
+and the underlying error stack and nested causes. Advance failures also include
+the launch phase and available container generation/execution IDs. GitHub failures
+include the upstream status, message, request ID and rate limit headers. These
+details stay in server logs; HTTP responses retain their concise error codes.
+Credentials and submitted setup/start commands are redacted.
+
+For example, `stage: load_existing_launch` with `no such table: repo_launches`
+means migration 013 has not been applied to the database used by that Worker.
+`stage: resolve_repository` identifies GitHub validation; check its upstream
+message and rate limit fields for the cause.
+
 Qualify three workflows in a deployment with previews enabled:
 
 1. A terminal-only public repository. Confirm `pwd` is `/workspace/repo`, `git rev-parse

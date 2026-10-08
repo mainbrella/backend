@@ -19,7 +19,7 @@ export function registerRepoLaunchRoutes(api: OpenAPIApi, handler: LegacyHandler
   }, handler);
   register(api, 'post', '/repo-launches', {
     operationId: 'createRepositoryLaunch', tags: ['Containers'], summary: 'Create an owner-scoped repository launch', security: containerSecurity,
-    description: 'Requires paid or trial access and a stable Idempotency-Key. Validates and resolves the public GitHub repository before recording a launch. No allocation until advance. Small is the default size; cwd is relative to /workspace/repo. Setup and start commands execute only after explicit launch. Supply startCommand and port together. Each recipient creates a private launch in their own account. Repeated keys return the original launch; conflicting options return 409.',
+    description: 'Requires paid or trial access and a stable Idempotency-Key. Validates and resolves the public GitHub repository before recording a launch. No allocation until advance. Small is the default size; cwd is relative to /workspace/repo. Setup and start commands execute only after explicit launch. Supply startCommand and port together. Each recipient creates a private launch in their own account. Repeated keys return the original launch; conflicting options return 409. Server-side repo_launch_request_failed logs include the failing stage and dependency diagnostics; HTTP errors contain only the error code.',
     request: { headers: headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }), ...requestBody(launchOptionsSchema) },
     responses: { 200: jsonResponse(launch), 201: jsonResponse(launch), ...errors(400, 401, 402, 403, 409, 413, 429, 503) },
   }, handler);

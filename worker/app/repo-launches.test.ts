@@ -86,6 +86,82 @@ async function fixture(t: TestContext) {
     githubMode(value: string) { githubMode = value; }, manifests(value: string[]) { manifests = value; }, loseAllocation() { loseAllocation = true; }, loseExecution() { loseExecution = true; } };
 }
 
+test('missing launch migration logs the database error and failing stage without exposing diagnostics to callers', async t => {
+  const f = await fixture(t);
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
+  f.sqlite.exec('DROP TABLE repo_launches');
+  const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions), f.env);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'launch_unavailable' });
+  const details = logs.find(([event]) => event === 'repo_launch_request_failed')![1] as any;
+  assert.match(details.requestId, /^[a-f0-9-]{36}$/);
+  assert.equal(details.stage, 'load_existing_launch');
+  assert.equal(details.method, 'POST'); assert.equal(details.path, '/repo-launches');
+  assert.equal(details.status, 503); assert.ok(details.elapsedMs >= 0);
+  assert.match(details.error.message, /no such table: repo_launches/);
+  assert.ok(details.error.stack);
+  assert.ok(!JSON.stringify(logs).includes(SESSION_ONE));
+});
+
+test('GitHub failures log upstream status, message, request ID and rate limit headers', async t => {
+  const f = await fixture(t);
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
+  const delegate = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname !== 'api.github.com') return delegate(input);
+    return Response.json({ message: 'API rate limit exceeded' }, { status: 403, headers: {
+      'x-github-request-id': 'github-request-123', 'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': '1791500000', 'retry-after': '60',
+    } });
+  });
+  const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions), f.env);
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), { error: 'github_rate_limited' });
+  const details = logs.find(([event]) => event === 'repo_launch_request_failed')![1] as any;
+  assert.equal(details.stage, 'resolve_repository');
+  assert.deepEqual(details.error.diagnostics, { dependency: 'github', operation: 'repository', upstreamStatus: 403,
+    upstreamRequestId: 'github-request-123', rateLimitRemaining: '0', rateLimitReset: '1791500000',
+    retryAfter: '60', upstreamMessage: 'API rate limit exceeded' });
+  assert.equal(f.accountCalls.length, 0);
+});
+
+test('transport failure retains nested causes while redacting credentials and submitted commands', async t => {
+  const f = await fixture(t);
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
+  const command = 'echo private-command-content';
+  const delegate = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname !== 'api.github.com') return delegate(input);
+    throw new Error(`connection failed ${SESSION_ONE} ${command}`, { cause: new Error(`socket closed ${f.env.STRIPE_SECRET_KEY}`) });
+  });
+  const response = await handleRequest(api('/repo-launches', 'POST', { ...defaultOptions, setupCommand: command }), f.env);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'github_unavailable' });
+  const details = logs.find(([event]) => event === 'repo_launch_request_failed')![1] as any;
+  assert.equal(details.stage, 'resolve_repository');
+  assert.match(details.error.cause.message, /connection failed \[redacted\] \[redacted\]/);
+  assert.match(details.error.cause.cause.message, /socket closed \[redacted\]/);
+  for (const secret of [SESSION_ONE, command, f.env.STRIPE_SECRET_KEY]) assert.ok(!JSON.stringify(logs).includes(secret));
+});
+
+test('advance failure logs its launch identity and original stage after releasing the lease', async t => {
+  const f = await fixture(t); const state = await f.create();
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
+  f.loseAllocation();
+  const response = await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env);
+  assert.equal(response.status, 503);
+  const details = logs.find(([event]) => event === 'repo_launch_request_failed')![1] as any;
+  assert.equal(details.stage, 'allocate_container');
+  assert.equal(details.launchId, state.id); assert.equal(details.phase, 'allocating');
+  assert.equal((f.sqlite.prepare('SELECT lock_until FROM repo_launches WHERE id = ?').get(state.id) as any).lock_until, 0);
+});
+
 test('read-only resolution and launch creation never allocate; commits resolve before quota is consumed', async t => {
   const f = await fixture(t);
   const response = await handleRequest(api('/repo-launches/resolve?repo=acme/demo&ref=feature%2Fa'), f.env);

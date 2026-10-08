@@ -13,20 +13,55 @@ export const launchOptionsSchema = z.object({
 }).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' });
 export type LaunchOptions = z.infer<typeof launchOptionsSchema>;
 export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[] }
+interface GithubDiagnostic {
+  dependency: 'github'; operation: 'repository' | 'commit' | 'tree';
+  upstreamStatus?: number; upstreamRequestId?: string | null;
+  rateLimitRemaining?: string | null; rateLimitReset?: string | null; retryAfter?: string | null;
+  upstreamMessage?: string; reason?: string;
+}
 export class LaunchError extends Error {
-  constructor(message: string, public status = 503) { super(message); }
+  constructor(message: string, public status = 503, options?: ErrorOptions & { diagnostics?: GithubDiagnostic }) {
+    super(message, options);
+    this.name = 'LaunchError';
+    this.diagnostics = options?.diagnostics;
+  }
+  readonly diagnostics?: GithubDiagnostic;
+}
+
+// Keep full diagnostics in Worker logs, never in the public error response.
+export function launchErrorDetails(error: unknown, redactions: string[] = [], depth = 0): Record<string, unknown> {
+  const scrub = (text: string) => {
+    for (const value of redactions) if (value) text = text.replaceAll(value, '[redacted]');
+    return text.replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+      .replace(/\b(?:mb_[a-f0-9]{64}|sk_(?:live|test)_[A-Za-z0-9_]+)\b/gi, '[redacted]').slice(0, 4000);
+  };
+  if (!(error instanceof Error)) return { name: 'UnknownError', message: 'Non-Error exception' };
+  return { name: error.name, message: scrub(error.message), ...(error.stack ? { stack: scrub(error.stack) } : {}),
+    ...(error instanceof LaunchError && error.diagnostics ? { diagnostics: Object.fromEntries(Object.entries(error.diagnostics)
+      .map(([key, value]) => [key, typeof value === 'string' ? scrub(value) : value])) } : {}),
+    ...(error.cause !== undefined && depth < 3 ? { cause: launchErrorDetails(error.cause, redactions, depth + 1) } : {}) };
 }
 
 async function github(path: string, missing: string): Promise<any> {
+  const diagnostics: GithubDiagnostic = { dependency: 'github',
+    operation: path.includes('/git/trees/') ? 'tree' : path.includes('/commits/') ? 'commit' : 'repository' };
   let response;
   try {
     response = await fetch(`https://api.github.com${path}`, { redirect: 'error', signal: AbortSignal.timeout(10_000),
       headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella-repo-launch', 'X-GitHub-Api-Version': '2026-03-10' } });
-  } catch { throw new LaunchError('github_unavailable'); }
-  if (response.status === 404 || response.status === 409 || response.status === 422) throw new LaunchError(missing, 400);
-  if (response.status === 403 || response.status === 429) throw new LaunchError('github_rate_limited', 429);
-  if (!response.ok) throw new LaunchError('github_unavailable');
-  return response.json();
+  } catch (cause) { throw new LaunchError('github_unavailable', 503, { cause, diagnostics }); }
+  Object.assign(diagnostics, { upstreamStatus: response.status, upstreamRequestId: response.headers.get('x-github-request-id'),
+    rateLimitRemaining: response.headers.get('x-ratelimit-remaining'), rateLimitReset: response.headers.get('x-ratelimit-reset'),
+    retryAfter: response.headers.get('retry-after') });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: unknown } | null;
+    if (typeof body?.message === 'string') diagnostics.upstreamMessage = body.message.slice(0, 1000);
+    const error = response.status === 404 || response.status === 409 || response.status === 422 ? missing
+      : response.status === 403 || response.status === 429 ? 'github_rate_limited' : 'github_unavailable';
+    throw new LaunchError(error, error === missing ? 400 : error === 'github_rate_limited' ? 429 : 503, { diagnostics });
+  }
+  try { return await response.json(); }
+  catch (cause) { throw new LaunchError('github_unavailable', 503, { cause, diagnostics: { ...diagnostics, reason: 'invalid_json' } }); }
 }
 
 export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.'): Promise<ResolvedRepo> {
