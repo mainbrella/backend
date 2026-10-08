@@ -880,6 +880,20 @@ and `port` (1024–65535). Start command and port must be supplied together. Run
 suggestions use manifests in the working directory; ambiguous projects default
 to Node and allow an override. Commands from share links are visible before Run.
 
+Catalog selection does not guarantee native build prerequisites. Inspect dependency
+install/postinstall scripts and the repository Dockerfile, then check tools in the
+actual container before installing dependencies. For example, `node-pty` may fall
+back to `node-gyp` when prebuilt binaries are unavailable, requiring `python3`,
+`make`, and `g++`. Include conditional installation of missing system packages in
+`setupCommand` using the guest OS/package manager and available privileges; on
+Debian this is `apt-get update` followed by
+`apt-get install -y --no-install-recommends python3 make g++`. Do not skip required
+lifecycle scripts or regenerate the lockfile to bypass this failure. Repair failed
+installs in the retained container, preserving its checkout and completed work.
+Repository Dockerfiles are evidence for prerequisites, not automatically compatible
+custom images: this launch contract accepts `catalogId`, not `imageId`, and custom
+images require one stage starting with `FROM mainbrella:base`.
+
 Authenticated endpoints accept session cookies or existing session/API Bearer
 credentials. Cookie mutations require a trusted Origin:
 

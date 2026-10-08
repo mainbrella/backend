@@ -17,6 +17,16 @@ terminal only. The active-run prompt includes the exact owned container generati
 and execution IDs, directing repairs to that same container because failed launch
 phases never automatically replay. No new API contract is needed for this flow.
 
+The copied prompt also directs native dependency checks before installation:
+inspect install/postinstall scripts and the repository Dockerfile, probe the guest
+for Python and compiler tools, and include conditional system-package installation
+in setup when needed. Missing `node-pty` prebuilds can trigger `node-gyp`, requiring
+`python3`, `make`, and `g++` even with the Node catalog selected. Repairs install
+the missing tools and retry failed steps in the retained container. The prompt
+does not assume the repository Dockerfile is compatible with custom-image rules.
+Preview compatibility checks cover both cookies and Authorization headers, which
+the gateway strips.
+
 The launch driver uses POST advance requests while the page is open. Managed
 commands already admitted continue after a tab closes. The next phase waits until
 the owner reopens the private run URL and resumes polling. GET endpoints never
