@@ -189,3 +189,23 @@ await client.workspaces.delete(saved.id);
 ```
 
 `client.workspaces.list()`, `.get(id)` and `.update(id, {name, archived})` manage saved metadata. Retry an ambiguous save with its original body and key (`error.idempotencyKey`). Restore consumes one start, requires the saved image digest, size and internet policy, and restores filesystem bytes with a fresh generation. RAM, processes and previews do not resume. Plan quotas and expiry apply; archive retains quota, while deletion revokes future restores without immediately erasing provider-held bytes.
+
+## Run a public GitHub repository
+
+The next CLI release includes a browser launcher:
+
+```sh
+mainbrella repo acme/demo --ref main --open
+mainbrella repo acme/web --setup 'npm ci' --start 'npm run dev -- --host 0.0.0.0' --port 3000 --open
+```
+
+It prints a shareable `https://mainbrella.com/run/` URL and optionally opens it
+using the operating system's browser launcher. No API key is required; sign in
+with Mainbrella and choose **Run repository** to allocate. Flags include `--ref`,
+`--runtime node|python|rust|go|devops`, `--size`, `--cwd`, `--setup`, `--start`, and
+`--port`. Without commands the result is a cloned repository and usable shell.
+`mainbrella run` retains its existing shell-execution meaning.
+
+After publishing the updated package, the one-shot form is
+`npx --package @mainbrella/sdk mainbrella repo acme/demo --open`. Until then, run
+`node sdk/javascript/cli.mjs repo acme/demo --open` from this checkout.

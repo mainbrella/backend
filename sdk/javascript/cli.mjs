@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
 import { open, realpath, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Mainbrella, MainbrellaError } from './index.js';
@@ -6,6 +7,7 @@ import { Mainbrella, MainbrellaError } from './index.js';
 const help = `Mainbrella 0.1.0 — generation-bound container automation
 Set MAINBRELLA_API_KEY in your environment. Optional MAINBRELLA_API_URL.
 
+mainbrella repo OWNER/REPO [--ref REF] [--runtime node|python|rust|go|devops] [--size SIZE] [--cwd DIR] [--setup COMMAND] [--start COMMAND --port N] [--open]
 mainbrella capabilities | list
 mainbrella create --idempotency-key KEY [--size lite|small|medium|large|xl] [--internet true|false] [--catalog-id ID | --image-id ID]
 mainbrella kill --id ID --created-at ISO
@@ -21,7 +23,8 @@ mainbrella file remove --id ID --created-at ISO --path PATH [--recursive]
 mainbrella file move --id ID --created-at ISO --path PATH --destination PATH
 mainbrella file chmod --id ID --created-at ISO --path PATH --mode 0640
 
-Results are JSON; job events are newline-delimited JSON. Errors go to stderr.
+repo prints a shareable launch URL and needs no API key. --open opens it in your browser; Run repository confirms allocation.
+Other results are JSON; job events are newline-delimited JSON. Errors go to stderr.
 Creation and start require a stable key. Preserve it after an ambiguous response.
 kill affects only the supplied generation. Credentials are never command options.
 `;
@@ -101,11 +104,52 @@ async function sourceBytes(path, limit) {
   } finally { await file.close(); }
 }
 
-export async function main(argv = process.argv.slice(2), { env = process.env, stdout = process.stdout, stderr = process.stderr, fetch = globalThis.fetch } = {}) {
+async function openBrowser(url) {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'rundll32' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url];
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'ignore' });
+    child.on('error', () => reject(new MainbrellaError('browser_unavailable')));
+    child.on('exit', code => code === 0 ? resolve() : reject(new MainbrellaError('browser_unavailable')));
+  });
+}
+export function repositoryUrl(argv) {
+  const remaining = [...argv];
+  const repo = remaining.shift()?.replace(/^https:\/\/github\.com\//i, '').replace(/\/$/, '').replace(/\.git$/, '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(repo ?? '') || ['.', '..'].includes(repo.split('/')[1])) fail();
+  const names = { ref: 'ref', runtime: 'catalogId', size: 'size', cwd: 'cwd', setup: 'setupCommand', start: 'startCommand', port: 'port' };
+  const options = {};
+  while (remaining.length) {
+    const flag = remaining.shift();
+    if (!flag?.startsWith('--')) fail();
+    const name = flag.slice(2);
+    if (Object.hasOwn(options, name) || name !== 'open' && !Object.hasOwn(names, name)) fail();
+    if (name === 'open') options.open = true;
+    else { const value = remaining.shift(); if (!value || value.startsWith('--')) fail(); options[name] = value; }
+  }
+  if (options.runtime && !['node', 'python', 'rust', 'go', 'devops'].includes(options.runtime)) fail();
+  if (options.size && !['lite', 'small', 'medium', 'large', 'xl'].includes(options.size)) fail();
+  if (options.ref && (options.ref.length > 200 || /[\x00-\x20\x7f]/.test(options.ref))) fail();
+  if (options.cwd && (options.cwd.length > 200 || options.cwd !== '.' && (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(options.cwd) || options.cwd.split('/').some(part => ['.', '..'].includes(part))))) fail();
+  for (const name of ['setup', 'start']) if (options[name] && (!options[name].trim() || options[name].length > 4096 || options[name].includes('\0'))) fail();
+  if (Boolean(options.start) !== Boolean(options.port) || options.port && (!/^\d+$/.test(options.port) || Number(options.port) < 1024 || Number(options.port) > 65535)) fail();
+  const url = new URL('https://mainbrella.com/run/');
+  url.searchParams.set('repo', repo);
+  for (const [name, key] of Object.entries(names)) if (options[name]) url.searchParams.set(key, options[name]);
+  return { url: url.href, open: Boolean(options.open) };
+}
+
+export async function main(argv = process.argv.slice(2), { env = process.env, stdout = process.stdout, stderr = process.stderr, fetch = globalThis.fetch, openUrl = openBrowser } = {}) {
   const print = value => stdout.write(JSON.stringify(value) + '\n');
   try {
     if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { stdout.write(help); return 0; }
     if (argv.length === 1 && argv[0] === '--version') { stdout.write('0.1.0\n'); return 0; }
+    if (argv[0] === 'repo') {
+      const result = repositoryUrl(argv.slice(1));
+      stdout.write(result.url + '\n');
+      if (result.open) await openUrl(result.url);
+      return 0;
+    }
     const { command, options, timeoutMs, pty, argvValues, envValues, cursor, limit, offset, cols, rows } = parse(argv);
     const client = new Mainbrella({ apiKey: env.MAINBRELLA_API_KEY, baseUrl: options['base-url'] || env.MAINBRELLA_API_URL, fetch });
     if (command === 'capabilities' || command === 'list') { print(await client[command]()); return 0; }

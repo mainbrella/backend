@@ -115,3 +115,23 @@ test('CLI filesystem controls are explicit, bounded and never repeat a mutation 
   assert.equal(await main(['file', 'remove', ...identity, '--path', '/tmp/x', '--recursive'], { ...out, env: { MAINBRELLA_API_KEY: key }, fetch: async () => { lost++; throw new Error('private'); } }), 1);
   assert.equal(lost, 1); assert.equal(JSON.parse(out.result.stderr).error, 'transport_unavailable');
 });
+
+test('repo command makes an encoded share link without credentials, allocation, or shell execution', async () => {
+  const out = output(); const opened = [];
+  let calls = 0;
+  const args = ['repo', 'https://github.com/acme/demo.git', '--ref', 'feature/a', '--runtime', 'node', '--cwd', 'apps/web',
+    '--setup', 'npm ci && echo "$HOME"', '--start', 'npm run dev -- --host 0.0.0.0', '--port', '3000', '--open'];
+  assert.equal(await main(args, { ...out, env: {}, fetch: async () => { calls++; }, openUrl: async url => opened.push(url) }), 0);
+  const url = new URL(out.result.stdout.trim());
+  assert.equal(url.origin, 'https://mainbrella.com'); assert.equal(url.pathname, '/run/');
+  assert.equal(url.searchParams.get('repo'), 'acme/demo'); assert.equal(url.searchParams.get('ref'), 'feature/a');
+  assert.equal(url.searchParams.get('setupCommand'), 'npm ci && echo "$HOME"');
+  assert.deepEqual(opened, [url.href]); assert.equal(calls, 0); assert.equal(out.result.stderr, '');
+  for (const argv of [['repo'], ['repo', 'https://evil.test/acme/demo'], ['repo', 'acme/demo', '--runtime', 'bad'],
+    ['repo', 'acme/demo', '--start', 'npm start'], ['repo', 'acme/demo', '--port', '80'], ['repo', 'acme/demo', '--cwd', '../private'],
+    ['repo', 'acme/demo', '--open', '--open'], ['repo', 'acme/demo', '--id', 'small']]) {
+    const invalid = output();
+    assert.equal(await main(argv, { ...invalid, env: {} }), 1);
+    assert.equal(JSON.parse(invalid.result.stderr).error, 'invalid_cli_arguments');
+  }
+});

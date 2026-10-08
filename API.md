@@ -865,3 +865,58 @@ Each new save reserves the full source disk capacity against both capture budget
 `GET /workspaces` includes `maxCaptureBytesPerMonth` and `maxRetainedCaptureBytes` in `limits`, and `savesThisMonth`, `captureBytesThisMonth`, and `retainedCaptureBytes` in `usage`. New saves return HTTP 429 with `workspace_quota_exceeded`, `workspace_save_limit`, `workspace_capture_budget_exceeded`, or `workspace_retained_budget_exceeded` when the corresponding limit is reached. Reads, restores of otherwise eligible workspaces, archive and deletion remain available when a save budget is exhausted.
 
 Reservation uses the source machine's full disk capacity, even when the snapshot is smaller. Expiry releases quota and removes usable handles; the provider controls physical retention. Backup to your own storage with `GET /containers/export?id=…&createdAt=…`: this returns a gzip tar archive of `/workspace`, limited to 16 MiB compressed and 60 seconds. Export a restored saved workspace to download it. Export excludes other root paths, mounted volumes and process memory, and fails if the archive exceeds the limit or files change during capture. It shares the four-operation limit with other filesystem operations.
+
+## Public repository launches
+
+The browser entry point is `https://mainbrella.com/run/?repo=OWNER/REPO&ref=main`.
+Opening a share link prepares a launch; **Run repository** creates a private launch
+for the signed-in recipient using their paid or coupon-trial allowance. The default
+result is a shell in `/workspace/repo` on a Small machine. Each recipient gets a
+separate container. GitHub login is unnecessary for public repositories.
+
+Optional query/body fields are `ref`, `catalogId` (`node`, `python`, `rust`, `go`,
+`devops`), `size`, `cwd` (relative to the checkout), `setupCommand`, `startCommand`,
+and `port` (1024–65535). Start command and port must be supplied together. Runtime
+suggestions use manifests in the working directory; ambiguous projects default
+to Node and allow an override. Commands from share links are visible before Run.
+
+Authenticated endpoints accept session cookies or existing session/API Bearer
+credentials. Cookie mutations require a trusted Origin:
+
+- `GET /repo-launches/resolve?repo=OWNER/REPO&ref=main&cwd=.` validates the public
+  repository, resolves an immutable commit, and suggests a runtime. No allocation.
+- `POST /repo-launches` with the settings JSON and a stable `Idempotency-Key`
+  validates paid/trial access and resolves the commit before storing the launch.
+  It returns a launch with `id`, `phase`, `options`, `repository`, `container`,
+  `executions`, `createdAt`, `shellReadyAt`, `previewReadyAt`, and `error`.
+  Repeating identical settings/key returns the original launch; mismatches return
+  409. Creating this record does not allocate until advance.
+- `GET /repo-launches/{id}` reads owner-scoped progress. No allocation or replay.
+- `POST /repo-launches/{id}/advance` performs or reconciles one workflow step.
+  Repeat while phases are `allocating`, `cloning`, `setup`, or `starting`. A lease
+  and stable allocation/execution keys prevent duplicate side effects. Retained
+  execution IDs are inspected before moving on. End phases are `ready`, `failed`,
+  and `stopped`. An expired or reused container slot is never resumed.
+
+The browser stores private run/request identities in the URL fragment, preserves
+settings through sign-in with `returnTo`, and copies share links without those
+identities. An uncertain initial submission asks for Resume with the same key.
+GitHub errors occur before allocation; rate-limited lookups return 429.
+
+Clone/setup/startup checks use retained managed executions. The browser terminal
+attaches to the `main` tmux session created at the checkout root. The server runs
+in `mainbrella-preview`, with output at `/workspace/.mainbrella-preview.log`, under
+normal container idle and hard deadlines. Readiness requires a successful HTTP
+response at `/` on the chosen port. The server should listen on `0.0.0.0`. Setup
+and startup failures leave the terminal available for manual repair; failed or
+uncertain commands are never silently rerun after history expires.
+
+Use the existing execution API to read output and the previews API to issue a
+link after readiness. Preview URLs are returned once and never stored in launch
+records. The page renews by reconciling/revoking existing grants on that port and
+issuing a fresh link. Links last up to 15 minutes, do not extend the container
+lease, and give anyone with the URL access. Cookie-based apps are unsupported.
+
+Apply `migrations/013_repo_launches.sql` before deploying this API. Production
+rollout requires the frontend, API and new SDK CLI release together; source
+availability does not imply the currently published npm package contains `repo`.

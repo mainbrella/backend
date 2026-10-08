@@ -4,6 +4,8 @@ import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
+  '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
+  '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
   '/workspaces': ['get','post'], '/workspaces/{workspaceId}': ['get','patch','delete'], '/containers/export': ['get'],
   '/capabilities': ['get'],

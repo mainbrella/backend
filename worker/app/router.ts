@@ -1,3 +1,4 @@
+import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleAPIKeysRequest } from "./api-keys";
 import { createOpenAPIApp } from "./openapi";
 import { syncAccountEntitlement } from "../lib/container-service";
@@ -29,6 +30,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
   if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);
   if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
