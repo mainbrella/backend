@@ -42,14 +42,15 @@ export function launchErrorDetails(error: unknown, redactions: string[] = [], de
     ...(error.cause !== undefined && depth < 3 ? { cause: launchErrorDetails(error.cause, redactions, depth + 1) } : {}) };
 }
 
-async function github(path: string, missing: string): Promise<any> {
+async function github(path: string, missing: string, token?: string): Promise<any> {
   const diagnostics: GithubDiagnostic = { dependency: 'github',
     operation: path.includes('/git/trees/') ? 'tree' : path.includes('/commits/') ? 'commit' : 'repository' };
   let response;
   try {
     // Workers supports manual redirects; non-2xx responses below remain failures.
     response = await fetch(`https://api.github.com${path}`, { redirect: 'manual', signal: AbortSignal.timeout(10_000),
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella-repo-launch', 'X-GitHub-Api-Version': '2026-03-10' } });
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella-repo-launch', 'X-GitHub-Api-Version': '2026-03-10',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
   } catch (cause) { throw new LaunchError('github_unavailable', 503, { cause, diagnostics }); }
   Object.assign(diagnostics, { upstreamStatus: response.status, upstreamRequestId: response.headers.get('x-github-request-id'),
     rateLimitRemaining: response.headers.get('x-ratelimit-remaining'), rateLimitReset: response.headers.get('x-ratelimit-reset'),
@@ -65,20 +66,20 @@ async function github(path: string, missing: string): Promise<any> {
   catch (cause) { throw new LaunchError('github_unavailable', 503, { cause, diagnostics: { ...diagnostics, reason: 'invalid_json' } }); }
 }
 
-export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.'): Promise<ResolvedRepo> {
-  const metadata = await github(`/repos/${repo}`, 'public_repo_not_found');
+export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.', token?: string): Promise<ResolvedRepo> {
+  const metadata = await github(`/repos/${repo}`, 'public_repo_not_found', token);
   if (metadata.private !== false || metadata.disabled || !repoName.safeParse(metadata.full_name).success) throw new LaunchError('public_repo_not_found', 400);
   const canonical = metadata.full_name as string;
   const resolvedRef = ref ?? metadata.default_branch;
   if (!repoRef.safeParse(resolvedRef).success) throw new LaunchError('repo_ref_not_found', 400);
-  const commit = await github(`/repos/${canonical}/commits/${encodeURIComponent(resolvedRef)}?per_page=1`, 'repo_ref_not_found');
+  const commit = await github(`/repos/${canonical}/commits/${encodeURIComponent(resolvedRef)}?per_page=1`, 'repo_ref_not_found', token);
   if (!/^[a-f0-9]{40}$/.test(commit.sha) || !/^[a-f0-9]{40}$/.test(commit.commit?.tree?.sha)) throw new LaunchError('github_unavailable');
-  let tree = await github(`/repos/${canonical}/git/trees/${commit.commit.tree.sha}`, 'repo_ref_not_found');
+  let tree = await github(`/repos/${canonical}/git/trees/${commit.commit.tree.sha}`, 'repo_ref_not_found', token);
   if (cwd !== '.') {
     for (const part of cwd.split('/')) {
       const directory = tree.tree?.find((entry: any) => entry.path === part && entry.type === 'tree');
       if (!directory || !/^[a-f0-9]{40}$/.test(directory.sha)) throw new LaunchError('repo_directory_not_found', 400);
-      tree = await github(`/repos/${canonical}/git/trees/${directory.sha}`, 'repo_directory_not_found');
+      tree = await github(`/repos/${canonical}/git/trees/${directory.sha}`, 'repo_directory_not_found', token);
     }
   }
   if (!Array.isArray(tree.tree)) throw new LaunchError('github_unavailable');

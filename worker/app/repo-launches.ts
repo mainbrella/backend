@@ -161,7 +161,7 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
   const diagnostics: LaunchDiagnosticContext = { stage: 'authenticate' };
   const redactions = [request.headers.get('Authorization'), request.headers.get('Authorization')?.replace(/^Bearer\s+/i, ''),
     request.headers.get('Cookie'), ...((request.headers.get('Cookie') ?? '').split(';').map(cookie => cookie.slice(cookie.indexOf('=') + 1).trim())),
-    env.STRIPE_SECRET_KEY].filter((value): value is string => Boolean(value));
+    env.STRIPE_SECRET_KEY, env.REPO_RUN_GITHUB_TOKEN].filter((value): value is string => Boolean(value));
   try {
     const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
@@ -171,7 +171,7 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
       const cwd = repoCwd.safeParse(url.searchParams.get('cwd') ?? '.');
       if (!repo.success || !ref.success || !cwd.success) return authJson({ error: 'invalid_request' }, 400, cors);
       diagnostics.stage = 'resolve_repository';
-      return authJson(await resolvePublicRepo(repo.data, ref.data, cwd.data), 200, cors);
+      return authJson(await resolvePublicRepo(repo.data, ref.data, cwd.data, env.REPO_RUN_GITHUB_TOKEN), 200, cors);
     }
     if (match[1]) {
       if (request.method === 'POST') return authJson(await advance(request, env, user.id, match[1], diagnostics, redactions, ctx), 200, cors);
@@ -198,7 +198,7 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
     diagnostics.stage = 'check_entitlement';
     if (!(await resolveEntitlement(env, user.id)).active) return authJson({ error: 'subscription_required' }, 402, cors);
     diagnostics.stage = 'resolve_repository';
-    const repository = await resolvePublicRepo(options.data.repo, options.data.ref, options.data.cwd);
+    const repository = await resolvePublicRepo(options.data.repo, options.data.ref, options.data.cwd, env.REPO_RUN_GITHUB_TOKEN);
     const state: RepoLaunch = { id: crypto.randomUUID(), phase: 'allocating', options: options.data, repository, container: null,
       executions: {}, attempts: {}, createdAt: receivedAt, shellReadyAt: null, previewReadyAt: null, error: null };
     diagnostics.stage = 'persist_launch';

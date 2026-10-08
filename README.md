@@ -312,6 +312,30 @@ To install the skill in Codex, copy `SKILL.md` and `API.md` into
 your agent), then invoke `$mainbrella-containers`. Provision `MAINBRELLA_API_KEY`
 separately using the instructions in `API.md`.
 
+## Repository lookup authentication
+
+Repository launches and `/repo-launches/resolve` use the optional API Worker
+secret `REPO_RUN_GITHUB_TOKEN` to authenticate GitHub metadata, commit, and tree
+lookups. Without it, requests share GitHub's unauthenticated limit of 60 per hour
+per IP. A personal access token generally allows 5,000 requests per hour, shared
+with other requests by that GitHub user; secondary limits still apply.
+
+Create a dedicated personal access token for public repository reads (a classic
+PAT with no scopes is sufficient). Set it from the backend directory:
+
+```sh
+npx wrangler secret put REPO_RUN_GITHUB_TOKEN --config wrangler.jsonc
+npm run deploy:api
+```
+
+For local development, set the same binding in `.dev.vars`. Keep the token in
+secrets, separate from `IMAGE_BUILD_GITHUB_TOKEN`. It is sent only to GitHub's API,
+redacted from launch error logs, and never passed into containers, launch records,
+or browser responses. Private repositories remain rejected even if the token can
+access them. GitHub redirects remain rejected. Invalid or expired tokens return
+`github_unavailable`; rotate the secret rather than retrying unauthenticated.
+See [GitHub's rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
 ## Custom image build and deployment
 
 The **Build custom image** workflow must be on `main` before enabling builds.

@@ -16,6 +16,7 @@ interface Env {
   PREVIEW_DOMAIN?: string;
   PREVIEW_ROUTES?: D1Database;
   MONITORING_SECRET?: string;
+  REPO_RUN_GITHUB_TOKEN?: string;
   IMAGE_BUILD_GITHUB_TOKEN?: string;
   IMAGE_BUILD_SECRET?: string;
   SUPABASE_URL?: string;

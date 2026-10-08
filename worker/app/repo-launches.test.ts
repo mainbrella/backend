@@ -152,6 +152,64 @@ test('GitHub requests use Worker-supported manual redirects and reject redirects
   assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM repo_launches').get() as any).count, 1);
 });
 
+for (const authenticated of [false, true]) test(`GitHub lookups ${authenticated ? 'authenticate with the dedicated token' : 'work without a configured token'}`, async t => {
+  const f = await fixture(t);
+  if (authenticated) f.env.REPO_RUN_GITHUB_TOKEN = 'repo-lookup-test-token';
+  const delegate = globalThis.fetch;
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname !== 'api.github.com') return delegate(input, init);
+    calls++;
+    assert.equal(new Headers(init?.headers).get('Authorization'), authenticated ? `Bearer ${f.env.REPO_RUN_GITHUB_TOKEN}` : null);
+    assert.equal(init?.redirect, 'manual');
+    if (url.pathname.endsWith(`/git/trees/${tree}`)) return Response.json({ tree: [{ path: 'app', type: 'tree', sha: 'c'.repeat(40) }] });
+    return delegate(input, init);
+  });
+  const resolved = await handleRequest(api('/repo-launches/resolve?repo=acme/demo&cwd=app'), f.env);
+  assert.equal(resolved.status, 200);
+  const options = { repo: 'acme/demo', cwd: 'app' };
+  const state = await f.create(options);
+  assert.equal(calls, 8); // Metadata, commit, root tree and nested directory for both routes.
+  assert.ok(!JSON.stringify(state).includes('repo-lookup-test-token'));
+  assert.ok(!(await resolved.text()).includes('repo-lookup-test-token'));
+  assert.ok(!cloneCommand(state.repository).includes('repo-lookup-test-token'));
+  assert.equal(f.accountCalls.length, 0);
+});
+
+test('authenticated lookups still reject private repositories', async t => {
+  const f = await fixture(t);
+  f.env.REPO_RUN_GITHUB_TOKEN = 'repo-lookup-test-token';
+  f.githubMode('private');
+  const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions), f.env);
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'public_repo_not_found' });
+  assert.equal(f.githubCalls.length, 1);
+  assert.equal(f.accountCalls.length, 0);
+});
+
+test('invalid GitHub credentials fail without an unauthenticated retry and are redacted from logs', async t => {
+  const f = await fixture(t);
+  const token = f.env.REPO_RUN_GITHUB_TOKEN = 'repo-lookup-test-token';
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
+  const delegate = globalThis.fetch;
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname !== 'api.github.com') return delegate(input, init);
+    calls++;
+    return Response.json({ message: `Bad credentials ${token}` }, { status: 401 });
+  });
+  const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions), f.env);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'github_unavailable' });
+  assert.equal(calls, 1);
+  assert.ok(!JSON.stringify(logs).includes(token));
+  assert.match(JSON.stringify(logs), /Bad credentials \[redacted\]/);
+  assert.equal(f.accountCalls.length, 0);
+});
+
 test('transport failure retains nested causes while redacting credentials and submitted commands', async t => {
   const f = await fixture(t);
   const logs: unknown[][] = [];
