@@ -6,6 +6,17 @@ existing catalog images already contain git, bash, tmux and curl. No GitHub toke
 is needed. Unauthenticated GitHub rate limits return a retryable error before a
 container is allocated. This version does not read `mainbrella.json`.
 
+The `/run/` frontend defaults to repository URL → Copy setup prompt → Codex →
+configured launch link. Copy is local and requires no account or API request.
+The agent inspects repository source and the existing public launch reference,
+then selects and URL-encodes the launch settings. API access is optional for
+preparing a link; the prompt distinguishes source inspection from a tested run.
+Configured links show commands for review before Run. Manual settings remain
+available under Advanced launch settings. A URL without commands offers Open
+terminal only. The active-run prompt includes the exact owned container generation
+and execution IDs, directing repairs to that same container because failed launch
+phases never automatically replay. No new API contract is needed for this flow.
+
 The launch driver uses POST advance requests while the page is open. Managed
 commands already admitted continue after a tab closes. The next phase waits until
 the owner reopens the private run URL and resumes polling. GET endpoints never
