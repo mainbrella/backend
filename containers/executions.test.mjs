@@ -5,7 +5,7 @@ import { Readable, Writable } from 'node:stream';
 import { ManagedExecutions } from './executions.js';
 import { UserContainerController } from './user-container-core.js';
 import { MAX_OUTPUT_BYTES } from './command-contract.js';
-import { MAX_RETAINED_EXECUTIONS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES, validExecution } from './execution-contract.js';
+import { MAX_RETAINED_EXECUTIONS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES, MAX_EXECUTION_EVENTS, validExecution } from './execution-contract.js';
 
 const createdAt = '2026-10-05T12:00:00.000Z';
 const now = Date.parse(createdAt);
@@ -110,6 +110,54 @@ test('timeouts, output bounds, shared capacity and stale generations do not leak
   assert.equal((await f.manager.fetch(request('', 'POST', { command: 'echo nope' }, 'full'))).status, 429);
   f.active.clear();
   assert.equal((await f.manager.fetch(request('', 'POST', { command: 'echo nope' }, 'stale', '2099-01-01T00:00:00.000Z'))).status, 409);
+});
+
+test('many small install writes are retained without prematurely hitting the event cap', async t => {
+  const f = fixture(t);
+  const stdout = Array.from({ length: 1200 }, (_, i) => `Unpacking package-${i}…\n`);
+  const stderr = Array.from({ length: 700 }, (_, i) => `warning-${i}\n`);
+  const readable = chunks => {
+    let index = 0;
+    return new ReadableStream({ pull(controller) {
+      if (index < chunks.length) controller.enqueue(new TextEncoder().encode(chunks[index++]));
+      else controller.close();
+    } });
+  };
+  t.mock.method(f.manager.controller, 'startTerminalProcess', async () => ({
+    stdin: new WritableStream(), stdout: readable(stdout), stderr: readable(stderr), exitCode: Promise.resolve(0), kill() {},
+  }));
+  const record = await (await f.manager.fetch(request('', 'POST', { command: 'install packages' }, 'chatty'))).json();
+  await Promise.all(f.work);
+  const result = await (await f.manager.fetch(request(`/${record.id}`))).json();
+  assert.equal(result.status, 'succeeded'); assert.equal(result.exitCode, 0);
+  assert.equal(result.outputTruncated, false);
+  assert.equal(result.stdout, stdout.join('')); assert.equal(result.stderr, stderr.join(''));
+  assert.ok(result.cursor <= MAX_EXECUTION_EVENTS);
+  assert.equal(result.outputBytes, Buffer.byteLength(stdout.join('') + stderr.join('')));
+  const replay = await (await f.manager.fetch(request(`/${record.id}/events?cursor=0`))).text();
+  assert.ok(replay.indexOf('package-1199') < replay.indexOf('event: status'));
+});
+
+test('batched small writes still obey the byte cap and retain the bounded tail on termination', async t => {
+  const f = fixture(t);
+  const chunks = [...Array.from({ length: 700 }, () => new Uint8Array([120])), new Uint8Array(MAX_OUTPUT_BYTES + 1).fill(120)];
+  let index = 0;
+  let exit;
+  const exitCode = new Promise(resolve => { exit = resolve; });
+  t.mock.method(f.manager.controller, 'startTerminalProcess', async () => ({
+    stdin: new WritableStream(), stdout: new ReadableStream({ pull(controller) {
+      if (index < chunks.length) controller.enqueue(chunks[index++]);
+      else { controller.close(); exit(0); }
+    } }), stderr: new ReadableStream({ start(controller) { controller.close(); } }), exitCode, kill() { exit(137); },
+  }));
+  const record = await (await f.manager.fetch(request('', 'POST', { command: 'chatty then unbounded output' }, 'batched-cap'))).json();
+  await Promise.all(f.work);
+  const result = await (await f.manager.fetch(request(`/${record.id}`))).json();
+  assert.equal(result.status, 'output_limit'); assert.equal(result.outputTruncated, true);
+  assert.equal(result.outputBytes, MAX_OUTPUT_BYTES);
+  assert.equal(result.stdout.length, MAX_OUTPUT_BYTES);
+  assert.ok(result.cursor <= MAX_EXECUTION_EVENTS);
+  assert.equal(f.active.size, 0);
 });
 
 test('managed cancellation terminates ordinary child processes without signaling a replacement generation', async t => {

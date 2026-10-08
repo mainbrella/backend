@@ -149,6 +149,7 @@ export class ManagedExecutions {
     let process;
     let exited = false;
     let reason;
+    let outcome;
     let rejectStopped;
     const stopped = new Promise((_, reject) => { rejectStopped = reject; });
     void stopped.catch(() => {});
@@ -168,22 +169,42 @@ export class ManagedExecutions {
     const readers = [];
     let pumps = [];
     let chunks = 0;
+    // Small writes (apt progress, for example) must not exhaust the event budget
+    // while most of the byte allowance is unused. Reserve enough events to batch
+    // the remaining bytes in 8 KiB pieces, plus decoder tails from both pipes.
+    const immediateEvents = MAX_EXECUTION_EVENTS - Math.ceil(MAX_OUTPUT_BYTES / 8192) - 4;
     async function pump(stream, name, manager) {
       if (!stream) throw new Error('missing_stream');
       const reader = stream.getReader(); readers.push(reader);
       const decoder = new TextDecoder();
-      while (!reason) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (let offset = 0; offset < value.byteLength && !reason; offset += 8192) {
-          const remaining = MAX_OUTPUT_BYTES - record.outputBytes;
-          const bytes = value.subarray(offset, offset + Math.min(8192, remaining));
-          record.outputBytes += bytes.byteLength;
-          if (bytes.byteLength) await manager.output(record, name, decoder.decode(bytes, { stream: true }));
-          if (++chunks >= MAX_EXECUTION_EVENTS - 2 || bytes.byteLength < Math.min(8192, value.byteLength - offset)) stop('output_limit');
+      let pending = '';
+      async function publish(text, flush = false) {
+        pending += text;
+        while (pending && (flush || chunks < immediateEvents || pending.length >= 8192)) {
+          let end = Math.min(8192, pending.length);
+          // Do not split a UTF-16 surrogate pair between retained SSE events.
+          if (end < pending.length && /[\uD800-\uDBFF]/.test(pending[end - 1])) end--;
+          const data = pending.slice(0, end);
+          pending = pending.slice(end);
+          chunks++;
+          await manager.output(record, name, data);
         }
       }
-      await manager.output(record, name, decoder.decode());
+      try {
+        while (!reason) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (let offset = 0; offset < value.byteLength && !reason; offset += 8192) {
+            const remaining = MAX_OUTPUT_BYTES - record.outputBytes;
+            const bytes = value.subarray(offset, offset + Math.min(8192, remaining));
+            record.outputBytes += bytes.byteLength;
+            if (bytes.byteLength) await publish(decoder.decode(bytes, { stream: true }));
+            if (bytes.byteLength < Math.min(8192, value.byteLength - offset)) stop('output_limit');
+          }
+        }
+      } finally {
+        await publish(decoder.decode(), true);
+      }
     }
     try {
       const starting = startOperationProcess(this.controller, record.createdAt, metadata.expiresAt,
@@ -207,9 +228,9 @@ export class ManagedExecutions {
       pumps = [pump(process.stdout, 'stdout', this), ...(body.pty ? [] : [pump(process.stderr, 'stderr', this)])];
       const [code] = await Promise.race([Promise.all([exit, ...pumps]), stopped]);
       record.exitCode = code;
-      record.status = code === 0 ? 'succeeded' : 'failed';
+      outcome = code === 0 ? 'succeeded' : 'failed';
     } catch {
-      record.status = reason ?? 'failed';
+      outcome = reason ?? 'failed';
       record.timedOut = reason === 'timed_out';
       record.outputTruncated = reason === 'output_limit';
     } finally {
@@ -224,6 +245,7 @@ export class ManagedExecutions {
       await process?.dispose?.();
       // All outstanding output writes precede the final record in the same lock.
       await this.serialized(async () => {
+        record.status = outcome;
         record.stdinClosed = true;
         record.finishedAt = new Date(this.controller.now()).toISOString();
         await this.save(record);
