@@ -510,7 +510,9 @@ Protected application previews now have a private runtime, isolated gateway and
 authenticated `/containers/previews` API, with hash-only routing in a separate
 database. They are enabled on the qualified isolated `mainbrella.dev` gateway.
 `npm run check:previews` bundles the gateway without
-deployment. The default deploy command does not publish it. See
+deployment. The default deploy command publishes the runtime, gateway, and API
+after checking both database migration sets. Apply routing migrations with
+`npm run db:migrate:previews:remote`. See
 [the ingress handoff](docs/preview-ingress.md) for configuration, sharing semantics,
 failure reconciliation and recorded live evidence. SDK helpers and capability-gated dashboard controls exist locally; verify the deployed dashboard controls separately.
 `npm run verify:previews` supplies a one-start transport probe with recovery
@@ -518,7 +520,8 @@ checkpoints; follow the handoff's required arguments and explicit budget. Its
 success does not satisfy the remaining framework, isolation and deployment gates.
 `npm run previews:preflight` checks the staged isolation/routing configuration and
 remote routing schema with no writes or starts; `-- --local` checks configuration
-only. Run it separately from the account deployment preflight before preview rollout.
+only. Normal deployment runs it alongside the account deployment preflight;
+enabled project hosting also requires the project routing schema.
 
 `npm run verify:agent` exercises create, execution, files, streaming and cleanup,
 consuming one start. `npm run benchmark:api -- --samples=5 --concurrency=1` runs

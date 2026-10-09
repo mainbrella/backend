@@ -101,7 +101,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.env.CLOUDFLARE_ACCOUNT_ID = containers.account_id;
     await preflight({ api, containers, env,
       migrations: readdirSync(join(root, api.d1_databases.find(item => item.binding === 'DB').migrations_dir)).filter(name => name.endsWith('.sql')).sort() });
-    console.log('Deployment preflight passed. Deploy containers, then API. This does not verify runtime health or consume a start.');
+    console.log('Account deployment preflight passed. Use npm run deploy for the routing preflight and runtime/gateway/API publication. This does not verify runtime health or consume a start.');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

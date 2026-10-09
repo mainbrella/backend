@@ -7,7 +7,7 @@
   "compatibility_flags": ["enable_request_signal"],
   "workers_dev": false,
   "preview_urls": false,
-  "vars": { "PREVIEWS_ENABLED": "true", "PREVIEW_DOMAIN": "mainbrella.dev", "PROJECT_HOSTING_ENABLED": "false" },
+  "vars": { "PREVIEWS_ENABLED": "true", "PREVIEW_DOMAIN": "mainbrella.dev", "PROJECT_HOSTING_ENABLED": "true" },
   "d1_databases": [
     {
       "binding": "PREVIEW_ROUTES",

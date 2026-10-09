@@ -19,7 +19,7 @@
 	"vars": {
 		"ACTIVITY_WEBSOCKET_ENABLED": "true",
 		"PREVIEWS_ENABLED": "true",
-		"PROJECT_HOSTING_ENABLED": "false",
+		"PROJECT_HOSTING_ENABLED": "true",
 		"WORKSPACE_PERSISTENCE_ENABLED": "true",
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"

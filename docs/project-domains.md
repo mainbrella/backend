@@ -101,21 +101,26 @@ its application route and certificate authorization.
 
 ## Configuration and activation
 
-Project hosting is staged disabled in both deployment configurations. An enabled
-flag describes configured support, not live qualification. Provision and verify
-the infrastructure before advertising the feature.
+The API and gateway deployment configurations enable default project endpoints.
+Custom domains remain unavailable until a provider is configured. An enabled
+flag describes configured support, not live qualification. Apply both database
+migration sets and deploy the runtime and gateway before advertising support
+from the API.
 
 1. Apply `migrations/016_project_domains.sql` and
    `migrations/017_project_domain_provider.sql` to the account `delta` database
    through its normal migration command. Apply
    `preview-migrations/002_project_endpoints.sql` to the separate
    `mainbrella-preview-routes` database. Never apply the account schema to the
-   gateway routing database.
-2. Deploy the container runtime containing the project binding routes, then the
-   API and gateway. The gateway now also binds `CONTAINER_ACCOUNT` from
-   `mainbrella-api`, for generation-specific network membership checks.
-3. Set `PROJECT_HOSTING_ENABLED=true` on the API and gateway only after staging
-   the routing migration and updated runtime. Keep the same `PREVIEW_DOMAIN`
+   gateway routing database. Use `npm run db:migrate:remote` for account migrations
+   and `npm run db:migrate:previews:remote` for routing migrations.
+2. Run `npm run deploy`. It checks account and routing migration metadata, then
+   publishes the container runtime, gateway, and API in that order. The gateway
+   also binds `CONTAINER_ACCOUNT` from `mainbrella-api` for generation-specific
+   network membership checks.
+3. Keep matching `PROJECT_HOSTING_ENABLED` flags on the API and gateway. Use
+   `false` when staging infrastructure; the checked-in configuration uses `true`
+   and its preflight requires the routing migration. Keep the same `PREVIEW_DOMAIN`
    and routing database on both. The existing wildcard DNS and Worker route
    serve stable default project hosts.
 4. Choose one custom-domain provider below. Keep matching public configuration
@@ -200,5 +205,6 @@ npm run docs:generate
 ```
 
 These local checks do not provision SaaS, allocate static IPs, issue live customer
-certificates, or consume container starts. The feature must remain disabled until
-the chosen ingress is configured and its live transport checks pass.
+certificates, or consume container starts. Qualify default endpoints after
+deployment. Configure and qualify the chosen provider before offering custom
+domains.

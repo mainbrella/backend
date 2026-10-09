@@ -10,17 +10,24 @@ function fixture() {
   const gateway = JSON.parse(read('wrangler.previews.jsonc'));
   const containers = JSON.parse(read('wrangler.containers.jsonc'));
   const migrationSql = read('preview-migrations/001_preview_routes.sql');
+  const projectMigrationSql = read('preview-migrations/002_project_endpoints.sql');
   api.vars.PREVIEW_DOMAIN = gateway.vars.PREVIEW_DOMAIN = 'preview.example';
   api.vars.PREVIEWS_ENABLED = gateway.vars.PREVIEWS_ENABLED = 'false';
+  api.vars.PROJECT_HOSTING_ENABLED = gateway.vars.PROJECT_HOSTING_ENABLED = 'false';
   gateway.routes = [{ pattern: '*.preview.example/*', zone_name: 'preview.example' }];
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(migrationSql);
   const results = [{ success: true, results: [{ name: '001_preview_routes.sql' }] },
     { success: true, results: sqlite.prepare("SELECT name, sql FROM sqlite_master WHERE name IN ('preview_routes', 'preview_routes_expiry')").all() }];
+  sqlite.exec(projectMigrationSql);
+  const projectResults = [{ success: true, results: [{ name: '001_preview_routes.sql' }, { name: '002_project_endpoints.sql' }] },
+    { success: true, results: sqlite.prepare("SELECT name, sql FROM sqlite_master WHERE name LIKE 'project_%'").all() }];
   sqlite.close();
   const calls: string[][] = [];
-  const options = { api, gateway, containers, migrationSql, run(args: string[]) { calls.push(args); return results; } };
-  return { options, calls, results };
+  const options = { api, gateway, containers, migrationSql, projectMigrationSql, run(args: string[]) {
+    calls.push(args); return args.at(-1)?.includes('project_endpoints') ? projectResults : results;
+  } };
+  return { options, calls, results, projectResults };
 }
 
 test('staged config passes with schema-only remote reads against the isolated binding', () => {
@@ -133,6 +140,43 @@ test('checked-in qualified configuration validates isolation with issuance enabl
   f.options.containers = JSON.parse(read('wrangler.containers.jsonc'));
   const result = previewPreflight({ ...f.options, local: true });
   assert.equal(result.issuanceEnabled, true);
+  assert.equal(f.options.api.vars.PROJECT_HOSTING_ENABLED, 'true');
+  assert.equal(f.options.gateway.vars.PROJECT_HOSTING_ENABLED, 'true');
+  assert.equal(f.options.api.vars.PROJECT_DOMAIN_PROVIDER, undefined);
+  assert.equal(f.options.gateway.vars.PROJECT_DOMAIN_PROVIDER, undefined);
   assert.equal(result.releaseQualified, false);
   assert.equal(f.calls.length, 0);
+});
+
+test('enabled project hosting verifies the separate project routing migration without writes', () => {
+  const f = fixture();
+  f.options.api.vars.PROJECT_HOSTING_ENABLED = f.options.gateway.vars.PROJECT_HOSTING_ENABLED = 'true';
+  assert.equal(previewPreflight(f.options).routingSchemaVerified, true);
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls[1].slice(0, -1), ['d1', 'execute', 'PREVIEW_ROUTES', '--config', 'wrangler.previews.jsonc', '--remote', '--json', '--command']);
+  assert.match(f.calls[1].at(-1)!, /^SELECT name FROM d1_migrations; SELECT name, sql FROM sqlite_master/);
+  assert.ok(f.calls[1].at(-1)!.includes('project_binding_operations_project'));
+});
+
+test('project hosting blocks rollout on missing migration, tables, constraints or indexes', () => {
+  for (const change of [
+    (r: any[]) => { r[0].results = [{ name: '001_preview_routes.sql' }]; },
+    (r: any[]) => { r[1].success = false; },
+    (r: any[]) => { r[1].results = []; },
+    (r: any[]) => { r[1].results = r[1].results.filter((row: any) => row.name !== 'project_binding_operations'); },
+    (r: any[]) => { r[1].results.find((row: any) => row.name === 'project_hosts').sql = 'CREATE TABLE project_hosts(hostname TEXT PRIMARY KEY)'; },
+    (r: any[]) => { r[1].results.find((row: any) => row.name === 'project_hosts_project').sql = 'CREATE INDEX project_hosts_project ON project_hosts(status)'; },
+  ]) {
+    const f = fixture();
+    f.options.api.vars.PROJECT_HOSTING_ENABLED = f.options.gateway.vars.PROJECT_HOSTING_ENABLED = 'true';
+    change(f.projectResults);
+    assert.throws(() => previewPreflight(f.options), /002_project_endpoints|project.*schema|project.*metadata/);
+  }
+  const f = fixture();
+  f.options.api.vars.PROJECT_HOSTING_ENABLED = f.options.gateway.vars.PROJECT_HOSTING_ENABLED = 'true';
+  for (const result of [null, [], {}, [{ success: true, results: null }]]) {
+    assert.throws(() => previewPreflight({ ...f.options, run: args => args.at(-1)?.includes('project_endpoints') ? result : f.results }), /project.*metadata/);
+  }
+  assert.throws(() => previewPreflight({ ...f.options, projectMigrationSql: '' }), /expected project routing schema/);
+  assert.equal(previewPreflight({ ...f.options, local: true }).routingSchemaVerified, false);
 });

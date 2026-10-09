@@ -1,10 +1,11 @@
 # Backend release runbook
 
-The current order is **migrations/secrets → compatibility preflight → containers
-→ API → qualification → web**. `npm run deploy` enforces the preflight and Worker
+The current order is **migrations/secrets → account and routing preflights → containers
+→ gateway → API → qualification → web**. `npm run deploy` enforces the preflights and Worker
 order and stops on the first failed command. It does not apply migrations, change
-secrets, publish web, or run paid verification. Direct `deploy:api` and
-`deploy:containers` commands remain operator tools and bypass the combined gate.
+secrets, publish web, or run paid verification. Direct `deploy:api`,
+`deploy:previews`, and `deploy:containers` commands remain operator tools and
+bypass the combined gate.
 
 ## Prepare a release
 
@@ -23,6 +24,13 @@ Apply `npm run db:migrate:remote`. The ledger must include every checked-in SQL
 migration, including both files numbered 006, both numbered 007,
 `010_api_keys.sql` and `011_operational_status.sql`. Do not use a highest-number
 check as a substitute for matching migration filenames.
+
+Apply `npm run db:migrate:previews:remote` to the separate routing database.
+Project endpoints require `002_project_endpoints.sql` in addition to the existing
+preview migration. The account migration command does not migrate this database.
+`npm run previews:preflight` verifies routing tables, constraints, and indexes
+using schema metadata reads. Normal deployment runs both preflights before
+publishing any Worker.
 
 Configure `MONITORING_SECRET` using `npx wrangler secret put MONITORING_SECRET
 --config wrangler.jsonc`. Use a separately generated secret, distinct from
@@ -61,12 +69,13 @@ Coordinate a release window and avoid new workload admission and custom-image
 publication during a size/policy transition. An older API can continue sending
 its previous allowances until API publication completes. The image deployment
 lease serializes image-map deployments; it does not pause customer API traffic
-or serialize the entire two-Worker release.
+or serialize the entire release.
 
 Run `npm run deploy`. Container publication uses the existing authoritative image
 map and 12-minute lease, with a 10-minute Wrangler timeout. Do not deploy the
 tracked container config directly: it contains build recipes rather than the
-assembled immutable map. API publication follows only after container success.
+assembled immutable map. Gateway publication follows container success, and API
+publication follows gateway success.
 Keep the current images and generations; publication does not upgrade running
 guest images. Do not mass-stop customer containers as a deployment step.
 
@@ -89,7 +98,7 @@ and feature claims only after the appropriate live workflow passes.
 
 Protected previews are enabled and production-qualified on `mainbrella.dev`.
 They have a separate gateway configuration and routing database migration
-directory. The default deploy command does not redeploy that gateway. Preserve
+directory. The default deploy command publishes the gateway before the API. Preserve
 the enabled preview settings during unrelated API releases and follow
 [preview-ingress.md](preview-ingress.md) for isolated
 domain/TLS, routing bindings, runtime-before-gateway-before-enabled-API order,
@@ -114,14 +123,17 @@ npm run deploy:bootstrap-activity
 This runs preflight, deploys the current containers without `ACCOUNT_ACTIVITY`,
 deploys the API to provision its export, then redeploys containers with the binding
 restored. It preserves the required runtime-before-API order, image validation,
-authoritative image map and deployment leases. The tracked config is unchanged.
+authoritative image map and deployment leases, then publishes the gateway.
+Both account and routing preflights run before publication. The tracked config is unchanged.
 Container activity notifications are skipped during the intermediate stage;
-changes during that interval are not replayed. Finish all three publications
+changes during that interval are not replayed. Finish all four publications
 before qualifying activity streams or publishing web integrations.
 
 The command stops on failure. If API publication fails, retry the bootstrap
 command after correcting the failure. If only the final container publication
-fails, run `npm run deploy:containers` to restore notifications. Subsequent
+fails, run `npm run deploy:containers` to restore notifications, then
+`npm run deploy:previews`. If only gateway publication fails, retry
+`npm run deploy:previews`. Subsequent
 releases use the normal `npm run deploy` command.
 
 ### Older API contracts
@@ -151,6 +163,9 @@ an arbitrary legacy deployment.
   confirm the active API version. Prefer retrying the same API release after
   correcting the failure. The accepted predecessor supports entitlement/generation
   headers but the partial pair is not a qualified size-policy deployment.
+- **Gateway publication fails:** the normal command stops before API publication.
+  Correct the failure and rerun deployment so the API cannot advertise support
+  before the updated gateway is published.
 - **A published pair fails qualification:** hold web publication and restore a
   previously qualified compatible pair only after checking persisted-state
   compatibility. Restore the older API first to withdraw new feature admission,

@@ -110,10 +110,27 @@ export function verifyPreviewSchema(migrationSql: string, run: Run = wrangler) {
     'Remote preview schema differs from the expected table constraints or expiry index; reconcile before rollout.');
 }
 
-export function previewPreflight({ api, gateway, containers, migrationSql, local = false, run = wrangler }:
-  { api: Config; gateway: Config; containers: Config; migrationSql: string; local?: boolean; run?: Run }) {
+export function verifyProjectSchema(migrationSql: string, run: Run = wrangler) {
+  const expected = migrationSql.match(/CREATE (?:TABLE|INDEX)[\s\S]*?;/g);
+  requireCheck(expected?.length === 6, 'Cannot read the expected project routing schema.');
+  const results = run(['d1', 'execute', 'PREVIEW_ROUTES', '--config', 'wrangler.previews.jsonc', '--remote', '--json', '--command',
+    "SELECT name FROM d1_migrations; SELECT name, sql FROM sqlite_master WHERE name IN ('project_endpoints', 'project_hosts', 'project_hosts_project', 'project_route_versions', 'project_binding_operations', 'project_binding_operations_project');"]);
+  requireCheck(Array.isArray(results) && results.length === 2 && results.every(r => r.success === true && Array.isArray(r.results)),
+    'Cannot verify remote project migration metadata.');
+  requireCheck(results[0].results.some((r: Config) => r.name === '002_project_endpoints.sql'),
+    'Apply 002_project_endpoints.sql to the dedicated routing database with npm run db:migrate:previews:remote before rollout.');
+  const sql = results[1].results.map((r: Config) => typeof r.sql === 'string' ? normalizeSql(r.sql) : '');
+  requireCheck(sql.length === expected.length && expected.every(statement => sql.includes(normalizeSql(statement))),
+    'Remote project routing schema differs from the expected tables or indexes; reconcile before rollout.');
+}
+
+export function previewPreflight({ api, gateway, containers, migrationSql, projectMigrationSql = '', local = false, run = wrangler }:
+  { api: Config; gateway: Config; containers: Config; migrationSql: string; projectMigrationSql?: string; local?: boolean; run?: Run }) {
   const configuration = previewConfiguration(api, gateway, containers);
-  if (!local) verifyPreviewSchema(migrationSql, run);
+  if (!local) {
+    verifyPreviewSchema(migrationSql, run);
+    if (api.vars?.PROJECT_HOSTING_ENABLED === 'true') verifyProjectSchema(projectMigrationSql, run);
+  }
   return { ...configuration, routingSchemaVerified: !local, releaseQualified: false,
     pendingGates: ['domain_ownership_dns_tls_logging_review', 'deployed_transport_framework_isolation_generation_checks'] };
 }
@@ -128,7 +145,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'CLOUDFLARE_ACCOUNT_ID differs from the configured Worker account.');
     process.env.CLOUDFLARE_ACCOUNT_ID = api.account_id;
     const report = previewPreflight({ api, gateway: JSON.parse(read('wrangler.previews.jsonc')),
-      containers: JSON.parse(read('wrangler.containers.jsonc')), migrationSql: read('preview-migrations/001_preview_routes.sql'), local: args.length === 1 });
+      containers: JSON.parse(read('wrangler.containers.jsonc')), migrationSql: read('preview-migrations/001_preview_routes.sql'),
+      projectMigrationSql: read('preview-migrations/002_project_endpoints.sql'), local: args.length === 1 });
     console.log(JSON.stringify(report, null, 2));
     console.log('Preview preflight passed. No deployment, database write or container start performed.');
   } catch (error) {
