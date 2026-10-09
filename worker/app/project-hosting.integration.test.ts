@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE } from './paid-container-test-helpers';
 import { handleRequest } from './router';
 import { handleApplicationGateway } from '../preview-gateway';
+import worker from '../index';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 // The private container runtime is intentionally JavaScript, as its existing
 // transport implementations are. Exercise it directly across the API boundary.
 // @ts-expect-error Runtime module has no TypeScript declarations.
@@ -108,4 +111,97 @@ test('project publication, domain DNS/TLS, app cookies and cleanup work across t
   assert.equal(removed.status, 200);
   assert.equal((await removed.json() as any).domains.length, 0);
   assert.equal((await handleApplicationGateway(new Request('https://site.example.com'), env)).status, 404);
+});
+
+test('local API entrypoint publishes and activates loopback aliases with real HTTP application transport', async t => {
+  const httpFetch = globalThis.fetch;
+  const f = await paidContainerFixture(t);
+  t.after(() => f.close());
+  const routing = new DatabaseSync(':memory:');
+  t.after(() => routing.close());
+  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql']) {
+    f.sqlite.exec(readFileSync(new URL(`../../migrations/${path}`, import.meta.url), 'utf8'));
+  }
+  for (const path of ['001_preview_routes.sql', '002_project_endpoints.sql']) {
+    routing.exec(readFileSync(new URL(`../../preview-migrations/${path}`, import.meta.url), 'utf8'));
+  }
+  const applicationRequests: { host?: string; cookie?: string; auth?: string; proto?: string }[] = [];
+  const application = createServer((request, response) => {
+    applicationRequests.push({ host: request.headers.host, cookie: request.headers.cookie, auth: request.headers.authorization,
+      proto: request.headers['x-forwarded-proto'] as string });
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ path: request.url, host: request.headers.host }));
+  });
+  application.listen(0, '127.0.0.1'); await once(application, 'listening');
+  t.after(() => new Promise<void>((resolve, reject) => application.close(error => error ? reject(error) : resolve())));
+  const applicationPort = (application.address() as { port: number }).port;
+  const generation = f.generationFor(USER_ONE);
+  const metadata = { createdAt: Date.parse(generation), expiresAt: Date.now() + 1_800_000 };
+  const values = new Map<string, unknown>([['builderMachine', metadata]]);
+  // The fixture mocks billing fetches; only the runtime's app hop uses real TCP.
+  const controller = {
+    ctx: { storage: { async get(key: string) { return values.get(key); }, async put(key: string, value: unknown) { values.set(key, value); } } },
+    container: { running: true, getTcpPort(port: number) {
+      assert.equal(port, applicationPort);
+      return { fetch(request: Request) {
+        const target = new URL(request.url); target.hostname = '127.0.0.1'; target.port = String(applicationPort);
+        return httpFetch(target, { method: request.method, headers: Object.fromEntries(request.headers),
+          signal: request.signal, redirect: 'manual' });
+      } };
+    } },
+    now: Date.now, deadline: (value: typeof metadata) => value.expiresAt,
+    hasPaidAccess: async () => true, serialized: async (fn: () => unknown) => fn(),
+    respond: (body: unknown, status = 200) => Response.json(body, { status }),
+    getTerminalMetadata: async () => metadata, touchTerminalActivity: async () => true,
+  };
+  const runtime = new ContainerProjectIngress(controller, { allowLocal: true });
+  t.after(() => runtime.close());
+  const revocations: string[] = [];
+  const env = { ...f.env, PREVIEW_ROUTES: database(routing), LOCAL_DEV: 'true', LOCAL_PREVIEW_PORT: '8899',
+    PROJECT_HOSTING_ENABLED: 'true', PROJECT_DOMAIN_PROVIDER: 'local',
+    USER_CONTAINER: { idFromName: (name: string) => name, get(name: string) {
+      assert.equal(name, `user:${USER_ONE}`);
+      return { fetch: (request: Request) => {
+        const url = new URL(request.url);
+        if (request.method === 'DELETE' && url.searchParams.has('origin')) revocations.push(url.searchParams.get('origin')!);
+        return url.pathname === '/project-bindings' ? runtime.manage(request) : runtime.forward(request);
+      } };
+    } },
+  } as unknown as Env;
+  const api = (path: string, method = 'GET', body?: unknown, session = SESSION_ONE) => worker.fetch(new Request(`http://localhost:8899${path}`, {
+    method, headers: { Origin: 'http://localhost:5173', Cookie: `mainbrella_session=${session}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }), env, {} as ExecutionContext);
+  const created = await (await api('/projects', 'POST', { name: 'Local connected project' })).json() as any;
+  const id = created.project.id;
+  const publish = await api(`/projects/endpoint?id=${id}`, 'PUT', { target: { kind: 'container', id: 'small', createdAt: generation, port: applicationPort } });
+  assert.equal(publish.status, 200, await publish.clone().text());
+  const state = await publish.json() as any;
+  assert.equal(state.hosting.localDevelopment, true);
+  assert.equal(state.endpoint.url, `http://p-${id.replaceAll('-', '')}.localhost:8899/`);
+  const appRequest = (origin: string) => worker.fetch(new Request(`${origin}path?q=1`, { headers: {
+    authorization: 'Bearer app-secret', cookie: 'mainbrella_session=account; app_session=app',
+  } }), env, {} as ExecutionContext);
+  assert.equal((await appRequest(state.endpoint.url)).status, 200);
+  const added = await api(`/projects/domains?id=${id}`, 'POST', { hostname: 'app.localhost' });
+  assert.equal(added.status, 201, await added.clone().text());
+  const domain = (await added.json() as any).domain;
+  assert.equal(domain.status, 'pending_dns');
+  assert.equal((await appRequest('http://app.localhost:8899/')).status, 404);
+  assert.equal((await api(`/projects/domains/verify?id=${id}&domainId=${domain.id}`, 'POST', undefined, SESSION_TWO)).status, 404);
+  const verify = () => api(`/projects/domains/verify?id=${id}&domainId=${domain.id}`, 'POST');
+  assert.equal((await (await verify()).json() as any).domain.status, 'pending_tls');
+  assert.equal((await appRequest('http://app.localhost:8899/')).status, 404);
+  assert.equal((await (await verify()).json() as any).domain.status, 'active');
+  const response = await appRequest('http://app.localhost:8899/');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { path: '/path?q=1', host: 'app.localhost:8899' });
+  assert.deepEqual(applicationRequests.at(-1), { host: 'app.localhost:8899', cookie: 'app_session=app', auth: 'Bearer app-secret', proto: 'http' });
+  const removed = await api(`/projects/domains?id=${id}&domainId=${domain.id}`, 'DELETE');
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.deepEqual(revocations, ['http://app.localhost:8899']);
+  assert.equal((await appRequest('http://app.localhost:8899/')).status, 404);
+  assert.equal((await appRequest(state.endpoint.url)).status, 200);
+  assert.equal((await api(`/projects/endpoint?id=${id}`, 'DELETE')).status, 200);
+  assert.equal((await appRequest(state.endpoint.url)).status, 404);
 });

@@ -2,6 +2,7 @@ import { previewDomain, previewOrigin, type PreviewRoutingEnv } from './preview-
 import { validContainerId } from '../../containers/container-account-core.js';
 import { validPreviewGeneration } from './preview-routing';
 import { validServiceName, validPrivatePort } from '../../containers/private-services-contract.js';
+import { validLocalProjectHostname } from '../../containers/project-contract.js';
 
 export interface ProjectHostingEnv extends PreviewRoutingEnv {
   PROJECT_HOSTING_ENABLED?: string;
@@ -38,10 +39,18 @@ export function projectHostingConfigured(env: ProjectHostingEnv): boolean {
 }
 export function projectOrigin(env: ProjectHostingEnv, projectId: string): string {
   if (!validProjectId(projectId)) throw new Error('invalid_project_id');
-  return previewOrigin(env, `p-${projectId.replaceAll('-', '')}`);
+  // Inspection remains useful before the operator provisions a publishing domain.
+  return previewOrigin({ ...env, PREVIEW_DOMAIN: previewDomain(env) ?? 'mainbrella.dev' }, `p-${projectId.replaceAll('-', '')}`);
 }
 export function projectHostname(env: ProjectHostingEnv, projectId: string): string {
   return new URL(projectOrigin(env, projectId)).hostname;
+}
+export function localProjectDomains(env: ProjectHostingEnv): boolean {
+  return env.LOCAL_DEV === 'true' && env.PROJECT_DOMAIN_PROVIDER === 'local';
+}
+export function projectDomainOrigin(env: ProjectHostingEnv, hostname: string): string {
+  return env.LOCAL_DEV === 'true' && validLocalProjectHostname(hostname)
+    ? previewOrigin(env, hostname.slice(0, -'.localhost'.length)) : `https://${hostname}`;
 }
 export function publicIngressIp(value: string): boolean {
   if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value)) {
@@ -66,10 +75,12 @@ export function canonicalIngressHost(value: unknown): value is string {
     && value !== 'mainbrella.com' && !value.endsWith('.mainbrella.com');
 }
 export function customDomainsConfigured(env: ProjectHostingEnv): boolean {
-  if (!projectHostingConfigured(env) || env.LOCAL_DEV === 'true') return false;
+  if (!projectHostingConfigured(env)) return false;
+  if (env.LOCAL_DEV === 'true') return localProjectDomains(env);
   return env.PROJECT_DOMAIN_PROVIDER === 'cloudflare' ? Boolean(env.PROJECT_CLOUDFLARE_ZONE_ID && env.PROJECT_CLOUDFLARE_API_TOKEN)
     : env.PROJECT_DOMAIN_PROVIDER === 'ingress' && Boolean(apexIps(env).length && canonicalIngressHost(env.PROJECT_INGRESS_HOST) && (env.PROJECT_INGRESS_SECRET?.length ?? 0) >= 32);
 }
 export function projectHostingCapabilities(env: ProjectHostingEnv) {
-  return { supported: projectHostingConfigured(env), customDomains: customDomainsConfigured(env), apexIps: apexIps(env) };
+  return { supported: projectHostingConfigured(env), customDomains: customDomainsConfigured(env),
+    localDevelopment: projectHostingConfigured(env) && localProjectDomains(env), apexIps: localProjectDomains(env) ? [] : apexIps(env) };
 }

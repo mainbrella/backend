@@ -2,7 +2,7 @@ import { authCorsHeaders, authJson, currentUser } from './auth-core';
 import { runningContainer, containerError } from '../lib/container-service';
 import { machineName } from '../../containers/container-account-core.js';
 import { boundedPrivateBody } from '../../containers/private-services-contract.js';
-import { projectHostingConfigured, customDomainsConfigured, projectHostingCapabilities, projectOrigin,
+import { projectHostingConfigured, customDomainsConfigured, localProjectDomains, projectDomainOrigin, projectHostingCapabilities, projectOrigin,
   publicProjectTarget, validProjectId, validProjectTarget, type ProjectTarget, type StoredProjectTarget, type ProjectEndpointRoute } from '../lib/project-hosting';
 import { normalizeProjectHostname, publicProjectDomain, domainDnsProof, provisionCloudflareHostname,
   cloudflareRequest, ingressTlsReady, type ProjectDomainRow } from '../lib/project-domains';
@@ -71,6 +71,16 @@ async function revokeBinding(env: Env, route: ProjectEndpointRoute, origin?: str
     return true;
   } catch { return false; }
 }
+async function revokeProjectOrigin(env: Env, id: string, userId: string, hostname: string): Promise<boolean> {
+  if (!env.PREVIEW_ROUTES) return false;
+  const operations = await env.PREVIEW_ROUTES.prepare('SELECT route_json FROM project_binding_operations WHERE project_id = ? AND user_id = ?').bind(id, userId).all<{ route_json: string }>();
+  const routes = new Map(operations.results.map(value => { const route = JSON.parse(value.route_json) as ProjectEndpointRoute; return [route.revision, route]; }));
+  const current = await routeFor(env, id, userId);
+  if (current) routes.set(current.revision, current);
+  let complete = true;
+  for (const route of routes.values()) if (!await revokeBinding(env, route, projectDomainOrigin(env, hostname))) complete = false;
+  return complete;
+}
 async function fence(env: Env, id: string, userId: string): Promise<string> {
   const db = env.PREVIEW_ROUTES!;
   await checkedRun(db.prepare('INSERT OR IGNORE INTO project_route_versions (project_id, user_id, revision) VALUES (?, ?, ?)').bind(id, userId, crypto.randomUUID()));
@@ -132,6 +142,7 @@ async function unpublish(env: Env, id: string, userId: string) {
   if (!complete) throw new HostingError('project_reconciliation_required');
 }
 async function removeDomain(env: Env, id: string, userId: string, initial: ProjectDomainRow) {
+  if (!env.PREVIEW_ROUTES && (initial.status !== 'pending_dns' || initial.provider_id || initial.operation_revision)) throw new HostingError('domain_reconciliation_required');
   // Retain the disabled claim while provider cleanup or an earlier verification is outstanding.
   await checkedRun(env.DB.prepare('UPDATE project_domains SET removing = 1 WHERE id = ? AND project_id = ?').bind(initial.id, id));
   let complete = true, ownedClaim = false;
@@ -140,15 +151,14 @@ async function removeDomain(env: Env, id: string, userId: string, initial: Proje
       const disabled = await checkedRun(env.PREVIEW_ROUTES.prepare("UPDATE project_hosts SET status = 'disabled' WHERE hostname = ? AND project_id = ? AND verification_token = ?").bind(initial.hostname, id, initial.challenge));
       ownedClaim = Boolean(disabled.meta.changes);
     } catch { complete = false; }
-    const endpoint = await routeFor(env, id, userId);
-    if (endpoint && !await revokeBinding(env, endpoint, `https://${initial.hostname}`)) complete = false;
+    if (!await revokeProjectOrigin(env, id, userId, initial.hostname)) complete = false;
   }
   const row = await env.DB.prepare('SELECT * FROM project_domains WHERE id = ? AND project_id = ?').bind(initial.id, id).first<ProjectDomainRow>();
   if (!row) return;
   // All network calls are bounded; a lost verifier can be reconciled after its lease expires.
   if (row.operation_revision && (row.operation_started_at ?? Date.now()) > Date.now() - 120_000) throw new HostingError('domain_reconciliation_required');
   let providerId = row.provider_id;
-  if (!providerId && ownedClaim && env.PROJECT_DOMAIN_PROVIDER === 'cloudflare') {
+  if (!providerId && ownedClaim && (row.provider === 'cloudflare' || env.PROJECT_DOMAIN_PROVIDER === 'cloudflare')) {
     try {
       const existing = await cloudflareRequest(env, 'GET', `?hostname=${encodeURIComponent(row.hostname)}`) as { id: string; hostname: string }[];
       if (!Array.isArray(existing) || existing.length > 1 || existing.some(value => value.hostname !== row.hostname || !/^[a-z0-9-]{1,128}$/i.test(value.id))) throw new Error('domain_provider_unavailable');
@@ -169,8 +179,8 @@ async function removeDomain(env: Env, id: string, userId: string, initial: Proje
   if (env.PREVIEW_ROUTES) await checkedRun(env.PREVIEW_ROUTES.prepare('DELETE FROM project_hosts WHERE hostname = ? AND project_id = ? AND verification_token = ?').bind(row.hostname, id, row.challenge));
   await checkedRun(env.DB.prepare('DELETE FROM project_domains WHERE id = ? AND project_id = ? AND removing = 1').bind(row.id, id));
 }
-async function verifyDomain(env: Env, id: string, row: ProjectDomainRow) {
-  if (!customDomainsConfigured(env)) throw new HostingError('custom_domains_unavailable');
+async function verifyDomain(env: Env, id: string, userId: string, row: ProjectDomainRow) {
+  if (!customDomainsConfigured(env) || row.provider && row.provider !== env.PROJECT_DOMAIN_PROVIDER) throw new HostingError('custom_domains_unavailable');
   const operation = crypto.randomUUID();
   const acquired = await checkedRun(env.DB.prepare(`UPDATE project_domains SET operation_revision = ?, operation_started_at = ?
     WHERE id = ? AND project_id = ? AND removing = 0 AND (operation_revision IS NULL OR operation_started_at <= ?)`)
@@ -185,6 +195,7 @@ async function verifyDomain(env: Env, id: string, row: ProjectDomainRow) {
     if (!proof.ownership || !proof.routing || env.PROJECT_DOMAIN_PROVIDER === 'ingress' && !proof.ingressSafe) {
       await dropClaim();
       await checkedRun(env.DB.prepare("UPDATE project_domains SET status = 'pending_dns', dns_status = 'pending', tls_status = 'pending', error = ? WHERE id = ? AND project_id = ? AND operation_revision = ? AND removing = 0").bind(!proof.ownership ? 'ownership_txt_missing' : 'routing_dns_missing', row.id, id, operation));
+      if (!await revokeProjectOrigin(env, id, userId, row.hostname)) throw new HostingError('domain_reconciliation_required');
       return;
     }
     await checkedRun(db.prepare(`INSERT INTO project_hosts (hostname, project_id, status, verification_token) VALUES (?, ?, 'pending_tls', ?)
@@ -204,6 +215,9 @@ async function verifyDomain(env: Env, id: string, row: ProjectDomainRow) {
       // Persist provider identity even if removal started while the RPC was in flight.
       await checkedRun(env.DB.prepare('UPDATE project_domains SET provider_id = ? WHERE id = ? AND project_id = ? AND operation_revision = ?').bind(providerId, row.id, id, operation));
       active = provider.status === 'active' && provider.ssl?.status === 'active';
+    } else if (localProjectDomains(env)) {
+      // Preserve both readiness steps in the UI without issuing a real certificate.
+      active = row.dns_status === 'verified';
     } else active = await ingressTlsReady(row);
     if (!await current()) throw new HostingError('domain_reconciliation_required');
     await checkedRun(env.DB.prepare('UPDATE project_domains SET status = ?, dns_status = ?, tls_status = ?, provider_id = ?, error = NULL WHERE id = ? AND project_id = ? AND operation_revision = ? AND removing = 0').bind(active ? 'active' : 'pending_tls', 'verified', active ? 'active' : 'pending', providerId, row.id, id, operation));
@@ -245,7 +259,7 @@ async function handle(request: Request, env: Env, domains: boolean): Promise<Res
     if (hasDomainId) {
       const row = await env.DB.prepare('SELECT * FROM project_domains WHERE id = ? AND project_id = ?').bind(domainId, id).first<ProjectDomainRow>();
       if (!row) throw new HostingError('not_found', 404);
-      if (verifying) await verifyDomain(env, id, row); else await removeDomain(env, id, user.id, row);
+      if (verifying) await verifyDomain(env, id, user.id, row); else await removeDomain(env, id, user.id, row);
     } else if (request.method === 'POST') {
       if (!customDomainsConfigured(env)) throw new HostingError('custom_domains_unavailable');
       const value = await body(request) as { hostname?: unknown };
@@ -256,10 +270,11 @@ async function handle(request: Request, env: Env, domains: boolean): Promise<Res
       if (!existing) {
         const now = new Date().toISOString();
         responseDomainId = crypto.randomUUID();
-        const inserted = await checkedRun(env.DB.prepare(`INSERT OR IGNORE INTO project_domains (id, project_id, hostname, challenge, created_at)
-          SELECT ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM project_domains WHERE project_id = ?) < 20
+        const inserted = await checkedRun(env.DB.prepare(`INSERT OR IGNORE INTO project_domains (id, project_id, hostname, challenge, created_at, provider)
+          SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM project_domains WHERE project_id = ?) < 20
           AND (SELECT count(*) FROM project_domains d JOIN projects p ON p.id = d.project_id WHERE p.user_id = ?) < 100`)
-          .bind(responseDomainId, id, hostname, `mainbrella-verification=${crypto.randomUUID()}`, now, id, user.id));
+          // Local aliases have no external provider resource to persist or clean up.
+          .bind(responseDomainId, id, hostname, `mainbrella-verification=${crypto.randomUUID()}`, now, localProjectDomains(env) ? null : env.PROJECT_DOMAIN_PROVIDER, id, user.id));
         if (!inserted.meta.changes) throw new HostingError('domain_limit', 429);
       }
     }

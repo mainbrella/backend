@@ -1,9 +1,12 @@
-import { apexIps, projectHostname, type ProjectHostingEnv } from './project-hosting';
+import { apexIps, localProjectDomains, projectHostname, type ProjectHostingEnv } from './project-hosting';
+import { boundedPrivateBody } from '../../containers/private-services-contract.js';
+import { validLocalProjectHostname } from '../../containers/project-contract.js';
+import { validPreviewToken } from '../../containers/preview-contract.js';
 import { previewDomain } from './preview-routing';
 
 export type ProjectDomainRow = {
   id: string; project_id: string; hostname: string; challenge: string; status: 'pending_dns' | 'pending_tls' | 'active' | 'error';
-  dns_status: 'pending' | 'verified'; tls_status: 'pending' | 'active' | 'error'; provider_id: string | null;
+  dns_status: 'pending' | 'verified'; provider: 'cloudflare' | 'ingress' | null; tls_status: 'pending' | 'active' | 'error'; provider_id: string | null;
   error: string | null; created_at: string; operation_revision: string | null; operation_started_at: number | null; removing: number;
 };
 export type DnsRecord = { type: string; name: string; value: string; purpose: 'ownership' | 'routing' | 'certificate' };
@@ -11,6 +14,10 @@ export function normalizeProjectHostname(value: unknown, env?: ProjectHostingEnv
   if (typeof value !== 'string' || value.length > 253 || !value.trim() || /[\s/:@?#%\\*]/.test(value)) return null;
   let hostname: string;
   try { hostname = new URL(`https://${value.replace(/\.$/, '')}`).hostname.toLowerCase(); } catch { return null; }
+  if (env && localProjectDomains(env)) {
+    return validLocalProjectHostname(hostname) && !/^p-[a-f0-9]{32}\.localhost$/.test(hostname)
+      && !validPreviewToken(hostname.slice(0, -'.localhost'.length)) ? hostname : null;
+  }
   if (hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname)) return null;
   const reserved = ['mainbrella.com', 'mainbrella.dev', 'localhost', 'internal', 'local', 'test', 'invalid', 'onion', ...(env && previewDomain(env) ? [previewDomain(env)!] : [])];
   return reserved.some(domain => hostname === domain || hostname.endsWith(`.${domain}`)) ? null : hostname;
@@ -21,17 +28,17 @@ export function publicProjectDomain(row: ProjectDomainRow, env: ProjectHostingEn
     { type: 'CNAME', name: row.hostname, value: projectHostname(env, row.project_id), purpose: 'routing' },
   ];
   const addressRecords: DnsRecord[] = apexIps(env).map(value => ({ type: value.includes(':') ? 'AAAA' : 'A', name: row.hostname, value, purpose: 'routing' }));
-  if (env.PROJECT_DOMAIN_PROVIDER === 'ingress') dnsRecords.splice(1, 1, ...addressRecords);
+  if ((row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress') dnsRecords.splice(1, 1, ...addressRecords);
   return { id: row.id, hostname: row.hostname, status: row.status, dnsStatus: row.dns_status,
     tlsStatus: row.tls_status, dnsRecords, error: row.error,
-    apexRecords: env.PROJECT_DOMAIN_PROVIDER === 'ingress' ? [] : addressRecords,
-    routingNote: env.PROJECT_DOMAIN_PROVIDER === 'ingress' ? 'Add the listed A/AAAA records for this hostname, including an apex domain. Keep your current DNS provider.' : 'For an apex domain, use ALIAS/ANAME or CNAME flattening to the project hostname, or the listed A/AAAA records. Keep your current DNS provider.' };
+    apexRecords: localProjectDomains(env) || (row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress' ? [] : addressRecords,
+    routingNote: localProjectDomains(env) ? 'Local development: DNS and TLS are simulated. Click Verify DNS twice to activate this hostname. No DNS records or certificates are needed.'
+      : (row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress' ? 'Add the listed A/AAAA records for this hostname, including an apex domain. Keep your current DNS provider.' : 'For an apex domain, use ALIAS/ANAME or CNAME flattening to the project hostname, or the listed A/AAAA records. Keep your current DNS provider.' };
 }
 async function boundedJson(response: Response): Promise<unknown> {
   if (!response.ok) throw new Error('domain_provider_unavailable');
-  const text = await response.text();
-  if (text.length > 262144) throw new Error('domain_provider_unavailable');
-  return JSON.parse(text);
+  const bytes = await boundedPrivateBody(response.body, 262144);
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 }
 type DnsAnswer = { name: string; type: number; data: string };
 export async function dnsQuery(hostname: string, type: 'TXT' | 'CNAME' | 'A' | 'AAAA'): Promise<DnsAnswer[]> {
@@ -50,6 +57,11 @@ function txtValue(value: string): string {
   return [...value.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(match => match[1].replace(/\\(["\\])/g, '$1')).join('');
 }
 export async function domainDnsProof(row: ProjectDomainRow, env: ProjectHostingEnv): Promise<{ ownership: boolean; routing: boolean; ingressSafe: boolean }> {
+  if (localProjectDomains(env)) {
+    // Only reserved loopback aliases may bypass public DNS, even in local mode.
+    const valid = row.provider === null && normalizeProjectHostname(row.hostname, env) === row.hostname;
+    return { ownership: valid, routing: valid, ingressSafe: false };
+  }
   const txtHost = `_mainbrella.${row.hostname}`;
   const txt = await dnsQuery(txtHost, 'TXT');
   const ownership = txt.some(answer => answer.type === 16 && dnsName(answer.name) === txtHost && txtValue(answer.data) === row.challenge);
@@ -108,7 +120,7 @@ export async function ingressTlsReady(row: ProjectDomainRow): Promise<boolean> {
   try {
     const response = await fetch(`https://${row.hostname}/.well-known/mainbrella-domain-check`, { signal: AbortSignal.timeout(5000), redirect: 'error' });
     if (!response.ok) return false;
-    const text = await response.text();
-    return text.length <= 256 && text.trim() === row.challenge;
+    const bytes = await boundedPrivateBody(response.body, 256);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).trim() === row.challenge;
   } catch { return false; }
 }

@@ -3,6 +3,8 @@ import { validPreviewPort } from './preview-contract.js';
 export const MAX_PROJECT_BINDINGS = 32;
 export const validProjectId = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 export const validProjectRevision = validProjectId;
+export const validLocalProjectHostname = value => typeof value === 'string'
+  && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.localhost$/.test(value);
 export const validProjectBinding = body => Boolean(body && typeof body === 'object' && !Array.isArray(body)
   && Object.keys(body).length === 3 && Object.keys(body).every(key => ['id', 'revision', 'port'].includes(key))
   && validProjectId(body.id) && validProjectRevision(body.revision) && validPreviewPort(body.port));
@@ -13,7 +15,7 @@ export function validProjectOrigin(value, allowLocal = false) {
   try {
     const url = new URL(value);
     if (url.origin !== value || url.username || url.password) return false;
-    if (allowLocal && url.protocol === 'http:' && /^p-[a-f0-9]{32}\.localhost$/.test(url.hostname)
+    if (allowLocal && url.protocol === 'http:' && validLocalProjectHostname(url.hostname)
       && url.port && Number(url.port) <= 65535) return true;
     return url.protocol === 'https:' && !url.port && url.hostname.length <= 253
       && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(url.hostname)

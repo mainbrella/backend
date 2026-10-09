@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { serialize } from 'node:v8';
 import { DatabaseSync } from 'node:sqlite';
 
-async function run(t, { signal, fail = false, allImages = false } = {}) {
+async function run(t, { signal, fail = false, allImages = false, portArgs = [], expectedPort = '8787' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/.bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
@@ -18,6 +18,7 @@ async function run(t, { signal, fail = false, allImages = false } = {}) {
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ name: 'mainbrella-containers', containers: [
     { class_name: 'UserContainer', images: { terminal: { dockerfile: './containers/Dockerfile' } } },
   ] }));
+  const sourceConfigs = ['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8'));
   const hash = 'a'.repeat(64);
   const proxy = { ID: 'session-proxy', Names: `workerd-mainbrella-containers-UserContainer-${hash}-proxy`, Image: 'cloudflare/proxy-everything:test' };
   const db = new DatabaseSync(join(root, 'state/v3/do/mainbrella-containers-UserContainer', `${hash}.sqlite`));
@@ -42,7 +43,7 @@ fs.writeFileSync('docker-state.json', JSON.stringify([${JSON.stringify(proxy)}])
 console.log('fixture-ready');
 ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);" : `process.exit(${fail ? 7 : 0});`}
 `, { mode: 0o755 });
-  const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), '--persist-to', 'state'], {
+  const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), ...portArgs, '--persist-to', 'state'], {
     cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
@@ -61,6 +62,15 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
   assert.equal(readdirSync(root).some(path => path.startsWith('.wrangler-local-')), false);
   const configs = JSON.parse(readFileSync(join(root, 'configs.json')));
   assert.equal(configs.every(config => config.vars.LOCAL_DEV === 'true' && !config.routes), true);
+  const apiConfig = configs.find(config => config.name === 'mainbrella-api');
+  const containerConfig = configs.find(config => config.name === 'mainbrella-containers');
+  assert.equal(apiConfig.vars.PROJECT_HOSTING_ENABLED, 'true');
+  assert.equal(apiConfig.vars.PROJECT_DOMAIN_PROVIDER, 'local');
+  assert.equal(apiConfig.vars.LOCAL_PREVIEW_PORT, expectedPort);
+  assert.equal(containerConfig.vars.PROJECT_HOSTING_ENABLED, undefined);
+  assert.equal(containerConfig.vars.PROJECT_DOMAIN_PROVIDER, undefined);
+  assert.equal(containerConfig.vars.LOCAL_PREVIEW_PORT, undefined);
+  assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
   const images = configs[1].containers[0].images;
   assert.deepEqual(Object.keys(images), allImages ? ['terminal', 'python', 'rust', 'go', 'devops'] : ['terminal']);
   if (allImages) {
@@ -80,4 +90,8 @@ test('dev launcher forwards Ctrl+C and SIGTERM, then waits for proxy cleanup', {
 });
 test('dev launcher enables every catalog image on request', { timeout: 10_000 }, async t => {
   await run(t, { allImages: true });
+});
+test('dev launcher passes the selected port to local project aliases in both CLI forms', { timeout: 10_000 }, async t => {
+  await run(t, { portArgs: ['--port=8899'], expectedPort: '8899' });
+  await run(t, { portArgs: ['--port', '8899'], expectedPort: '8899' });
 });

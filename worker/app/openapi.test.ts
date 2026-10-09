@@ -90,6 +90,21 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.match(update.description, /project owned by the signed-in user/);
 });
 
+test('project hosting schemas describe local aliases and simulated DNS and TLS', async () => {
+  const { paths, components } = await document();
+  const endpoint = paths['/projects/endpoint'].get;
+  const addDomain = paths['/projects/domains'].post;
+  const verifyDomain = paths['/projects/domains/verify'].post;
+  const capabilities = components.schemas.Capabilities.properties.projects;
+  assert.equal(endpoint.responses[200].content['application/json'].schema.properties.hosting.properties.localDevelopment.type, 'boolean');
+  assert.equal(capabilities.properties.localDevelopment.type, 'boolean');
+  assert.match(endpoint.description, /app\.localhost/);
+  assert.match(addDomain.description, /PROJECT_DOMAIN_PROVIDER=local/);
+  assert.match(addDomain.description, /no external provider/);
+  assert.match(verifyDomain.description, /first verification/);
+  assert.match(verifyDomain.description, /second verification/);
+});
+
 test("admin users schema documents restricted cookie access and safe user fields", async () => {
   const { paths, components } = await document();
   const operation = paths["/admin/users"].get;

@@ -5,6 +5,7 @@ import { previewDatabase } from './lib/preview-test-helpers';
 import { handleProjectGateway, type ProjectGatewayEnv } from './project-gateway';
 import { normalizeProjectHostname } from './lib/project-domains';
 import { validProjectOrigin } from '../containers/project-contract.js';
+import { handleApplicationGateway } from './preview-gateway';
 
 const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const revision = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -175,4 +176,27 @@ test('disabled claims deny certificate authorization, readiness probes and appli
   assert.equal((await f.custom()).status,404);
   assert.equal((await f.ingress()).status,404);
   assert.equal(f.calls.length,0);
+});
+
+test('local aliases require a local provider, active claim and the configured HTTP port', async t => {
+  const f = fixture(t);
+  f.env.LOCAL_DEV = 'true'; f.env.LOCAL_PREVIEW_PORT = '8899'; f.env.PROJECT_DOMAIN_PROVIDER = 'local';
+  f.sqlite.prepare('INSERT INTO project_hosts VALUES(?,?,?,?)').run('app.localhost', id, 'pending_tls', verification);
+  const local = (path = '/', host = 'app.localhost', port = '8899') => handleApplicationGateway(new Request(`http://${host}:${port}${path}`), f.env);
+  assert.equal((await local()).status, 404);
+  assert.equal(await (await local('/.well-known/mainbrella-domain-check')).text(), verification);
+  f.sqlite.exec("UPDATE project_hosts SET status='active' WHERE hostname='app.localhost'");
+  assert.equal((await local('/login?q=1')).status, 200);
+  assert.equal(f.calls.at(-1)!.url, 'https://internal/project/login?q=1');
+  assert.equal(f.calls.at(-1)!.headers.get('x-project-origin'), 'http://app.localhost:8899');
+  assert.equal(validProjectOrigin('http://app.localhost:8899', true), true);
+  assert.equal(validProjectOrigin('http://app.localhost:8899'), false);
+  for (const url of ['http://app.localhost:8787', 'https://app.localhost:8899', 'http://unknown.localhost:8899', 'http://app.example:8899']) {
+    assert.equal((await handleApplicationGateway(new Request(url), f.env)).status, 404, url);
+  }
+  assert.equal((await local('/', `p-${id.replaceAll('-', '')}`)).status, 200);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'ingress';
+  assert.equal((await local()).status, 404);
+  f.env.LOCAL_DEV = 'false'; f.env.PROJECT_DOMAIN_PROVIDER = 'local';
+  assert.equal((await handleApplicationGateway(new Request('https://app.localhost'), f.env)).status, 404);
 });

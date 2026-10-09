@@ -12,6 +12,31 @@ Custom hostnames are aliases for the same endpoint. Existing `projects.domain`
 text remains metadata: editing it does not publish an application. The separate
 Endpoint action on the Projects page performs publication and domain setup.
 
+## Local development
+
+Start the backend with `npm run dev`. The dev launcher enables local project
+hosting for the API process only and follows Wrangler's selected API port. The
+default project URL is `http://p-<project UUID without hyphens>.localhost:<port>`.
+Add a single-label alias such as `app.localhost` in the Projects UI to use that
+host for the same published application.
+
+For a custom backend port, start the API and point the web app to it:
+
+```sh
+npm run dev -- --port 8899
+VITE_API_URL=http://localhost:8899 npm run dev
+```
+
+In the Projects UI, add `app.localhost`, click **Verify DNS**, then click
+**Activate locally** once the domain shows pending TLS. The first verification
+simulates ownership and routing DNS; the second simulates TLS activation. No
+public DNS records or certificates are created. Local aliases require the backend
+dev launcher and are disabled in deployed environments. Existing account and
+paid/trial access checks still apply. Container applications must listen on
+`0.0.0.0` at their application port inside the container, and Docker must be
+running. The localhost port above is the backend API port; it does not change the
+application port selected when publishing the project.
+
 ## Routing and transport
 
 The account API manages project publications and domain verification in the

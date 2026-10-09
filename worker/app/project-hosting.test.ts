@@ -67,6 +67,8 @@ async function fixture(t: TestContext) {
   let txt = false, routingDns = false, tls = false, unexpectedIp = false;
   const external: { url: URL; options?: RequestInit }[] = [];
   let providerExists = false, providerActive = false, providerFail = false;
+  let onProvider: ((method: string) => Promise<void>) | undefined;
+  let txtOverride: string | undefined;
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
     if (url.hostname === 'cloudflare-dns.com') {
@@ -74,13 +76,14 @@ async function fixture(t: TestContext) {
       const name = url.searchParams.get('name')!, type = url.searchParams.get('type');
       const row = f.sqlite.prepare('SELECT challenge FROM project_domains WHERE hostname = ? ORDER BY created_at LIMIT 1').get(host) as any;
       let Answer: any[] = [];
-      if (type === 'TXT' && txt && row) Answer = [{ name, type: 16, data: `"${row.challenge}"` }];
+      if (type === 'TXT' && txt && row) Answer = [{ name, type: 16, data: `"${txtOverride ?? row.challenge}"` }];
       if (type === 'A' && routingDns) Answer = [{ name, type: 1, data: unexpectedIp ? '127.0.0.1' : '8.8.8.8' }];
       return Response.json({ Status: 0, Answer });
     }
     if (url.hostname === host) { external.push({ url, options }); return new Response(tls ? (f.sqlite.prepare('SELECT challenge FROM project_domains WHERE hostname = ?').get(host) as any)?.challenge : 'not ready'); }
     if (url.hostname === 'api.cloudflare.com') {
       external.push({ url, options });
+      if (onProvider) await onProvider(options?.method ?? 'GET');
       if (providerFail) throw new Error('private token detail');
       if (options?.method === 'DELETE') { providerExists = false; return Response.json({ success: true, result: { id: 'provider-one' } }); }
       const result = { id: 'provider-one', hostname: host, status: providerActive ? 'active' : 'pending', ssl: { status: providerActive ? 'active' : 'pending_validation' } };
@@ -94,6 +97,8 @@ async function fixture(t: TestContext) {
     setDeleteFailure(value: boolean) { failDelete = value; }, setLostPut(value: boolean) { failPutResponse = value; },
     setOnPut(value?: (revision: string) => Promise<void>) { onPut = value; },
     setDns(ownership: boolean, routing: boolean, active = false, unsafeIp = false) { txt = ownership; routingDns = routing; tls = active; unexpectedIp = unsafeIp; },
+    setProviderHook(value?: (method: string) => Promise<void>) { onProvider = value; },
+    setTxtValue(value?: string) { txtOverride = value; },
     setProvider(active: boolean, failure = false, exists = false) { providerActive = active; providerFail = failure; providerExists = exists; },
   };
 }
@@ -223,6 +228,47 @@ test('domain registration canonicalizes hostnames, never reserves unverified nam
   assert.equal(normalizeProjectHostname('BÜCHER.example'), 'xn--bcher-kva.example');
 });
 
+test('local development accepts owner-scoped localhost aliases and simulates DNS and TLS activation', async t => {
+  const f = await fixture(t);
+  f.env.LOCAL_DEV = 'true'; f.env.PROJECT_DOMAIN_PROVIDER = 'local';
+  assert.deepEqual(projectHostingCapabilities(f.env), { supported: true, customDomains: true, localDevelopment: true, apexIps: [] });
+  const added = await addDomain(f, 'APP.localhost.');
+  assert.equal(added.hostname, 'app.localhost');
+  assert.match(added.routingNote, /simulated/);
+  assert.deepEqual(added.apexRecords, []);
+  assert.equal(f.sqlite.prepare('SELECT provider FROM project_domains WHERE id = ?').get(added.id)?.provider, null);
+  for (const value of ['example.com', 'localhost', 'p-4e3cb127784d4a9f9828afd093c295dc.localhost', `${'a'.repeat(48)}.localhost`, '127.0.0.1']) {
+    assert.equal((await domains(request('domains', 'POST', { hostname: value }), f.env)).status, 400, value);
+  }
+  assert.equal((await domains(verify(added.id, SESSION_TWO, OTHER_PROJECT), f.env)).status, 404);
+
+  const first = await (await domains(verify(added.id), f.env)).json() as any;
+  assert.equal(first.domain.status, 'pending_tls');
+  assert.equal(first.domain.dnsStatus, 'verified');
+  assert.equal(first.domain.tlsStatus, 'pending');
+  assert.equal((f.routing.prepare('SELECT * FROM project_hosts').get() as any).status, 'pending_tls');
+  const second = await (await domains(verify(added.id), f.env)).json() as any;
+  assert.equal(second.domain.status, 'active');
+  assert.equal(second.domain.tlsStatus, 'active');
+  assert.equal((f.routing.prepare('SELECT * FROM project_hosts').get() as any).status, 'active');
+  assert.equal(f.external.length, 0);
+
+  await endpoint(request('endpoint', 'PUT', { target: TARGET }), f.env);
+  assert.equal((await endpoint(request('endpoint', 'DELETE'), f.env)).status, 200);
+  assert.equal((await domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${added.id}`), f.env)).status, 200);
+  assert.equal(f.routing.prepare('SELECT * FROM project_hosts').get(), undefined);
+  assert.equal(f.sqlite.prepare('SELECT * FROM project_domains WHERE id = ?').get(added.id), undefined);
+  assert.equal(f.external.length, 0);
+});
+
+test('local project domain support is gated off outside local development', async t => {
+  const f = await fixture(t);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'local';
+  assert.equal(projectHostingCapabilities(f.env).localDevelopment, false);
+  assert.equal(projectHostingCapabilities(f.env).customDomains, false);
+  assert.equal((await domains(request('domains', 'POST', { hostname: 'app.localhost' }), f.env)).status, 503);
+});
+
 test('TXT ownership and routing are independently required; TLS activation requires a safe DNS set and HTTPS token', async t => {
   const f = await fixture(t); const added = await addDomain(f);
   f.setDns(false, true, true);
@@ -293,4 +339,118 @@ test('account migrations enforce project foreign keys while routing schema conta
   assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM project_domains').get() as any).count, 0);
   const names = f.routing.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row: any) => row.name);
   assert.ok(!names.includes('users')); assert.ok(!names.includes('sessions'));
+});
+
+test('network publication snapshots the registered service and requires explicit republishing after membership changes', async t => {
+  const f = await fixture(t);
+  let member = { id: 'small', name: 'web', createdAt: GENERATION_ONE, port: 3000 };
+  const original = f.env.CONTAINER_ACCOUNT!;
+  f.env.CONTAINER_ACCOUNT = { idFromName: (name: string) => name, get(name: string) {
+    const account = original.get(name as never);
+    return { async fetch(req: Request) {
+      if (new URL(req.url).pathname === '/private-services/networks') return Response.json({ networks: [{ name: 'production', members: [member] }] });
+      return account.fetch(req);
+    } };
+  } } as unknown as DurableObjectNamespace<any>;
+  const target = { kind: 'network', network: 'production', service: 'web' };
+  const published = await endpoint(request('endpoint', 'PUT', { target }), f.env);
+  assert.equal(published.status, 200); assert.deepEqual((await published.json() as any).endpoint.target, target);
+  const stored = JSON.parse((f.routing.prepare('SELECT * FROM project_endpoints').get() as any).target_json);
+  assert.deepEqual(stored.snapshot, { id: 'small', createdAt: GENERATION_ONE, port: 3000 });
+  member = { ...member, createdAt: GENERATION_TWO };
+  f.containers.get(USER_ONE)![0].createdAt = GENERATION_TWO;
+  assert.equal((await (await endpoint(request(), f.env)).json() as any).endpoint.backendStatus, 'unavailable');
+  assert.equal((await endpoint(request('endpoint', 'PUT', { target }), f.env)).status, 200);
+  assert.equal((await (await endpoint(request(), f.env)).json() as any).endpoint.backendStatus, 'running');
+});
+
+test('removal fences an in-flight provider create, retains disabled claim and reconciles returned provider identity on retry', async t => {
+  const f = await fixture(t);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'cloudflare'; f.env.PROJECT_CLOUDFLARE_ZONE_ID = 'zone123'; f.env.PROJECT_CLOUDFLARE_API_TOKEN = 'private-token';
+  const added = await addDomain(f); f.setDns(true, true); f.setProvider(true);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.setProviderHook(async method => { if (method === 'POST') { entered(); await blocked; } });
+  const verifying = domains(verify(added.id), f.env);
+  await started;
+  const remove = () => domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${added.id}`), f.env);
+  assert.equal((await remove()).status, 503);
+  assert.equal((f.routing.prepare('SELECT * FROM project_hosts').get() as any).status, 'disabled');
+  assert.equal((f.sqlite.prepare('SELECT removing FROM project_domains').get() as any).removing, 1);
+  release(); assert.equal((await verifying).status, 503);
+  assert.equal((f.routing.prepare('SELECT * FROM project_hosts').get() as any).status, 'disabled');
+  assert.equal((f.sqlite.prepare('SELECT provider_id FROM project_domains').get() as any).provider_id, 'provider-one');
+  f.setProviderHook(undefined);
+  assert.equal((await remove()).status, 200);
+  assert.equal(f.routing.prepare('SELECT * FROM project_hosts').get(), undefined);
+  assert.equal(f.sqlite.prepare('SELECT * FROM project_domains').get(), undefined);
+  assert.equal(f.external.filter(call => call.url.hostname === 'api.cloudflare.com' && call.options?.method === 'DELETE').length, 1);
+});
+
+test('cleanup of stale provider metadata preserves a new verified owner claim and shared provider resource', async t => {
+  const f = await fixture(t);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'cloudflare'; f.env.PROJECT_CLOUDFLARE_ZONE_ID = 'zone123'; f.env.PROJECT_CLOUDFLARE_API_TOKEN = 'private-token';
+  const first = await addDomain(f); f.setDns(true, true); f.setProvider(true);
+  await domains(verify(first.id), f.env);
+  f.setDns(false, true); await domains(verify(first.id), f.env);
+  assert.equal(f.routing.prepare('SELECT * FROM project_hosts').get(), undefined);
+  const second = await addDomain(f, host, OTHER_PROJECT, SESSION_TWO);
+  f.setTxtValue(second.dnsRecords[0].value); f.setDns(true, true); f.setProvider(true, false, true);
+  assert.equal((await domains(verify(second.id, SESSION_TWO, OTHER_PROJECT), f.env)).status, 200);
+  f.external.length = 0;
+  assert.equal((await domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${first.id}`), f.env)).status, 200);
+  assert.equal((f.routing.prepare('SELECT * FROM project_hosts').get() as any).project_id, OTHER_PROJECT);
+  assert.equal(f.external.some(call => call.url.hostname === 'api.cloudflare.com' && call.options?.method === 'DELETE'), false);
+});
+
+test('domain quotas are enforced atomically per project, and domain preflight and browser auth remain isolated', async t => {
+  const f = await fixture(t);
+  for (let i = 0; i < 20; i++) await addDomain(f, `site${i}.example.com`);
+  assert.equal((await domains(request('domains', 'POST', { hostname: 'extra.example.com' }), f.env)).status, 429);
+  assert.equal((await domains(request('domains', 'GET', undefined, 'missing'), f.env)).status, 401);
+  assert.equal((await domains(request('domains', 'OPTIONS'), f.env)).status, 204);
+  const noOrigin = request('domains', 'POST', { hostname: host }); noOrigin.headers.delete('Origin');
+  assert.equal((await domains(noOrigin, f.env)).status, 403);
+  f.env.PROJECT_HOSTING_ENABLED = 'false';
+  assert.equal((await domains(request('domains'), f.env)).status, 200);
+  f.env.PREVIEW_DOMAIN = ''; assert.match((await (await endpoint(request(), f.env)).json() as any).endpoint.url, /\.mainbrella\.dev\/$/);
+});
+
+test('domain removal closes the origin on journaled transports left by a partial unpublish with no current endpoint', async t => {
+  const f = await fixture(t); const added = await addDomain(f); f.setDns(true, true, true);
+  await domains(verify(added.id), f.env); await endpoint(request('endpoint', 'PUT', { target: TARGET }), f.env);
+  f.setDeleteFailure(true); await endpoint(request('endpoint', 'DELETE'), f.env);
+  assert.equal(f.routing.prepare('SELECT * FROM project_endpoints').get(), undefined); assert.equal(f.bindings.size, 1);
+  f.setDeleteFailure(false); f.calls.length = 0;
+  assert.equal((await domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${added.id}`), f.env)).status, 200);
+  assert.equal(f.calls.length, 1); assert.equal(new URL(f.calls[0].request.url).searchParams.get('origin'), `https://${host}`);
+  assert.equal(f.bindings.size, 1); // Origin-only closure preserves other origins until unpublish reconciliation.
+});
+
+test('lost provider-create identity is reconciled during removal even after provider issuance is disabled', async t => {
+  const f = await fixture(t);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'cloudflare'; f.env.PROJECT_CLOUDFLARE_ZONE_ID = 'zone123'; f.env.PROJECT_CLOUDFLARE_API_TOKEN = 'private-token';
+  const added = await addDomain(f); f.setDns(true, true); f.setProvider(false, true, true);
+  assert.equal((await domains(verify(added.id), f.env)).status, 503);
+  assert.equal((f.sqlite.prepare('SELECT provider_id FROM project_domains').get() as any).provider_id, null);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'disabled'; f.setProvider(false, false, true); f.external.length = 0;
+  assert.equal((await domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${added.id}`), f.env)).status, 200);
+  assert.equal(f.external.filter(call => call.url.hostname === 'api.cloudflare.com' && call.options?.method === 'DELETE').length, 1);
+  assert.equal(f.routing.prepare('SELECT * FROM project_hosts').get(), undefined);
+});
+
+test('retrying provider cleanup treats an already-deleted provider resource as success', async t => {
+  const f = await fixture(t);
+  f.env.PROJECT_DOMAIN_PROVIDER = 'cloudflare'; f.env.PROJECT_CLOUDFLARE_ZONE_ID = 'zone123'; f.env.PROJECT_CLOUDFLARE_API_TOKEN = 'private-token';
+  const added = await addDomain(f); f.setDns(true, true); f.setProvider(true);
+  await domains(verify(added.id), f.env);
+  const original = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname === 'api.cloudflare.com' && options?.method === 'DELETE') return Response.json({ success: false }, { status: 404 });
+    return original(input, options);
+  });
+  assert.equal((await domains(request('domains', 'DELETE', undefined, SESSION_ONE, PROJECT, `&domainId=${added.id}`), f.env)).status, 200);
+  assert.equal(f.sqlite.prepare('SELECT * FROM project_domains').get(), undefined);
 });

@@ -1,8 +1,8 @@
 import { machineName, validContainerId } from '../containers/container-account-core.js';
-import { projectHeaders, validProjectRevision } from '../containers/project-contract.js';
+import { projectHeaders, validLocalProjectHostname, validProjectRevision } from '../containers/project-contract.js';
 import { validPrivatePort, validServiceName } from '../containers/private-services-contract.js';
 import { previewDomain, validPreviewGeneration } from './lib/preview-routing';
-import { projectHostingConfigured, projectOrigin, validProjectId,
+import { localProjectDomains, projectDomainOrigin, projectHostingConfigured, projectOrigin, validProjectId,
   type ProjectEndpointRoute, type ProjectHostingEnv } from './lib/project-hosting';
 
 export type ProjectGatewayEnv = ProjectHostingEnv;
@@ -86,7 +86,8 @@ export async function handleProjectGateway(request: Request, env: ProjectGateway
     if (ingress && (!canonicalHost(hostname) || hostname === env.PROJECT_INGRESS_HOST)) return unavailable(403);
     let projectId: string;
     let origin: string;
-    if (hostname?.endsWith(`.${domain}`)) {
+    const localAlias = localProjectDomains(env) && validLocalProjectHostname(hostname) && !/^p-[a-f0-9]{32}\.localhost$/.test(hostname);
+    if (hostname?.endsWith(`.${domain}`) && !localAlias) {
       const label = hostname.slice(0, -(domain.length + 1));
       if (!/^p-[a-f0-9]{32}$/.test(label) || ingress) return unavailable();
       const id = label.slice(2);
@@ -96,6 +97,8 @@ export async function handleProjectGateway(request: Request, env: ProjectGateway
       if (origin !== url.origin) return unavailable();
     } else {
       if (!canonicalHost(hostname) || hostname === domain) return unavailable();
+      if (validLocalProjectHostname(hostname) && !localAlias) return unavailable();
+      if (env.LOCAL_DEV === 'true' && (!localAlias || url.origin !== projectDomainOrigin(env, hostname))) return unavailable();
       const customHost = await projectHost(env.PREVIEW_ROUTES!, hostname);
       if (!customHost) return unavailable();
       if (url.pathname === '/.well-known/mainbrella-domain-check') {
@@ -106,7 +109,7 @@ export async function handleProjectGateway(request: Request, env: ProjectGateway
       }
       if (customHost.status !== 'active') return unavailable();
       projectId = customHost.project_id;
-      origin = `https://${hostname}`;
+      origin = projectDomainOrigin(env, hostname);
     }
     const route = await env.PREVIEW_ROUTES!.prepare(`SELECT project_id, user_id, target_json, container_name, created_at, port, revision, updated_at
       FROM project_endpoints WHERE project_id = ?`).bind(projectId).first<ProjectEndpointRoute>();

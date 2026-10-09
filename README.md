@@ -68,8 +68,8 @@ Wrangler 4.136.0 or newer. Press `r` in the dev terminal to rebuild the image.
 Local preview links use `http://<token>.localhost:8787/` and route through the
 local API Worker to the container, including WebSockets. Open them on the Mac
 running Wrangler. Reissue previews created before this setup to get local links.
-If overriding the dev server port, also pass `--var LOCAL_PREVIEW_PORT:<port>`.
-The dev launcher uses temporary copies of the Worker configurations with
+If overriding the API port, pass `--port <port>`; the dev launcher carries that
+port into local preview and project alias routing. The dev launcher uses temporary copies of the Worker configurations with
 production routes removed and `LOCAL_DEV=true` on both Workers, preserving local
 preview subdomains. Restart dev after changing a Worker configuration.
 
@@ -459,6 +459,29 @@ it those tests explicitly skip. `npx tsx --test worker/app/files.test.ts` verifi
 public authentication, account ownership, error handling and binary forwarding.
 
 Directory metadata/listing and mkdir/remove/move/chmod use the separate `/containers/files/*` routes. They share authorization, the generation-bound operation pool and bounded execution. Images must include GNU stat/find/sed/coreutils. Filesystem watchers remain unsupported. See API.md for symlink, pagination and partial-mutation semantics.
+
+## Local project hosting
+
+Start the backend with `npm run dev` to enable project endpoints in the Projects UI.
+The default project URL uses `p-<project UUID without hyphens>.localhost`; a custom
+alias such as `app.localhost` reaches the same published application. In the UI,
+add the alias, click **Verify DNS**, then click **Activate locally** after it reaches
+the pending TLS state. Local mode simulates DNS ownership, routing, and TLS; it
+does not require public DNS records or issue certificates. The application still
+uses the selected port inside its container and must listen on `0.0.0.0`.
+
+If the backend API uses a different port, pass it to Wrangler and point the web
+app at that API, for example:
+
+```sh
+npm run dev -- --port 8899
+VITE_API_URL=http://localhost:8899 npm run dev
+```
+
+Local projects use the existing account and paid/trial access checks. Docker must
+be running for container-backed applications. See
+[docs/project-domains.md](docs/project-domains.md) for the local and deployed
+domain flows.
 
 ## Agent API and local SDKs
 

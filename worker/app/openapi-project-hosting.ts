@@ -14,14 +14,14 @@ export const projectDomainSchema = z.object({
   dnsRecords: z.array(dnsRecord), apexRecords: z.array(dnsRecord).optional(), routingNote: z.string().optional(), error: z.string().nullable(),
 }).openapi('ProjectDomain');
 const endpoint = z.object({ projectId: z.string().uuid(), url: z.string(), target: projectTargetSchema.nullable(), backendStatus: z.enum(['running', 'unavailable', 'unlinked']) });
-const hosting = z.object({ supported: z.boolean(), customDomains: z.boolean(), apexIps: z.array(z.string()) });
+const hosting = z.object({ supported: z.boolean(), customDomains: z.boolean(), localDevelopment: z.boolean(), apexIps: z.array(z.string()) });
 const state = z.object({ endpoint, domains: z.array(projectDomainSchema), hosting });
 const inspection = 'Requires a browser session and an owned project. Inspection and cleanup remain available when publication is disabled. Domain metadata on the project does not publish an application.';
 
 export function registerProjectHostingRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/projects/endpoint', {
     operationId: 'getProjectEndpoint', tags: ['Projects'], summary: 'Inspect a project endpoint and its domains', security: cookieSecurity,
-    description: inspection + ' DNS, certificate, and exact-generation backend availability are separate states. The stable default URL is public after publication.',
+    description: inspection + ' DNS, certificate, and exact-generation backend availability are separate states. The stable default URL is public after publication. Local development exposes the default URL on localhost and permits app.localhost aliases only when LOCAL_DEV=true and PROJECT_DOMAIN_PROVIDER=local; DNS and TLS are simulated there.',
     request: { query: projectQuery }, responses: { 200: jsonResponse(state), ...errors(400, 401, 403, 404, 503) },
   }, handler);
   register(api, 'put', '/projects/endpoint', {
@@ -42,13 +42,13 @@ export function registerProjectHostingRoutes(api: OpenAPIApi, handler: LegacyHan
   }, handler);
   register(api, 'post', '/projects/domains', {
     operationId: 'addProjectDomain', tags: ['Projects'], summary: 'Register a custom hostname for verification', security: cookieSecurity,
-    description: 'Requires a trusted Origin and an owned project. Normalizes a hostname and creates a project-specific TXT ownership challenge. URLs, IP addresses, wildcards, and platform domains are rejected. Pending registrations cannot reserve a hostname globally. Customers retain their DNS provider and nameservers. Root domains need provider-supported ALIAS/flattening or explicitly configured stable ingress IPs; never copy arbitrary Cloudflare edge IPs.',
+    description: 'Requires a trusted Origin and an owned project. Normalizes a hostname and creates a project-specific TXT ownership challenge. URLs, IP addresses, wildcards, and platform domains are rejected. Pending registrations cannot reserve a hostname globally. Customers retain their DNS provider and nameservers. Root domains need provider-supported ALIAS/flattening or explicitly configured stable ingress IPs; never copy arbitrary Cloudflare edge IPs. In local development only, LOCAL_DEV=true and PROJECT_DOMAIN_PROVIDER=local allow single-label *.localhost aliases; DNS and certificate checks are simulated and no external provider is contacted.',
     request: { query: projectQuery, ...requestBody(z.object({ hostname: z.string().min(1).max(253) }).strict()) },
     responses: { 201: jsonResponse(z.object({ domain: projectDomainSchema })), 200: jsonResponse(z.object({ domain: projectDomainSchema })), ...errors(400, 401, 403, 404, 409, 429, 503) },
   }, handler);
   register(api, 'post', '/projects/domains/verify', {
     operationId: 'verifyProjectDomain', tags: ['Projects'], summary: 'Check domain ownership, routing DNS, and HTTPS', security: cookieSecurity,
-    description: 'Requires a trusted Origin and an owned domain registration. Verifies the account/project-specific TXT challenge before claiming routing or provisioning certificates. Cloudflare for SaaS requires both hostname and certificate activation. Static ingress requires configured A/AAAA destinations and an HTTPS gateway challenge, with redirects disabled. Only verified, active hostnames can reach applications.',
+    description: 'Requires a trusted Origin and an owned domain registration. Verifies the account/project-specific TXT challenge before claiming routing or provisioning certificates. Cloudflare for SaaS requires both hostname and certificate activation. Static ingress requires configured A/AAAA destinations and an HTTPS gateway challenge, with redirects disabled. Only verified, active hostnames can reach applications. In local development with PROJECT_DOMAIN_PROVIDER=local, the first verification simulates DNS ownership and routing and leaves TLS pending; a second verification simulates certificate activation without public DNS or certificates.',
     request: { query: domainQuery }, responses: { 200: jsonResponse(z.object({ domain: projectDomainSchema })), ...errors(400, 401, 403, 404, 409, 503) },
   }, handler);
   register(api, 'delete', '/projects/domains', {
