@@ -78,11 +78,17 @@ With Cloudflare for SaaS, a subdomain uses these records:
 
 Enter the full hostname or the relative label as required by the DNS provider.
 Remove conflicting website A/AAAA/CNAME records for that exact hostname; retain
-unrelated email and other records. On Cloudflare DNS, DNS-only records provide
-the simplest onboarding; proxied customer zones need Cloudflare's O2O support
-qualified separately. Cloudflare provisions and renews custom hostname
+unrelated email and other records. On Cloudflare DNS, set the CNAME to **DNS only**
+(gray cloud) so Mainbrella can verify its routing target. A proxied record hides
+the CNAME behind Cloudflare edge addresses and can prevent routing verification;
+proxied customer zones need Cloudflare's O2O support qualified separately.
+Cloudflare provisions and renews custom hostname
 certificates. Both hostname and certificate status must be active, and routing
 DNS must reach the configured target, before the application is served.
+
+DNS, provider, and HTTPS verification requests use Workers-supported manual
+redirect handling and reject non-success responses. They never follow redirects,
+including when a provider request carries credentials.
 
 A root domain can use ALIAS/ANAME or CNAME flattening only if the DNS provider
 supports arbitrary hostname targets. A normal root CNAME is not universally

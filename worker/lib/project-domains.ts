@@ -33,9 +33,10 @@ export function publicProjectDomain(row: ProjectDomainRow, env: ProjectHostingEn
     tlsStatus: row.tls_status, dnsRecords, error: row.error,
     apexRecords: localProjectDomains(env) || (row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress' ? [] : addressRecords,
     routingNote: localProjectDomains(env) ? 'Local development: DNS and TLS are simulated. Click Verify DNS twice to activate this hostname. No DNS records or certificates are needed.'
-      : (row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress' ? 'Add the listed A/AAAA records for this hostname, including an apex domain. Keep your current DNS provider.' : 'For an apex domain, use ALIAS/ANAME or CNAME flattening to the project hostname, or the listed A/AAAA records. Keep your current DNS provider.' };
+      : (row.provider ?? env.PROJECT_DOMAIN_PROVIDER) === 'ingress' ? 'Add the listed A/AAAA records for this hostname, including an apex domain. Keep your current DNS provider.' : 'On Cloudflare DNS, set the CNAME to DNS only (gray cloud) so its target can be verified. For an apex domain, use ALIAS/ANAME or CNAME flattening to the project hostname, or the listed A/AAAA records. Keep your current DNS provider.' };
 }
 async function boundedJson(response: Response): Promise<unknown> {
+  // Workers supports manual redirects; reject their non-2xx responses here.
   if (!response.ok) throw new Error('domain_provider_unavailable');
   const bytes = await boundedPrivateBody(response.body, 262144);
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
@@ -44,7 +45,7 @@ type DnsAnswer = { name: string; type: number; data: string };
 export async function dnsQuery(hostname: string, type: 'TXT' | 'CNAME' | 'A' | 'AAAA'): Promise<DnsAnswer[]> {
   const url = new URL('https://cloudflare-dns.com/dns-query');
   url.searchParams.set('name', hostname); url.searchParams.set('type', type);
-  const data = await boundedJson(await fetch(url, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'error' })) as { Status?: number; Answer?: DnsAnswer[] };
+  const data = await boundedJson(await fetch(url, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'manual' })) as { Status?: number; Answer?: DnsAnswer[] };
   if (![0, 3].includes(data.Status ?? -1)) throw new Error('dns_unavailable');
   const answer = data.Answer ?? [];
   if (!Array.isArray(answer) || answer.length > 64 || !answer.every(record => typeof record.name === 'string' && typeof record.data === 'string' && typeof record.type === 'number')) throw new Error('dns_unavailable');
@@ -95,7 +96,7 @@ export async function cloudflareRequest(env: ProjectHostingEnv, method: string, 
   if (!env.PROJECT_CLOUDFLARE_ZONE_ID || !/^[a-z0-9]+$/i.test(env.PROJECT_CLOUDFLARE_ZONE_ID) || !env.PROJECT_CLOUDFLARE_API_TOKEN) throw new Error('domain_provider_unavailable');
   const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${env.PROJECT_CLOUDFLARE_ZONE_ID}/custom_hostnames${suffix}`, {
     method, headers: { authorization: `Bearer ${env.PROJECT_CLOUDFLARE_API_TOKEN}`, 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(8000), redirect: 'error',
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(8000), redirect: 'manual',
   });
   if (method === 'DELETE' && response.status === 404) return null;
   const result = await boundedJson(response) as { success?: boolean; result?: unknown };
@@ -118,7 +119,7 @@ export async function provisionCloudflareHostname(env: ProjectHostingEnv, row: P
 export async function ingressTlsReady(row: ProjectDomainRow): Promise<boolean> {
   // Call only after every public A/AAAA answer is an explicitly configured ingress IP.
   try {
-    const response = await fetch(`https://${row.hostname}/.well-known/mainbrella-domain-check`, { signal: AbortSignal.timeout(5000), redirect: 'error' });
+    const response = await fetch(`https://${row.hostname}/.well-known/mainbrella-domain-check`, { signal: AbortSignal.timeout(5000), redirect: 'manual' });
     if (!response.ok) return false;
     const bytes = await boundedPrivateBody(response.body, 256);
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).trim() === row.challenge;

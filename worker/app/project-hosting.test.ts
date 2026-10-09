@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { handleProjectEndpointRequest, handleProjectDomainsRequest } from './project-hosting';
-import { normalizeProjectHostname } from '../lib/project-domains';
+import { normalizeProjectHostname, dnsQuery, cloudflareRequest, ingressTlsReady, type ProjectDomainRow } from '../lib/project-domains';
 import { publicIngressIp, projectHostingCapabilities } from '../lib/project-hosting';
 import { paidContainerFixture, GENERATION_ONE, GENERATION_TWO, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 
@@ -71,6 +71,10 @@ async function fixture(t: TestContext) {
   let txtOverride: string | undefined;
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    // Match Workers: Node's fetch accepts this mode, but the edge runtime throws.
+    if (['cloudflare-dns.com', 'api.cloudflare.com', host].includes(url.hostname) && options?.redirect === 'error') {
+      throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+    }
     if (url.hostname === 'cloudflare-dns.com') {
       external.push({ url, options });
       const name = url.searchParams.get('name')!, type = url.searchParams.get('type');
@@ -108,6 +112,19 @@ async function addDomain(f: Awaited<ReturnType<typeof fixture>>, hostname = host
   return (await response.json() as any).domain;
 }
 const verify = (domainId: string, session = SESSION_ONE, project = PROJECT) => request('domains/verify', 'POST', undefined, session, project, `&domainId=${domainId}`);
+
+test('domain checks reject redirects without following them or forwarding provider credentials', async t => {
+  const calls: RequestInit[] = [];
+  t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, options?: RequestInit) => {
+    calls.push(options ?? {});
+    return new Response('verification data', { status: 302, headers: { location: 'https://other.example.com/' } });
+  });
+  await assert.rejects(dnsQuery(`_mainbrella.${host}`, 'TXT'), /domain_provider_unavailable/);
+  await assert.rejects(cloudflareRequest({ PROJECT_CLOUDFLARE_ZONE_ID: 'zone123', PROJECT_CLOUDFLARE_API_TOKEN: 'private-token' }, 'GET'), /domain_provider_unavailable/);
+  assert.equal(await ingressTlsReady({ hostname: host, challenge: 'verification data' } as ProjectDomainRow), false);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(options => options.redirect === 'manual'));
+});
 
 test('endpoint publishes exact owned generation, switches revision, exposes stable identity and unpublishes without deleting domains', async t => {
   const f = await fixture(t);
