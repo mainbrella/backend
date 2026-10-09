@@ -53,13 +53,13 @@ Start a Docker-compatible engine (OrbStack, Docker Desktop, or Colima), then run
 
 ```sh
 npm ci
-npm run db:migrate:local
-npx wrangler d1 migrations apply mainbrella-preview-routes --local
 npm run dev
 ```
 
 `npm run dev` starts the API and private container Worker together, with local
-D1 and Durable Object storage in `.wrangler/state`. The API is available at
+D1 and Durable Object storage in `.wrangler/state`. It applies pending local
+migrations for both `delta` and `mainbrella-preview-routes` before startup. The
+API is available at
 `http://localhost:8787`; API docs are at `/docs`. Wrangler builds the Node image
 from `containers/Dockerfile` and starts containers on demand. This requires
 Wrangler 4.136.0 or newer. Press `r` in the dev terminal to rebuild the image.
@@ -71,7 +71,9 @@ running Wrangler. Reissue previews created before this setup to get local links.
 If overriding the API port, pass `--port <port>`; the dev launcher carries that
 port into local preview and project alias routing. The dev launcher uses temporary copies of the Worker configurations with
 production routes removed and `LOCAL_DEV=true` on both Workers, preserving local
-preview subdomains. Restart dev after changing a Worker configuration.
+preview subdomains. Restart dev after changing a Worker configuration. Restarting
+Wrangler stops local workloads; start a new container afterward and republish
+any endpoint that was bound to the previous generation.
 
 The launcher checks for leftover project proxies at startup, every 15 seconds,
 and after Wrangler exits. During dev, a workload must have been stopped for at

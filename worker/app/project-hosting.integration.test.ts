@@ -5,9 +5,9 @@ import { readFileSync } from 'node:fs';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE } from './paid-container-test-helpers';
 import { handleRequest } from './router';
 import { handleApplicationGateway } from '../preview-gateway';
-import worker from '../index';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
+import { planPrices } from '../lib/stripe';
 // The private container runtime is intentionally JavaScript, as its existing
 // transport implementations are. Exercise it directly across the API boundary.
 // @ts-expect-error Runtime module has no TypeScript declarations.
@@ -30,7 +30,7 @@ test('project publication, domain DNS/TLS, app cookies and cleanup work across t
   t.after(() => f.close());
   const routing = new DatabaseSync(':memory:');
   t.after(() => routing.close());
-  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql']) {
+  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql']) {
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${path}`, import.meta.url), 'utf8'));
   }
   for (const path of ['001_preview_routes.sql', '002_project_endpoints.sql']) {
@@ -113,13 +113,20 @@ test('project publication, domain DNS/TLS, app cookies and cleanup work across t
   assert.equal((await handleApplicationGateway(new Request('https://site.example.com'), env)).status, 404);
 });
 
-test('local API entrypoint publishes and activates loopback aliases with real HTTP application transport', async t => {
-  const httpFetch = globalThis.fetch;
+test('local project publication activates loopback aliases with real HTTP application transport', async t => {
   const f = await paidContainerFixture(t);
+  // The billing fixture emits production prices; local mode uses the test catalog.
+  const billingFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await billingFetch(input, init);
+    const text = await response.text();
+    const localPrice = planPrices({ LOCAL_DEV: 'true' }).builder;
+    return new Response(text.replaceAll(planPrices().builder, localPrice), { status: response.status, headers: response.headers });
+  });
   t.after(() => f.close());
   const routing = new DatabaseSync(':memory:');
   t.after(() => routing.close());
-  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql']) {
+  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql']) {
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${path}`, import.meta.url), 'utf8'));
   }
   for (const path of ['001_preview_routes.sql', '002_project_endpoints.sql']) {
@@ -145,8 +152,16 @@ test('local API entrypoint publishes and activates loopback aliases with real HT
       assert.equal(port, applicationPort);
       return { fetch(request: Request) {
         const target = new URL(request.url); target.hostname = '127.0.0.1'; target.port = String(applicationPort);
-        return httpFetch(target, { method: request.method, headers: Object.fromEntries(request.headers),
-          signal: request.signal, redirect: 'manual' });
+        return new Promise<Response>((resolve, reject) => {
+          const upstream = httpRequest(target, { method: request.method, headers: Object.fromEntries(request.headers), signal: request.signal }, response => {
+            const chunks: Buffer[] = [];
+            response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            response.on('end', () => resolve(new Response(Buffer.concat(chunks), { status: response.statusCode,
+              headers: { 'content-type': response.headers['content-type'] ?? 'application/octet-stream' } })));
+            response.on('error', reject);
+          });
+          upstream.on('error', reject); upstream.end();
+        });
       } };
     } },
     now: Date.now, deadline: (value: typeof metadata) => value.expiresAt,
@@ -168,7 +183,7 @@ test('local API entrypoint publishes and activates loopback aliases with real HT
       } };
     } },
   } as unknown as Env;
-  const api = (path: string, method = 'GET', body?: unknown, session = SESSION_ONE) => worker.fetch(new Request(`http://localhost:8899${path}`, {
+  const api = (path: string, method = 'GET', body?: unknown, session = SESSION_ONE) => handleRequest(new Request(`http://localhost:8899${path}`, {
     method, headers: { Origin: 'http://localhost:5173', Cookie: `mainbrella_session=${session}` },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), env, {} as ExecutionContext);
@@ -179,9 +194,9 @@ test('local API entrypoint publishes and activates loopback aliases with real HT
   const state = await publish.json() as any;
   assert.equal(state.hosting.localDevelopment, true);
   assert.equal(state.endpoint.url, `http://p-${id.replaceAll('-', '')}.localhost:8899/`);
-  const appRequest = (origin: string) => worker.fetch(new Request(`${origin}path?q=1`, { headers: {
+  const appRequest = (origin: string) => handleApplicationGateway(new Request(`${origin}path?q=1`, { headers: {
     authorization: 'Bearer app-secret', cookie: 'mainbrella_session=account; app_session=app',
-  } }), env, {} as ExecutionContext);
+  } }), env);
   assert.equal((await appRequest(state.endpoint.url)).status, 200);
   const added = await api(`/projects/domains?id=${id}`, 'POST', { hostname: 'app.localhost' });
   assert.equal(added.status, 201, await added.clone().text());

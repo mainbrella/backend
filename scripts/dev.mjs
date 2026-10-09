@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { LocalProxyCleanup } from './local-proxy-cleanup.mjs';
@@ -56,10 +56,24 @@ const configPaths = ['api', 'containers'].map(name => {
   writeFileSync(path, JSON.stringify(config, null, 2));
   return path;
 });
-const child = spawn(`${root}node_modules/.bin/wrangler`, [
+const removeConfigs = () => { for (const path of configPaths) { try { unlinkSync(path); } catch {} } };
+process.on('exit', removeConfigs);
+const localStatePath = resolve(root, persistPath ?? '.wrangler/state');
+const wrangler = `${root}node_modules/.bin/wrangler`;
+for (const database of ['delta', 'mainbrella-preview-routes']) {
+  const migration = spawnSync(wrangler, [
+    'd1', 'migrations', 'apply', database, '--local', '--config', configPaths[0], '--persist-to', localStatePath,
+  ], { cwd: root, stdio: ['ignore', 'inherit', 'inherit'] });
+  if (migration.error) console.error(`Could not apply local ${database} migrations: ${migration.error.message}`);
+  if (migration.status !== 0) {
+    process.exitCode = migration.status ?? 1;
+    removeConfigs();
+    process.exit();
+  }
+}
+const child = spawn(wrangler, [
   'dev', '--local', ...configPaths.flatMap(path => ['--config', path]), ...args,
 ], { cwd: root, stdio: 'inherit' });
-process.on('exit', () => { for (const path of configPaths) { try { unlinkSync(path); } catch {} } });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { child.kill(signal); });
 const timer = setInterval(() => { void sweep(); }, 15_000);
 async function finish(code) {

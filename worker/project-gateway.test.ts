@@ -194,7 +194,7 @@ test('local aliases require a local provider, active claim and the configured HT
   for (const url of ['http://app.localhost:8787', 'https://app.localhost:8899', 'http://unknown.localhost:8899', 'http://app.example:8899']) {
     assert.equal((await handleApplicationGateway(new Request(url), f.env)).status, 404, url);
   }
-  assert.equal((await local('/', `p-${id.replaceAll('-', '')}`)).status, 200);
+  assert.equal((await local('/', `p-${id.replaceAll('-', '')}.localhost`)).status, 200);
   f.env.PROJECT_DOMAIN_PROVIDER = 'ingress';
   assert.equal((await local()).status, 404);
   f.env.LOCAL_DEV = 'false'; f.env.PROJECT_DOMAIN_PROVIDER = 'local';

@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { serialize } from 'node:v8';
 import { DatabaseSync } from 'node:sqlite';
 
-async function run(t, { signal, fail = false, allImages = false, portArgs = [], expectedPort = '8787' } = {}) {
+async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/.bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
@@ -36,6 +36,10 @@ else process.exit(1);
   writeFileSync(join(root, 'node_modules/.bin/wrangler'), `#!${process.execPath}
 import fs from 'node:fs';
 const args = process.argv.slice(2);
+if (args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply') {
+  fs.appendFileSync('migrations.jsonl', JSON.stringify(args) + String.fromCharCode(10));
+  process.exit(process.env.FAIL_LOCAL_MIGRATION === args[3] ? 9 : 0);
+}
 const configs = args.flatMap((v, i) => v === '--config' ? [JSON.parse(fs.readFileSync(args[i+1]))] : []);
 fs.writeFileSync('configs.json', JSON.stringify(configs));
 fs.writeFileSync('args.json', JSON.stringify(args));
@@ -44,7 +48,7 @@ console.log('fixture-ready');
 ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);" : `process.exit(${fail ? 7 : 0});`}
 `, { mode: 0o755 });
   const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), ...portArgs, '--persist-to', 'state'], {
-    cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, ...(migrationFail ? { FAIL_LOCAL_MIGRATION: migrationFail } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   let output = '';
@@ -57,9 +61,21 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
     child.once('exit', resolve);
     child.once('error', reject);
   });
-  assert.equal(code, fail ? 7 : 0, output);
+  assert.equal(code, migrationFail ? 9 : fail ? 7 : 0, output);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'docker-state.json'))), [], output);
   assert.equal(readdirSync(root).some(path => path.startsWith('.wrangler-local-')), false);
+  const migrations = readFileSync(join(root, 'migrations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(migrations.map(args => args[3]), migrationFail ? ['delta'] : ['delta', 'mainbrella-preview-routes']);
+  for (const migration of migrations) {
+    assert.equal(migration.includes('--local'), true);
+    assert.equal(migration[migration.indexOf('--config') + 1].match(/\.wrangler-local-api-\d+\.jsonc$/)?.length, 1);
+    assert.equal(migration[migration.indexOf('--persist-to') + 1], realpathSync(join(root, 'state')));
+  }
+  if (migrationFail) {
+    assert.equal(readdirSync(root).includes('args.json'), false, 'dev should not start after migration failure');
+    assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
+    return;
+  }
   const configs = JSON.parse(readFileSync(join(root, 'configs.json')));
   assert.equal(configs.every(config => config.vars.LOCAL_DEV === 'true' && !config.routes), true);
   const apiConfig = configs.find(config => config.name === 'mainbrella-api');
@@ -94,4 +110,7 @@ test('dev launcher enables every catalog image on request', { timeout: 10_000 },
 test('dev launcher passes the selected port to local project aliases in both CLI forms', { timeout: 10_000 }, async t => {
   await run(t, { portArgs: ['--port=8899'], expectedPort: '8899' });
   await run(t, { portArgs: ['--port', '8899'], expectedPort: '8899' });
+});
+test('dev launcher stops before Wrangler dev and removes temporary configs when a local migration fails', { timeout: 10_000 }, async t => {
+  await run(t, { migrationFail: 'delta' });
 });

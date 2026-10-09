@@ -31,7 +31,7 @@ function database(sqlite: DatabaseSync): D1Database {
 }
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t);
-  for (const name of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
+  for (const name of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   const routing = new DatabaseSync(':memory:');
   routing.exec(readFileSync(new URL('../../preview-migrations/002_project_endpoints.sql', import.meta.url), 'utf8'));
   f.env.PREVIEW_ROUTES = database(routing);

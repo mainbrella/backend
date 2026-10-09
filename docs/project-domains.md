@@ -14,7 +14,8 @@ Endpoint action on the Projects page performs publication and domain setup.
 
 ## Local development
 
-Start the backend with `npm run dev`. The dev launcher enables local project
+Start the backend with `npm run dev`. It applies pending local account and routing
+database migrations before starting. The dev launcher enables local project
 hosting for the API process only and follows Wrangler's selected API port. The
 default project URL is `http://p-<project UUID without hyphens>.localhost:<port>`.
 Add a single-label alias such as `app.localhost` in the Projects UI to use that
@@ -104,7 +105,8 @@ Project hosting is staged disabled in both deployment configurations. An enabled
 flag describes configured support, not live qualification. Provision and verify
 the infrastructure before advertising the feature.
 
-1. Apply `migrations/016_project_domains.sql` to the account `delta` database
+1. Apply `migrations/016_project_domains.sql` and
+   `migrations/017_project_domain_provider.sql` to the account `delta` database
    through its normal migration command. Apply
    `preview-migrations/002_project_endpoints.sql` to the separate
    `mainbrella-preview-routes` database. Never apply the account schema to the
