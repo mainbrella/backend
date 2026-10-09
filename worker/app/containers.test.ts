@@ -241,3 +241,16 @@ test('container names are validated and trimmed before forwarding to the account
   assert.equal(body.name, 'My API');
   assert.ok(body.imageName);
 });
+
+
+test('production selections are strictly validated and require usage billing before forwarding', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  const call = (body: object) => handleRequest(new Request('https://api.mainbrella.com/containers', { method: 'POST',
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }, body: JSON.stringify(body) }), f.env);
+  for (const body of [{ lifecycle: 'forever' }, { startupCommand: 'echo hi' }, { lifecycle: 'production', startupCommand: 'echo hi\nexit' }]) {
+    assert.equal((await call(body)).status, 400);
+  }
+  const legacy = await call({ lifecycle: 'production' });
+  assert.equal(legacy.status, 402); assert.deepEqual(await legacy.json(), { error: 'production_requires_usage' });
+  assert.equal(f.accountCalls.length, 0);
+});

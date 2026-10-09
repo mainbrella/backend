@@ -39,7 +39,9 @@ export class UserContainer extends DurableObject {
     };
     this.webhooks.onChange = () => ctx.waitUntil(this.executions.scheduleCleanup().catch(() => { console.error('webhook_alarm_schedule_failed'); }));
     this.controller.onStarted = createdAt => this.monitor(createdAt);
+    this.controller.onReady = () => this.privateServices.restore();
     this.controller.onStopped = () => {
+      this.monitoredGeneration = undefined;
       this.previews.close();
       this.projects.close();
       for (const session of this.terminals) session.close(1000, 'Container stopped');
@@ -50,6 +52,7 @@ export class UserContainer extends DurableObject {
       if (ctx.container.running) {
         const metadata = await ctx.storage.get('builderMachine');
         await ctx.container.setInactivityTimeout(metadata?.idleTimeoutMs ?? 10 * 60_000);
+        await this.privateServices.restore();
         this.monitor(metadata?.createdAt);
       }
     });

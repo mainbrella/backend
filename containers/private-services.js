@@ -1,3 +1,4 @@
+import { validLifecycle } from './production-policy.js';
 import { MAX_PRIVATE_NETWORKS, MAX_PRIVATE_MEMBERS, PRIVATE_TIMEOUT_MS, validServiceName,
   validPrivateMember, privateTarget, privateHeaders, privateNetworkQuery } from './private-services-contract.js';
 import { validContainerId } from './container-account-core.js';
@@ -47,17 +48,17 @@ export class PrivateServicesController {
           const query = privateNetworkQuery(url.searchParams);
           if (!query) return respond({ error: 'invalid_request' }, 400);
           if (!url.search) return respond({ networks });
-          const matches = networks.filter(network => network.name.includes(query.search));
+          const matches = networks.filter(network => network.name.includes(query.search) && (!query.lifecycle || (network.lifecycle ?? 'ad_hoc') === query.lifecycle));
           const page = Math.min(query.page, Math.max(1, Math.ceil(matches.length / query.limit)));
           return respond({ networks: matches.slice((page - 1) * query.limit, page * query.limit),
             total: matches.length, totalNetworks: networks.length, page, limit: query.limit });
         }
         if (request.method === 'POST') {
           const body = await request.json();
-          if (!body || Object.keys(body).length !== 1 || !validServiceName(body.name)) return respond({ error: 'invalid_request' }, 400);
+          if (!body || Object.keys(body).some(key => !['name', 'lifecycle'].includes(key)) || !validServiceName(body.name) || (body.lifecycle !== undefined && !validLifecycle(body.lifecycle))) return respond({ error: 'invalid_request' }, 400);
           if (networks.some(network => network.name === body.name)) return respond({ error: 'network_name_conflict' }, 409);
           if (networks.length >= MAX_PRIVATE_NETWORKS) return respond({ error: 'network_limit' }, 429);
-          const network = { name: body.name, members: [] };
+          const network = { name: body.name, ...(body.lifecycle ? { lifecycle: body.lifecycle } : {}), members: [] };
           await this.ctx.storage.put(KEY, [...networks, network]);
           return respond(network, 201);
         }
@@ -85,6 +86,9 @@ export class PrivateServicesController {
       if (network.members.some(value => value.name === body.name && value.id !== body.id)) return respond({ error: 'service_name_conflict' }, 409);
       if (networks.some(value => value !== network && value.members.some(member => member.id === body.id && member.createdAt === body.createdAt))) return respond({ error: 'machine_already_attached' }, 409);
       if (!existing && network.members.length >= MAX_PRIVATE_MEMBERS) return respond({ error: 'network_member_limit' }, 429);
+      const account = await this.ctx.storage.get('containerAccount');
+      const production = Boolean(account?.production?.[body.id]);
+      if (((network.lifecycle ?? 'ad_hoc') === 'production') !== production) return respond({ error: 'network_lifecycle_conflict' }, 409);
       if (!await this.live(userId, body)) return respond({ error: 'container_not_running' }, 409);
       const configured = await this.machine(userId, body).fetch(this.internal('configure', userId, body, 'PUT', { network: networkName, ...body }));
       if (!configured.ok) return configured;

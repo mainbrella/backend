@@ -27,8 +27,10 @@ limits remain abuse safeguards.
 The subscription billing period owns compute usage and the spending cap. Starts
 and workspace capture limits still use UTC calendar months. Usage sessions can
 cross a calendar-month boundary, but still end at their session, idle, spend or
-paid-access deadline. Always-on deployment, recovery and production availability
-are separate work. No persistent-disk or uptime guarantee is introduced here.
+paid-access deadline. Production services use renewable five-minute reservations instead of session
+deadlines, with an account heartbeat independent of browser activity. Desired
+state survives cap, payment and provider stops; recovery requires verified paid
+access and available spending capacity. See [production.md](production.md). No persistent-disk or uptime guarantee is introduced here.
 
 ## Stripe setup and rollout
 

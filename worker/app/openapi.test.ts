@@ -289,3 +289,14 @@ test("signup schemas document welcome email behavior and public authentication",
     assert.deepEqual(paths[path].post.security, []);
   }
 });
+
+
+test('production schemas document lifecycle, startup commands, stopped services and network filtering', async () => {
+  const document = await (await handleRequest(new Request('https://api.mainbrella.com/openapi.json'), {} as Env)).json() as any;
+  const body = document.paths['/containers'].post.requestBody.content['application/json'].schema;
+  assert.deepEqual(body.properties.lifecycle.enum, ['ad_hoc', 'production']);
+  assert.equal(body.properties.startupCommand.maxLength, 4096);
+  const network = document.paths['/private-services/networks'];
+  assert.ok(network.get.parameters.some((parameter: any) => parameter.name === 'lifecycle'));
+  assert.deepEqual(network.post.requestBody.content['application/json'].schema.properties.lifecycle.enum, ['ad_hoc', 'production']);
+});

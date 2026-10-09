@@ -5,7 +5,8 @@ import { MAX_PRIVATE_NETWORKS, MAX_PRIVATE_MEMBERS } from '../../containers/priv
 const name = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
 const member = z.object({ id: z.string(), createdAt: z.iso.datetime(), name,
   port: z.number().int().min(1024).max(65535).optional() }).strict().openapi('PrivateServiceMember');
-const network = z.object({ name, members: z.array(member).max(MAX_PRIVATE_MEMBERS) }).openapi('PrivateServiceNetwork');
+const lifecycle = z.enum(['ad_hoc', 'production']);
+const network = z.object({ name, lifecycle: lifecycle.optional(), members: z.array(member).max(MAX_PRIVATE_MEMBERS) }).openapi('PrivateServiceNetwork');
 const query = z.object({ network: name });
 const headers = z.object({ Origin: z.string().optional() });
 const description = 'Private Services HTTP prototype. Account-owned registry; explicit machine membership and exact running generations. Plain HTTP on port 80 to http://NAME.internal routes to a registered application port. No arbitrary TCP, database protocol, private IP, or HTTPS support. Internet policy and machine lifecycles are independent. Public previews remain opt-in. Requests and responses are bounded to 1 MiB; requests time out after 10 seconds. WebSockets and CONNECT are rejected. Application redirects are returned without being followed. Account identity is supplied by the platform; guests need no Mainbrella API key. Cookie mutations require a trusted Origin.';
@@ -15,6 +16,7 @@ export function registerPrivateServiceRoutes(api: OpenAPIApi, handler: LegacyHan
     operationId: 'listPrivateServiceNetworks', tags: ['Private Services'], summary: 'List owned networks and registered machine generations',
     security: containerSecurity, description: `${description} Registry entries may outlive stopped generations; stale entries cannot route. With search, page, or limit, returns pagination metadata; page defaults to 1 and limit to 10. Pages beyond the last page clamp to the last page. Without query parameters returns the complete registry for compatibility. Listing remains available when issuance is disabled and does not start machines.`,
     request: { headers, query: z.object({
+      lifecycle: lifecycle.optional().describe('Filter networks by lifecycle; omitted legacy values are ad_hoc.'),
       search: z.string().max(63).optional().describe('Case-insensitive substring of the network name.'),
       page: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
       limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -24,8 +26,8 @@ export function registerPrivateServiceRoutes(api: OpenAPIApi, handler: LegacyHan
   }, handler);
   register(api, 'post', '/private-services/networks', {
     operationId: 'createPrivateServiceNetwork', tags: ['Private Services'], summary: 'Create an account-owned Private Services network',
-    security: containerSecurity, description: `${description} Requires paid access and explicit deployment enablement. Up to ${MAX_PRIVATE_NETWORKS} networks per account. Duplicate name returns network_name_conflict; limit returns network_limit. Body limit 1024 bytes.`,
-    request: { headers, ...requestBody(z.object({ name }).strict()) }, responses: { 201: jsonResponse(network), ...errors(400, 401, 402, 403, 405, 409, 413, 429, 503) },
+    security: containerSecurity, description: `${description} Requires paid access and explicit deployment enablement. lifecycle defaults to ad_hoc. production requires usage billing; the registry is durable and members must be production services. Empty networks do not allocate or bill compute. Up to ${MAX_PRIVATE_NETWORKS} networks per account. Duplicate name returns network_name_conflict; limit returns network_limit. Body limit 1024 bytes.`,
+    request: { headers, ...requestBody(z.object({ name, lifecycle: lifecycle.optional() }).strict()) }, responses: { 201: jsonResponse(network), ...errors(400, 401, 402, 403, 405, 409, 413, 429, 503) },
   }, handler);
   register(api, 'delete', '/private-services/networks', {
     operationId: 'deletePrivateServiceNetwork', tags: ['Private Services'], summary: 'Delete an empty owned network',
@@ -34,7 +36,7 @@ export function registerPrivateServiceRoutes(api: OpenAPIApi, handler: LegacyHan
   }, handler);
   register(api, 'put', '/private-services/members', {
     operationId: 'attachPrivateServiceMember', tags: ['Private Services'], summary: 'Attach a running generation and optionally register an HTTP service port',
-    security: containerSecurity, description: `${description} Requires paid access and deployment enablement. One network per machine generation. Upsert by machine ID; service names are unique within each network. Omit port for a caller-only machine. Conflicts return service_name_conflict or machine_already_attached. Stopped or replaced generations return container_not_running. Body limit 1024 bytes.`,
+    security: containerSecurity, description: `${description} Requires paid access and deployment enablement. One network per machine generation. Members must match the network lifecycle; mismatches return 409 network_lifecycle_conflict. Upsert by machine ID; service names are unique within each network. Omit port for a caller-only machine. Conflicts return service_name_conflict or machine_already_attached. Stopped or replaced generations return container_not_running. Body limit 1024 bytes.`,
     request: { query, headers, ...requestBody(member) }, responses: { 200: jsonResponse(member.extend({ network: name })), ...errors(400, 401, 402, 403, 404, 405, 409, 413, 429, 503) },
   }, handler);
   register(api, 'delete', '/private-services/members', {

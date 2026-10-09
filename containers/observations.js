@@ -2,7 +2,7 @@ export const OBSERVATION_RETENTION_MS = 7 * 86400_000;
 export const MAX_LIFECYCLE_EVENTS = 256;
 export const MAX_EVENT_PAGE = 100;
 const KEY = 'workloadLifecycle';
-const publicEvent = ({ telemetryId, expiresAt, ...event }) => event;
+const publicEvent = ({ telemetryId, expiresAt, incarnation, ...event }) => event;
 
 // A bounded journal belongs to one account-owned machine slot. Sequence numbers
 // survive pruning/recreation, while every event retains its exact generation.
@@ -24,11 +24,11 @@ export class WorkloadObservations {
   async append(metadata, type, reason) {
     return this.serialized(async () => {
       const journal = await this.journal(), createdAt = new Date(metadata.createdAt).toISOString();
-      if (journal.events.some(event => event.createdAt === createdAt && event.type === type)) return;
+      if (journal.events.some(event => event.createdAt === createdAt && event.type === type && (metadata.lifecycle !== 'production' || event.incarnation === metadata.telemetryId))) return;
       const now = this.controller.now();
       const event = { id: crypto.randomUUID(), sequence: ++journal.sequence, createdAt, type,
         occurredAt: new Date(now).toISOString(), retainUntil: now + OBSERVATION_RETENTION_MS,
-        size: metadata.size ?? 'lite', ...(reason ? { reason } : {}),
+        size: metadata.size ?? 'lite', ...(metadata.lifecycle === 'production' ? { incarnation: metadata.telemetryId } : {}), ...(reason ? { reason } : {}),
         ...(type === 'starting' ? { telemetryId: metadata.telemetryId, expiresAt: metadata.expiresAt } : {}) };
       journal.events = [...journal.events.filter(entry => entry.retainUntil > now), event].slice(-MAX_LIFECYCLE_EVENTS);
       await this.controller.ctx.storage.put(KEY, journal);
@@ -45,10 +45,12 @@ export class WorkloadObservations {
     const events = journal.events.filter(event => event.createdAt === createdAt && event.retainUntil > now);
     const metadata = await this.controller.ctx.storage.get('builderMachine');
     const matching = metadata && new Date(metadata.createdAt).toISOString() === createdAt
-      && Math.max(metadata.createdAt, metadata.computeStoppedAt ?? metadata.createdAt) > now - OBSERVATION_RETENTION_MS;
+      && (metadata.lifecycle === 'production' && this.controller.container.running || Math.max(metadata.createdAt, metadata.computeStoppedAt ?? metadata.createdAt) > now - OBSERVATION_RETENTION_MS);
     if (!events.length && !matching) return null;
-    const starting = events.find(event => event.type === 'starting');
-    const stopped = events.find(event => event.type === 'stopped');
+    const incarnation = matching ? metadata.telemetryId : events.findLast(event => event.type === 'starting')?.incarnation;
+    const currentEvents = events.filter(event => !event.incarnation || event.incarnation === incarnation);
+    const starting = currentEvents.findLast(event => event.type === 'starting');
+    const stopped = currentEvents.findLast(event => event.type === 'stopped');
     return { createdAt, telemetryId: starting?.telemetryId ?? (matching ? metadata.telemetryId : undefined),
       endsAt: Math.min(now, stopped ? Date.parse(stopped.occurredAt) : Infinity,
         matching ? metadata.computeStoppedAt ?? metadata.expiresAt : starting?.expiresAt ?? now) };
@@ -67,7 +69,7 @@ export class WorkloadObservations {
     const journal = await this.journal();
     if (Number(cursor) > journal.sequence) return this.controller.respond({ error: 'invalid_cursor' }, 400);
     const generationEvents = journal.events.filter(event => event.createdAt === createdAt);
-    if (!generationEvents.length) return this.controller.respond({ error: 'generation_not_found' }, 404);
+    if (!generationEvents.length && !identity) return this.controller.respond({ error: 'generation_not_found' }, 404);
     const remaining = generationEvents.filter(event => event.sequence > Number(cursor));
     const events = remaining.slice(0, Number(limit));
     return this.controller.respond({ events: events.map(publicEvent), nextCursor: events.at(-1)?.sequence ?? Number(cursor),

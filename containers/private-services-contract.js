@@ -60,11 +60,13 @@ export async function boundedPrivateBody(body, limit = MAX_PRIVATE_BYTES, signal
 
 // No query preserves the original complete-registry response for existing clients.
 export function privateNetworkQuery(params) {
-  if ([...params.keys()].some(key => !['search', 'page', 'limit'].includes(key))
+  if ([...params.keys()].some(key => !['search', 'page', 'limit', 'lifecycle'].includes(key))
     || [...new Set(params.keys())].some(key => params.getAll(key).length !== 1)) return null;
   const search = (params.get('search') ?? '').trim();
   const page = params.get('page') ?? '1', limit = params.get('limit') ?? '10';
+  const lifecycle = params.get('lifecycle');
+  if (lifecycle !== null && !['ad_hoc', 'production'].includes(lifecycle)) return null;
   if (search.length > 63 || !/^[1-9][0-9]*$/.test(page) || !/^[1-9][0-9]*$/.test(limit)
     || !Number.isSafeInteger(Number(page)) || Number(limit) > 100) return null;
-  return { search: search.toLowerCase(), page: Number(page), limit: Number(limit) };
+  return { ...(lifecycle ? { lifecycle } : {}), search: search.toLowerCase(), page: Number(page), limit: Number(limit) };
 }

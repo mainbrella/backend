@@ -140,3 +140,16 @@ test('HTTP target validation, payload limits and redirect behavior', async () =>
   destination.application = async () => new Response('a'.repeat(1024 * 1024 + 1));
   assert.equal((await f.call()).status, 413);
 });
+
+
+test('production networks reject ad hoc members and lifecycle filtering treats legacy networks as ad hoc', async () => {
+  const f = fixture();
+  assert.equal((await f.manage('networks', 'POST', { name: 'prod', lifecycle: 'production' })).status, 201);
+  assert.equal((await f.attach('small', 'api', 8080, 'prod')).status, 409);
+  await f.accountStorage.put('containerAccount', { production: { small: {} } });
+  assert.equal((await f.attach('small', 'api', 8080, 'prod')).status, 200);
+  assert.equal((await f.manage('networks', 'POST', { name: 'temporary' })).status, 201);
+  assert.equal((await f.attach('small', 'api', 8080, 'temporary')).status, 409);
+  const list = await f.account.fetch(new Request('https://internal/private-services/networks?lifecycle=ad_hoc', { headers: { 'x-mainbrella-user': 'alice' } }));
+  assert.deepEqual((await list.json()).networks.map(network => network.name), ['temporary']);
+});

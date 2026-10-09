@@ -39,6 +39,11 @@ export async function relayPrivateService(request, env, props) {
 
 export class ContainerPrivateServices {
   constructor(controller, entrypoint) { this.controller = controller; this.entrypoint = entrypoint; }
+  async restore() {
+    const c = this.controller, registration = await c.ctx.storage.get(KEY), owner = await c.ctx.storage.get('activityOwner');
+    if (!registration || !owner || !await this.metadata(registration.createdAt)) return;
+    await c.container.interceptOutboundHttp('*.internal', this.entrypoint({ userId: owner.userId, id: owner.containerId, createdAt: registration.createdAt }));
+  }
   async metadata(createdAt) {
     const c = this.controller, metadata = await c.ctx.storage.get('builderMachine');
     return metadata && c.container.running && await c.hasPaidAccess() && c.now() < c.deadline(metadata)

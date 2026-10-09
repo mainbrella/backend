@@ -1,3 +1,4 @@
+import { PRODUCTION_INACTIVITY_MS, productionEntrypoint, validLifecycle, validStartupCommand } from './production-policy.js';
 import { PLAN_LIMITS, NO_PLAN_LIMITS, requestEntitlement, validEntitlement, machineSize } from "./plan-policy.js";
 import { IMAGE_CATALOG, availableCatalog } from './image-catalog.js';
 import { WorkloadObservations } from './observations.js';
@@ -40,7 +41,7 @@ export class UserContainerController {
     if(path==='/workspaces/snapshot-v1') return captureWorkspace(this,request);
     return this.serialized(async () => {
       const url = new URL(request.url);
-      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1 });
+      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, production: 1 });
       if(path==='/workspaces/restore-preflight-v1' && request.method==='POST') {
         let body;try{body=await request.json();}catch{return this.respond({error:'invalid_request'},400);}
         if(!body || body.expiresAt<=this.now())return this.respond({error:'workspace_expired'},410);
@@ -48,16 +49,23 @@ export class UserContainerController {
         return this.respond({compatible:true});
       }
       if (url.pathname.startsWith('/observations/')) return this.observations.fetch(request);
+      const productionStart = url.pathname === '/container/production-v1';
       const networkStart = url.pathname === '/container/network-v1';
       const workspaceStart = url.pathname === '/container/workspace-v1';
-      if (url.pathname !== '/container' && !networkStart && !workspaceStart) return this.respond({ error: "Not found" }, 404);
-      if(workspaceStart && request.method!=='POST')return this.respond({error:'method_not_allowed'},405);
+      if (url.pathname !== '/container' && !networkStart && !workspaceStart && !productionStart) return this.respond({ error: "Not found" }, 404);
+      if((workspaceStart || productionStart) && request.method!=='POST')return this.respond({error:'method_not_allowed'},405);
       if (networkStart && request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       const rawReservation = request.headers.get('x-mainbrella-reservation');
       const reservationId = rawReservation === null ? null : Number(rawReservation);
       if (reservationId !== null && (!Number.isSafeInteger(reservationId) || reservationId < 1)) return this.respond({ error: 'invalid_reservation' }, 400);
       const fence = (await this.ctx.storage.get('machineReservation')) ?? { accepted: 0, canceled: 0 };
-      if (request.method === 'POST' && reservationId !== null) {
+      const recovering = productionStart && request.headers.get('x-mainbrella-recover') === '1';
+      if (recovering) {
+        if (reservationId === null || reservationId < fence.accepted || reservationId <= fence.canceled) return this.respond({ error: 'container_start_canceled' }, 409);
+        fence.accepted = reservationId;
+        await this.ctx.storage.put('machineReservation', fence);
+      }
+      if (request.method === 'POST' && reservationId !== null && !recovering) {
         if (reservationId <= Math.max(fence.accepted, fence.canceled)) return this.respond({ error: 'container_start_canceled' }, 409);
         fence.accepted = reservationId;
         await this.ctx.storage.put('machineReservation', fence);
@@ -85,21 +93,22 @@ export class UserContainerController {
           await this.destroy("Paid subscription required");
           await this.ctx.storage.deleteAlarm();
         } else {
-          // Plan changes can shorten an existing lease, but never extend its
-          // original hard deadline. Idle activity alone renews the idle deadline.
+          // Ad hoc deadlines only shorten. Production compute deadlines renew
+          // only from the account's durable, cap-protected reservation.
           const limits = PLAN_LIMITS[entitlement.plan];
-          metadata.expiresAt = Math.min(metadata.expiresAt, metadata.createdAt + limits.maxSessionMs, entitlement.validUntil,
-            request.headers.has('x-mainbrella-compute-until') ? Number(request.headers.get('x-mainbrella-compute-until')) : Infinity);
+          const production = metadata.lifecycle === 'production' && entitlement.plan === 'usage';
+          const computeUntil = request.headers.has('x-mainbrella-compute-until') ? Number(request.headers.get('x-mainbrella-compute-until')) : metadata.expiresAt;
+          metadata.expiresAt = Math.min(production ? Infinity : metadata.expiresAt, production ? Infinity : metadata.createdAt + limits.maxSessionMs, entitlement.validUntil, computeUntil);
           const lastActivityAt = metadata.lastActivityAt ?? Math.max(metadata.createdAt,
             (metadata.idleExpiresAt ?? metadata.createdAt) - (metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs));
-          metadata.idleTimeoutMs = limits.idleTimeoutMs;
-          metadata.idleExpiresAt = Math.min(metadata.idleExpiresAt ?? lastActivityAt + limits.idleTimeoutMs,
+          metadata.idleTimeoutMs = metadata.lifecycle === 'production' ? PRODUCTION_INACTIVITY_MS : limits.idleTimeoutMs;
+          metadata.idleExpiresAt = metadata.lifecycle === 'production' ? metadata.expiresAt : Math.min(metadata.idleExpiresAt ?? lastActivityAt + limits.idleTimeoutMs,
             lastActivityAt + limits.idleTimeoutMs, metadata.expiresAt);
           const before = await this.ctx.storage.get(METADATA_KEY);
           if (JSON.stringify(before) !== JSON.stringify(metadata)) {
             await this.ctx.storage.put(METADATA_KEY, metadata);
             await this.ctx.storage.setAlarm(this.deadline(metadata));
-            await this.container.setInactivityTimeout(limits.idleTimeoutMs);
+            await this.container.setInactivityTimeout(metadata.idleTimeoutMs);
           }
         }
         if (metadata && this.container.running && this.now() >= this.deadline(metadata)) {
@@ -120,7 +129,8 @@ export class UserContainerController {
           if(workspaceStart && (!validWorkspaceId(selection?.workspaceId) || !selection?.containerSnapshot?.id))return this.respond({error:'invalid_request'},400);
           if(!workspaceStart && selection?.containerSnapshot)return this.respond({error:'invalid_request'},400);
           if (networkStart && selection?.internet !== false) return this.respond({ error: 'invalid_internet_policy' }, 400);
-          const result = await this.start(selection);
+          if (productionStart && selection?.lifecycle !== 'production') return this.respond({ error: 'invalid_lifecycle' }, 400);
+          const result = await this.start(selection, recovering);
           return result instanceof Response ? result : this.respond(result);
         } catch (error) {
           if(workspaceStart){console.error('workspace_restore_failed');return this.respond({error:'workspace_restore_failed'},409);}
@@ -145,6 +155,7 @@ export class UserContainerController {
     const usage = (await this.ctx.storage.get(USAGE_KEY)) ?? {};
     const metadata = await this.ctx.storage.get(METADATA_KEY);
     if (metadata && !this.container.running && metadata.computeStoppedAt === undefined) {
+      this.onStopped?.();
       await this.recordStopped(metadata, 'runtime_stopped');
     }
     const containers = this.container.running && metadata
@@ -156,6 +167,7 @@ export class UserContainerController {
           computeUnits: machineSize(metadata.size ?? 'lite').computeUnits,
           status: "running",
           internet: metadata.internet ?? true,
+          lifecycle: metadata.lifecycle ?? 'ad_hoc',
           ...(metadata.imageName ? { imageName: metadata.imageName } : {}),
           ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
           ...(metadata.catalogId ? { catalogId: metadata.catalogId } : {}),
@@ -167,7 +179,7 @@ export class UserContainerController {
       : [];
     return {
       containers,
-      lastRun: metadata ? { reservationId: metadata.reservationId, stoppedAt: metadata.computeStoppedAt } : null,
+      lastRun: metadata ? { lifecycle: metadata.lifecycle ?? 'ad_hoc', reservationId: metadata.reservationId, stoppedAt: metadata.computeStoppedAt } : null,
       imageCatalog: availableCatalog(this.container.images),
       plan: this.entitlement?.plan ?? null,
       active: this.entitlement?.active ?? false,
@@ -181,7 +193,7 @@ export class UserContainerController {
     // derived from creation time, never from the current poll or restart time.
     const idleExpiresAt = metadata.idleExpiresAt
       ?? metadata.createdAt + (metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs);
-    return Math.min(idleExpiresAt, metadata.expiresAt);
+    return metadata.lifecycle === 'production' ? metadata.expiresAt : Math.min(idleExpiresAt, metadata.expiresAt);
   }
 
   async getTerminalMetadata(createdAt, expiresAt) {
@@ -253,18 +265,22 @@ export class UserContainerController {
     return validEntitlement(entitlement, this.now());
   }
 
-  async start(selection = {}) {
+  async start(selection = {}, recovering = false) {
     if (!validEntitlement(this.entitlement, this.now())) return this.respond({ error: "subscription_required" }, 402);
     if (this.container.running) {
       return this.respond({ error: "container_limit_exceeded" }, 409);
     }
 
+    if (selection.lifecycle !== undefined && !validLifecycle(selection.lifecycle)) return this.respond({ error: 'invalid_lifecycle' }, 400);
+    if (selection.lifecycle === 'production' && this.entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
+    if (selection.startupCommand !== undefined && (!validStartupCommand(selection.startupCommand) || selection.lifecycle !== 'production')) return this.respond({ error: 'invalid_startup_command' }, 400);
     const size = machineSize(selection.size ?? 'lite');
     if (!size) return this.respond({ error: 'invalid_size' }, 400);
     if (selection.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
     if (selection.computeExpiresAt !== undefined && (!Number.isSafeInteger(selection.computeExpiresAt) || selection.computeExpiresAt <= this.now())) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
     const imageKey = selection.imageKey || "terminal";
-    const image = Object.hasOwn(this.container.images, imageKey) ? this.container.images[imageKey] : undefined;
+    const recoveryMetadata = recovering ? await this.ctx.storage.get(METADATA_KEY) : null;
+    let image = recoveryMetadata?.imageDigest ?? (Object.hasOwn(this.container.images, imageKey) ? this.container.images[imageKey] : undefined);
     if (!image) return this.respond({ error: "image_not_available" }, 409);
     if(selection.workspaceId && (!Number.isSafeInteger(selection.workspaceExpiresAt) || selection.workspaceExpiresAt<=this.now()))return this.respond({error:'workspace_expired'},410);
     if(selection.workspaceId && selection.imageDigest!==image)return this.respond({error:'workspace_image_incompatible'},409);
@@ -283,12 +299,16 @@ export class UserContainerController {
     const catalogImage = IMAGE_CATALOG.find(entry => entry.key === imageKey);
     // A slot generation remains unique even across a same-millisecond recreate
     // or a backward wall-clock correction, so old access cannot target a new VM.
-    const createdAt = Math.max(now, (previousMetadata?.createdAt ?? -1) + 1);
+    if (recovering && (!previousMetadata || previousMetadata.lifecycle !== 'production')) return this.respond({ error: 'container_not_running' }, 409);
+    if (recovering) image = previousMetadata.imageDigest;
+    const createdAt = recovering ? previousMetadata.createdAt : Math.max(now, (previousMetadata?.createdAt ?? -1) + 1);
     const metadata = {
       createdAt,
       telemetryId: crypto.randomUUID(),
       size: size.id,
       internet: selection.internet ?? true,
+      lifecycle: selection.lifecycle ?? 'ad_hoc',
+      ...(selection.lifecycle === 'production' ? { startupCommand: selection.startupCommand ?? '' } : {}),
       reservationId: (await this.ctx.storage.get('machineReservation'))?.accepted,
       imageDigest: image,
       imageKey,
@@ -296,9 +316,9 @@ export class UserContainerController {
       ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,
-      expiresAt: Math.min(now + limits.maxSessionMs, this.entitlement.validUntil, selection.computeExpiresAt ?? Infinity),
+      expiresAt: Math.min(selection.lifecycle === 'production' ? Infinity : now + limits.maxSessionMs, this.entitlement.validUntil, selection.computeExpiresAt ?? Infinity),
       idleExpiresAt: Math.min(now + limits.idleTimeoutMs, this.entitlement.validUntil),
-      idleTimeoutMs: limits.idleTimeoutMs,
+      idleTimeoutMs: selection.lifecycle === 'production' ? PRODUCTION_INACTIVITY_MS : limits.idleTimeoutMs,
     };
     await this.ctx.storage.put(METADATA_KEY, metadata);
     await this.observations.append(metadata, 'starting');
@@ -312,11 +332,11 @@ export class UserContainerController {
       this.container.start({
         ...(selection.workspaceId ? {containerSnapshot:{id:selection.containerSnapshot.id}} : {image}),
         instance: size.instance,
-        entrypoint: ["sleep", "infinity"],
+        entrypoint: metadata.lifecycle === 'production' ? productionEntrypoint(metadata.startupCommand) : ['sleep', 'infinity'],
         enableInternet: metadata.internet,
         labels: { mb_generation: metadata.telemetryId },
       });
-      this.onStarted?.(metadata.createdAt);
+      await this.onStarted?.(metadata.createdAt);
       await this.container.setInactivityTimeout(metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs);
       let readinessTimer;
       let output;
@@ -342,6 +362,7 @@ export class UserContainerController {
       if (output.exitCode !== 0) {
         throw new Error(`Machine readiness check failed (exit code ${output.exitCode})`);
       }
+      await this.onReady?.();
       await this.observations.append(metadata, 'started');
       return this.status();
     } catch (error) {

@@ -59,7 +59,7 @@ function fixture(initialTime = Date.UTC(2026, 9, 5, 12), timers = globalThis) {
 test('network feature discovery is inert and malformed internet policies never launch', async () => {
   const f = fixture();
   const features = await f.controller.fetch(new Request('https://internal/features'));
-  assert.deepEqual(await features.json(), { protocol: 1, internetControl: true, workspaceSnapshots: 1 });
+  assert.deepEqual(await features.json(), { protocol: 1, internetControl: true, workspaceSnapshots: 1, production: 1 });
   assert.equal(f.ctx.storage.values.size, 0); assert.equal(f.ctx.container.starts, 0);
   for (const internet of ['false', null, 0, {}, []]) {
     const response = await f.controller.fetch(new Request('https://internal/container', { method: 'POST',

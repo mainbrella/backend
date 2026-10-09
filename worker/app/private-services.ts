@@ -1,3 +1,4 @@
+import { validLifecycle } from '../../containers/production-policy.js';
 import { authCorsHeaders, authJson } from './auth-core';
 import { containerUser } from './container-auth';
 import { runningContainer, containerError } from '../lib/container-service';
@@ -41,9 +42,13 @@ export async function handlePrivateServicesRequest(request: Request, env: Env): 
           if (!running.container || running.container.createdAt !== body.createdAt) return authJson({ error: 'container_not_running' }, 409, cors);
         }
       } else {
-        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['name', 'lifecycle'].includes(key))
           || !validServiceName((body as { name?: unknown }).name)) return authJson({ error: 'invalid_request' }, 400, cors);
-        if (!(await resolveEntitlement(env, user.id)).active) return authJson({ error: 'subscription_required' }, 402, cors);
+        const lifecycle = (body as { lifecycle?: unknown }).lifecycle;
+        if (lifecycle !== undefined && !validLifecycle(lifecycle)) return authJson({ error: 'invalid_lifecycle' }, 400, cors);
+        const entitlement = await resolveEntitlement(env, user.id);
+        if (lifecycle === 'production' && entitlement.plan !== 'usage') return authJson({ error: 'production_requires_usage' }, 402, cors);
+        if (!entitlement.active) return authJson({ error: 'subscription_required' }, 402, cors);
       }
     }
     const target = new URL(`https://internal${url.pathname}`);

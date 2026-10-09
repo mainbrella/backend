@@ -21,12 +21,12 @@ class Storage {
   async setAlarm(at) { this.alarmAt = at; }
   async deleteAlarm() { this.alarmAt = null; }
 }
-function fixture(initialPlan = 'builder') {
+function fixture(initialPlan = 'builder', refresh = false) {
   let now = Date.UTC(2026, 9, 5, 12);
   let plan = initialPlan;
   const invoices = [];
   const invoiceUsage = async entry => { invoices.push(structuredClone(entry)); return 'ii_usage'; };
-  const periodStart = Date.UTC(2026, 9, 5, 12);
+  let periodStart = Date.UTC(2026, 9, 5, 12);
   let paid = true;
   let validUntil = now + 31 * 86400000;
   const machines = new Map();
@@ -46,7 +46,8 @@ function fixture(initialPlan = 'builder') {
     }
     return machines.get(key);
   };
-  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage);
+  const refreshEntitlement = refresh ? async () => ({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } }) : undefined;
+  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement);
   const request = (method = 'GET', id, overrides = {}, body) => {
     const url = new URL('https://internal/containers');
     if (id) url.searchParams.set('id', id);
@@ -62,8 +63,8 @@ function fixture(initialPlan = 'builder') {
     return { status: response.status, data: await response.json() };
   };
   return { ctx, machines, invoices, billingRequest, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
-    setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, now: () => now,
-    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage); }, alarm: () => account.alarm() };
+    setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, setPeriodStart(value) { periodStart = value; }, now: () => now,
+    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement); }, alarm: () => account.alarm() };
 }
 
 test('internet-off creation is immutable, idempotent and propagates the provider switch through the trusted runtime', async () => {
@@ -819,4 +820,136 @@ test('usage periods can cross a UTC month boundary, and caps cannot drop below r
   assert.equal(reduced.status, 409); assert.equal(reduced.data.error, 'spend_limit_below_committed_usage');
   await f.read('DELETE', 'small');
   assert.equal((await f.billingRequest({ spendLimitCents: 500 })).status, 200);
+});
+
+
+test('production ignores idle and session limits while reserving only renewable runtime', async () => {
+  const f = fixture('usage');
+  const first = await f.read('POST', undefined, {}, { lifecycle: 'production', name: 'api', size: 'small', startupCommand: 'echo ready' });
+  assert.equal(first.status, 200);
+  const generation = first.data.containers[0].createdAt;
+  const machine = f.machineFor('owner', 'small');
+  assert.equal(machine.ctx.container.startOptions.entrypoint.at(-2), 'echo ready');
+  assert.ok(first.data.billing.committedCents <= 500);
+  // Run each account heartbeat before its current compute lease expires.
+  for (let minutes = 0; minutes < 25 * 60; minutes += 4) {
+    f.setTime(f.now() + 4 * 60_000);
+    await f.alarm();
+    await machine.controller.alarm();
+  }
+  const current = await f.read();
+  assert.equal(current.data.containers[0].createdAt, generation);
+  assert.equal(current.data.containers[0].lifecycle, 'production');
+  assert.equal(machine.ctx.container.starts, 1);
+  assert.equal(current.data.usage.starts, 1);
+  assert.ok(current.data.billing.computeUnitHours >= 150);
+});
+
+test('multiple production sizes share the cap and explicit stop cannot resurrect', async () => {
+  const f = fixture('usage');
+  assert.equal((await f.read('POST', undefined, {}, { lifecycle: 'production', size: 'small' })).status, 200);
+  const second = await f.read('POST', undefined, {}, { lifecycle: 'production', size: 'medium' });
+  assert.equal(second.status, 200);
+  assert.equal(second.data.containers.length, 2);
+  await f.read('DELETE', 'small');
+  await f.alarm();
+  assert.equal(f.machineFor('owner', 'small').ctx.container.running, false);
+  assert.equal((await f.ctx.storage.get('containerAccount')).production.small, undefined);
+  assert.equal((await f.read()).data.containers.length, 1);
+});
+
+test('production recovers the same service identity and pinned image without billing stopped time', async () => {
+  const f = fixture('usage');
+  const first = await f.read('POST', undefined, {}, { lifecycle: 'production', name: 'api' });
+  const machine = f.machineFor('owner', 'small'), generation = first.data.containers[0].createdAt;
+  f.setTime(f.now() + 60_000);
+  machine.ctx.container.running = false;
+  await machine.controller.observePlatformStop(Date.parse(generation));
+  machine.ctx.container.images.terminal = 'registry.test/new-image';
+  f.setTime(f.now() + 60_000);
+  f.restart();
+  const recovered = await f.read();
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.data.containers[0].createdAt, generation);
+  assert.equal(recovered.data.containers[0].name, 'api');
+  assert.equal(machine.ctx.container.startOptions.image, 'registry.test/image');
+  assert.equal(machine.ctx.container.starts, 2);
+  assert.equal(recovered.data.usage.starts, 1);
+  assert.ok(Math.abs(recovered.data.billing.computeUnitHours - 1 / 60) < 1e-8);
+});
+
+test('production stops at the cap and resumes in a new verified billing period', async () => {
+  const f = fixture('usage', true);
+  const first = await f.read('POST', undefined, {}, { lifecycle: 'production' });
+  let state = await f.ctx.storage.get('containerAccount');
+  Object.values(state.billingPeriods)[0].unitMs = 250 * 3600000;
+  await f.ctx.storage.put('containerAccount', state);
+  f.setTime(f.now() + 6 * 60_000);
+  const capped = await f.read();
+  assert.equal(capped.status, 200);
+  assert.equal(capped.data.containers[0].status, 'stopped');
+  assert.equal(capped.data.containers[0].stopReason, 'spend_limit_reached');
+  assert.equal(f.machineFor('owner', 'small').ctx.container.running, false);
+  const nextPeriod = f.now() + 31 * 86400000;
+  f.setTime(nextPeriod); f.setPeriodStart(nextPeriod); f.setValidUntil(nextPeriod + 31 * 86400000);
+  await f.alarm();
+  const renewed = await f.read();
+  assert.equal(renewed.data.containers[0].status, 'running');
+  assert.equal(renewed.data.containers[0].createdAt, first.data.containers[0].createdAt);
+  assert.equal(renewed.data.billing.computeUnitHours, 0);
+});
+
+test('production creation validates lifecycle and runtime support before reserving a start', async () => {
+  const legacy = fixture();
+  assert.equal((await legacy.read('POST', undefined, {}, { lifecycle: 'production' })).status, 402);
+  const f = fixture('usage'), machine = f.machineFor('owner', 'small'), original = machine.fetch;
+  machine.fetch = request => new URL(request.url).pathname === '/features' ? Promise.resolve(Response.json({ protocol: 1, internetControl: true })) : original(request);
+  assert.equal((await f.read('POST', undefined, {}, { lifecycle: 'production' })).data.error, 'production_unavailable');
+  assert.equal((await f.read()).data.usage.starts, 0);
+  machine.fetch = original;
+  assert.equal((await f.read('POST', undefined, {}, { lifecycle: 'forever' })).status, 400);
+  assert.equal((await f.read('POST', undefined, {}, { startupCommand: 'echo hi' })).status, 400);
+  const headers = { 'Idempotency-Key': 'production-api' };
+  assert.equal((await f.read('POST', undefined, headers, { lifecycle: 'production', startupCommand: 'echo hi' })).status, 200);
+  assert.equal((await f.read('POST', undefined, headers, { lifecycle: 'production', startupCommand: 'echo changed' })).status, 409);
+});
+
+
+test('production payment revocation stops compute and later paid access recovers; deletion skips recovery', async () => {
+  const f = fixture('usage');
+  const first = await f.read('POST', undefined, { 'Idempotency-Key': 'stable-service' }, { lifecycle: 'production', name: 'api' });
+  const machine = f.machineFor('owner', 'small');
+  f.setTime(f.now() + 60_000); f.setPaid(false);
+  const revoked = await f.read();
+  assert.equal(revoked.data.containers[0].status, 'stopped');
+  assert.equal(machine.ctx.container.running, false);
+  f.setTime(f.now() + 60_000); f.setPaid(true);
+  const recovered = await f.read();
+  assert.equal(recovered.data.containers[0].status, 'running');
+  assert.equal(recovered.data.containers[0].name, 'api');
+  assert.equal(recovered.data.containers[0].createdAt, first.data.containers[0].createdAt);
+  const replay = await f.read('POST', undefined, { 'Idempotency-Key': 'stable-service' }, { lifecycle: 'production', name: 'api' });
+  assert.equal(replay.status, 200); assert.equal(replay.data.creation.id, first.data.creation.id);
+  machine.ctx.container.running = false;
+  const starts = machine.ctx.container.starts;
+  await f.read('DELETE', 'small');
+  assert.equal(machine.ctx.container.starts, starts);
+  await f.alarm(); assert.equal(machine.ctx.container.running, false);
+});
+
+
+test('production retries an interrupted first boot without inheriting the previous slot generation', async () => {
+  const f = fixture('usage');
+  await f.read('POST'); await f.read('DELETE', 'small');
+  const machine = f.machineFor('owner', 'small');
+  machine.ctx.container.images = {};
+  const failed = await f.read('POST', undefined, {}, { lifecycle: 'production', name: 'api' });
+  assert.equal(failed.status, 409);
+  machine.ctx.container.images = { terminal: 'registry.test/recovered-image' };
+  f.setTime(f.now() + 100_000);
+  const recovered = await f.read();
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.data.containers[0].lifecycle, 'production');
+  assert.equal(recovered.data.containers[0].status, 'running');
+  assert.equal(machine.ctx.container.startOptions.image, 'registry.test/recovered-image');
 });
