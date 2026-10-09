@@ -13,7 +13,7 @@ export async function handleProjectsRequest(request: Request, env: Env): Promise
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
     if (request.method === "GET") {
       const { results } = await env.DB.prepare(
-        "SELECT id, name, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+        "SELECT id, name, domain, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC, id DESC",
       ).bind(user.id).all();
       return authJson({ projects: results }, 200, cors);
     }
@@ -34,17 +34,32 @@ export async function handleProjectsRequest(request: Request, env: Env): Promise
       return authJson({ error: "invalid_request" }, 400, cors);
     }
     const name = body.name.trim();
+    let domain: string | null | undefined;
+    if (body.domain !== undefined) {
+      if (body.domain === null) {
+        domain = null;
+      } else if (typeof body.domain === "string") {
+        const trimmedDomain = body.domain.trim();
+        if (trimmedDomain.length > 253) return authJson({ error: "invalid_request" }, 400, cors);
+        domain = trimmedDomain || null;
+      } else {
+        return authJson({ error: "invalid_request" }, 400, cors);
+      }
+    }
     if (request.method === "PATCH") {
-      const result = await env.DB.prepare("UPDATE projects SET name = ? WHERE id = ? AND user_id = ?")
-        .bind(name, projectId, user.id).run();
+      const result = domain === undefined
+        ? await env.DB.prepare("UPDATE projects SET name = ? WHERE id = ? AND user_id = ?")
+          .bind(name, projectId, user.id).run()
+        : await env.DB.prepare("UPDATE projects SET name = ?, domain = ? WHERE id = ? AND user_id = ?")
+          .bind(name, domain, projectId, user.id).run();
       if (!result.meta.changes) return authJson({ error: "not_found" }, 404, cors);
-      const project = await env.DB.prepare("SELECT id, name, created_at FROM projects WHERE id = ? AND user_id = ?")
+      const project = await env.DB.prepare("SELECT id, name, domain, created_at FROM projects WHERE id = ? AND user_id = ?")
         .bind(projectId, user.id).first();
       return authJson({ project }, 200, cors);
     }
-    const project = { id: crypto.randomUUID(), name, created_at: new Date().toISOString() };
-    await env.DB.prepare("INSERT INTO projects (id, user_id, name, created_at) VALUES (?, ?, ?, ?)")
-      .bind(project.id, user.id, project.name, project.created_at).run();
+    const project = { id: crypto.randomUUID(), name, domain: domain ?? null, created_at: new Date().toISOString() };
+    await env.DB.prepare("INSERT INTO projects (id, user_id, name, domain, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(project.id, user.id, project.name, project.domain, project.created_at).run();
     return authJson({ project }, 201, cors);
   } catch (error) {
     if (error instanceof SyntaxError) return authJson({ error: "invalid_request" }, 400, cors);

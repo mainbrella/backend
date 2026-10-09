@@ -64,8 +64,14 @@ test('Private Services schemas expose account authentication, exact generations,
   assert.ok(paths['/private-services/networks'].post.responses['201']);
 });
 
-test('project update schema documents owner-scoped renames and request validation', async () => {
+test('project schemas document optional domains, owner-scoped updates and request validation', async () => {
   const { paths } = await document();
+  const create = paths['/projects'].post;
+  const createBody = create.requestBody.content['application/json'].schema;
+  assert.equal(createBody.properties.domain.maxLength, 253);
+  assert.deepEqual(createBody.properties.domain.type, ['string', 'null']);
+  assert.ok(!createBody.required?.includes('domain'));
+  assert.match(create.description, /blank or null values are stored as null/);
   const update = paths['/projects'].patch;
   assert.equal(update.operationId, 'updateProject');
   assert.deepEqual(update.security, [{ cookieAuth: [] }]);
@@ -73,6 +79,10 @@ test('project update schema documents owner-scoped renames and request validatio
   const body = update.requestBody.content['application/json'].schema;
   assert.equal(body.properties.name.minLength, 1);
   assert.equal(body.properties.name.maxLength, 80);
+  assert.equal(body.properties.domain.maxLength, 253);
+  assert.deepEqual(body.properties.domain.type, ['string', 'null']);
+  assert.match(update.description, /omitted domain is preserved/);
+  assert.deepEqual(update.responses[200].content['application/json'].schema.properties.project.properties.domain.type, ['string', 'null']);
   for (const status of [200, 400, 401, 403, 404, 503]) assert.ok(update.responses[status]);
   assert.match(update.description, /project owned by the signed-in user/);
 });
