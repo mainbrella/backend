@@ -114,3 +114,47 @@ test('webhook requires POST and configured endpoint secret', async t => {
   assert.equal((await handleSubscriptionWebhook(new Request('https://api.mainbrella.com/subscription/webhook'), f.env)).status, 405);
   assert.equal((await handleSubscriptionWebhook(await webhook(), { ...f.env, STRIPE_WEBHOOK_SECRET: undefined } as unknown as BillingEnv)).status, 503);
 });
+
+test('renewal usage reconciliation must succeed before a signed invoice event receives a receipt', async t => {
+  const f = await billingFixture(t, 'usage'); const contexts: any[] = [];
+  t.mock.method(console, 'error', () => {});
+  let unavailable = true;
+  f.env.CONTAINER_ACCOUNT = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
+    assert.equal(request.headers.get('x-mainbrella-user'), TEST_USER);
+    contexts.push(await request.json());
+    return Response.json({}, { status: unavailable ? 503 : 200 });
+  } }) } as any;
+  const created = Math.floor(Date.now() / 1000);
+  f.state.override = url => url.pathname === '/v1/invoices/in_renewal'
+    ? Response.json({ id: 'in_renewal', customer: TEST_CUSTOMER, status: 'draft', created,
+      parent: { subscription_details: { subscription: 'sub_paid' } } })
+    : url.pathname === '/v1/subscriptions/sub_paid' ? Response.json(f.state.subscriptions[0]) : undefined;
+  const renewal = { id: 'evt_renewal', type: 'invoice.created', data: { object: { id: 'in_renewal', customer: TEST_CUSTOMER } } };
+  assert.equal((await handleSubscriptionWebhook(await webhook(renewal), f.env)).status, 503);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS n FROM billing_webhook_events').get() as any).n, 0);
+  unavailable = false;
+  assert.equal((await handleSubscriptionWebhook(await webhook(renewal), f.env)).status, 200);
+  assert.deepEqual(contexts[1], { invoiceId: 'in_renewal', customerId: TEST_CUSTOMER, subscriptionId: 'sub_paid', cutoff: created * 1000, final: false });
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS n FROM billing_webhook_events').get() as any).n, 1);
+  const calls = f.calls.length;
+  assert.equal((await handleSubscriptionWebhook(await webhook(renewal), f.env)).status, 200);
+  assert.equal(f.calls.length, calls);
+});
+
+test('a signed cancellation invoices final usage and revokes access before saving its receipt', async t => {
+  const f = await billingFixture(t, 'usage'); let access: any; let finalContext: any;
+  f.state.subscriptions[0].status = 'canceled';
+  const final = { id: 'in_final', status: 'draft', customer: TEST_CUSTOMER, created: Math.floor(Date.now() / 1000),
+    metadata: { mainbrella_subscription_id: 'sub_paid', mainbrella_final_usage: 'true' } };
+  f.env.CONTAINER_ACCOUNT = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
+    finalContext = await request.json(); return Response.json({});
+  } }) } as any;
+  f.state.override = url => url.pathname === '/v1/subscriptions/sub_paid' ? Response.json(f.state.subscriptions[0])
+    : url.pathname === '/v1/invoices' ? Response.json({ data: [final], has_more: false })
+      : url.pathname === '/v1/invoices/in_final' ? Response.json(final) : undefined;
+  const canceled = { id: 'evt_canceled', type: 'customer.subscription.deleted', data: { object: { id: 'sub_paid', customer: TEST_CUSTOMER } } };
+  assert.equal((await handleSubscriptionWebhook(await webhook(canceled), f.env, async (_id, value) => { access = value; })).status, 200);
+  assert.equal(finalContext.final, true); assert.equal(finalContext.entitlement.active, false);
+  assert.equal(access.active, false);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS n FROM billing_webhook_events').get() as any).n, 1);
+});

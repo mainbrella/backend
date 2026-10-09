@@ -1,6 +1,6 @@
 import { planPrices, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
 
-export const PLAN_ORDER: Record<Plan, number> = { builder: 0, pro: 1, scale: 2 };
+export const PLAN_ORDER: Record<Plan, number> = { usage: -1, builder: 0, pro: 1, scale: 2 };
 interface SchedulePhase extends Record<string, unknown> {
   start_date: number; end_date: number;
   items: { price: string | { id: string }; quantity: number; [key: string]: unknown }[];

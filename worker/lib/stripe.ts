@@ -4,22 +4,29 @@ export const PLAN_PRICES = {
   pro: PRO_PRICE_ID,
   scale: "price_1UNAq1GSUs8K8zgHnt8PplRQ",
 } as const;
-export type Plan = keyof typeof PLAN_PRICES;
+export type Plan = keyof typeof PLAN_PRICES | 'usage';
 const LOCAL_PLAN_PRICES = {
   builder: "price_1UNrymGgJdfq06ol4uXUV6Ao",
   pro: "price_1UNs6DGgJdfq06olo5rl4TS7",
   scale: "price_1UNs6sGgJdfq06olIK6KqNNf",
 } as const;
-export function planPrices(env?: Pick<BillingEnv, "LOCAL_DEV">): Record<Plan, string> {
-  return env?.LOCAL_DEV === "true" ? LOCAL_PLAN_PRICES : PLAN_PRICES;
+export function planPrices(env?: Pick<BillingEnv, "LOCAL_DEV" | "STRIPE_USAGE_BASE_PRICE_ID" | "STRIPE_USAGE_METERED_PRICE_IDS">): Record<Plan, string> {
+  return { ...(env?.LOCAL_DEV === "true" ? LOCAL_PLAN_PRICES : PLAN_PRICES), usage: env?.STRIPE_USAGE_BASE_PRICE_ID ?? "" };
 }
-export function subscriptionPlan(subscription: StripeSubscription | null, env?: Pick<BillingEnv, "LOCAL_DEV">): Plan | null {
-  if (!subscription || subscription.items.has_more || subscription.items.data.length !== 1 || subscription.items.data[0].quantity !== 1) return null;
+export function subscriptionPlan(subscription: StripeSubscription | null, env?: Pick<BillingEnv, "LOCAL_DEV" | "STRIPE_USAGE_BASE_PRICE_ID" | "STRIPE_USAGE_METERED_PRICE_IDS">): Plan | null {
+  if (!subscription || subscription.items.has_more) return null;
+  const items = subscription.items.data;
+  if (env?.STRIPE_USAGE_BASE_PRICE_ID) {
+    const base = items.filter(item => item.price.id === env.STRIPE_USAGE_BASE_PRICE_ID && item.quantity === 1);
+    const allowedMeters = new Set((env.STRIPE_USAGE_METERED_PRICE_IDS ?? '').split(',').filter(Boolean));
+    if (base.length === 1 && items.every(item => item === base[0] || (allowedMeters.has(item.price.id) && item.quantity == null))) return 'usage';
+  }
+  if (items.length !== 1 || items[0].quantity !== 1) return null;
   return (Object.keys(PLAN_PRICES) as Plan[]).find((plan) =>
     subscription?.items.data.some((item) => item.price.id === planPrices(env)[plan]),
   ) || null;
 }
-export type BillingEnv = Env & { LOCAL_DEV?: string; STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string };
+export type BillingEnv = Env & { LOCAL_DEV?: string; STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string; STRIPE_USAGE_BASE_PRICE_ID?: string; STRIPE_USAGE_METERED_PRICE_IDS?: string };
 export interface StripeSubscription {
   id: string;
   status: string;
@@ -28,7 +35,8 @@ export interface StripeSubscription {
   pause_collection?: unknown;
   schedule?: string | { id: string } | null;
   customer?: string;
-  items: { has_more?: boolean; data: { id?: string; quantity?: number; price: { id: string }; current_period_start?: number; current_period_end?: number }[] };
+  default_payment_method?: string | { id: string } | null;
+  items: { has_more?: boolean; data: { id?: string; quantity?: number | null; price: { id: string }; current_period_start?: number; current_period_end?: number }[] };
 }
 export interface CheckoutSession {
   id: string;

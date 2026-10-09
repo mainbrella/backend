@@ -21,9 +21,12 @@ class Storage {
   async setAlarm(at) { this.alarmAt = at; }
   async deleteAlarm() { this.alarmAt = null; }
 }
-function fixture() {
+function fixture(initialPlan = 'builder') {
   let now = Date.UTC(2026, 9, 5, 12);
-  let plan = 'builder';
+  let plan = initialPlan;
+  const invoices = [];
+  const invoiceUsage = async entry => { invoices.push(structuredClone(entry)); return 'ii_usage'; };
+  const periodStart = Date.UTC(2026, 9, 5, 12);
   let paid = true;
   let validUntil = now + 31 * 86400000;
   const machines = new Map();
@@ -43,17 +46,24 @@ function fixture() {
     }
     return machines.get(key);
   };
-  let account = new ContainerAccountController(ctx, machineFor, () => now);
+  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage);
   const request = (method = 'GET', id, overrides = {}, body) => {
     const url = new URL('https://internal/containers');
     if (id) url.searchParams.set('id', id);
     return account.fetch(new Request(url, { method, headers: { 'x-mainbrella-user': 'owner',
-      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now }), ...overrides }, ...(body ? { body: JSON.stringify(body) } : {}) }));
+      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, ...(plan === 'usage' ? { billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } } : {}) }), ...overrides }, ...(body ? { body: JSON.stringify(body) } : {}) }));
   };
   const read = async (...args) => { const response = await request(...args); return { status: response.status, data: await response.json() }; };
-  return { ctx, machines, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
+  const billingRequest = async (body, path = '/billing') => {
+    const headers = { 'x-mainbrella-user': 'owner', ...entitlementHeaders({ active: paid, plan, validUntil, checkedAt: now,
+      billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } }) };
+    const response = await account.fetch(new Request(`https://internal${path}`, { method: body ? 'POST' : 'GET', headers,
+      ...(body ? { body: JSON.stringify(body) } : {}) }));
+    return { status: response.status, data: await response.json() };
+  };
+  return { ctx, machines, invoices, billingRequest, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
     setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, now: () => now,
-    restart() { account = new ContainerAccountController(ctx, machineFor, () => now); }, alarm: () => account.alarm() };
+    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage); }, alarm: () => account.alarm() };
 }
 
 test('internet-off creation is immutable, idempotent and propagates the provider switch through the trusted runtime', async () => {
@@ -765,4 +775,48 @@ test('invalid container names spend no starts or compute', async () => {
     assert.equal(result.data.error, 'invalid_container_name');
   }
   assert.equal((await f.read()).data.usage.starts, 0);
+});
+
+
+test('usage starts default to a $5 cap and require explicit authorization for overages', async () => {
+  const f = fixture('usage');
+  const status = await f.read();
+  assert.equal(status.data.billing.spendLimitCents, 500);
+  assert.equal(status.data.billing.overagesEnabled, false);
+  assert.equal(status.data.billing.alert, null);
+  assert.equal((await f.billingRequest({ spendLimitCents: 5000 })).data.error, 'overage_authorization_required');
+  assert.equal((await f.billingRequest({ spendLimitCents: 5000, authorizeOverages: true })).status, 200);
+  assert.equal((await f.read()).data.billing.overagesEnabled, true);
+  assert.equal((await f.ctx.storage.get('containerAccount')).overageConsent.spendLimitCents, 5000);
+});
+
+test('usage reserves only available spend, bills elapsed runtime, and preserves the ledger across eviction', async () => {
+  const f = fixture('usage');
+  const start = await f.read('POST', undefined, {}, { size: 'xl' });
+  assert.equal(start.status, 200);
+  const expires = Date.parse(start.data.containers[0].expiresAt);
+  assert.equal(expires - f.now(), Math.floor(250 * 3600000 / 28));
+  assert.equal(start.data.billing.estimatedCents, 500);
+  assert.equal((await f.read('POST')).data.error, 'spend_limit_reached');
+  f.setTime(f.now() + 60_000);
+  await f.alarm();
+  assert.equal(f.invoices.length, 0, 'Accounting is internal until invoicing');
+  await f.read('DELETE', 'small');
+  f.restart();
+  const status = await f.read();
+  assert.ok(Math.abs(status.data.billing.computeUnitHours - 28 / 60) < 0.00001);
+  assert.equal(status.data.billing.committedCents, 500);
+  assert.ok(status.data.usage.availableComputeUnitHours > 249);
+});
+
+test('usage periods can cross a UTC month boundary, and caps cannot drop below reserved spend', async () => {
+  const f = fixture('usage');
+  f.setTime(Date.UTC(2026, 9, 31, 23));
+  await f.billingRequest({ spendLimitCents: 5000, authorizeOverages: true });
+  const start = await f.read('POST', undefined, {}, { size: 'xl' });
+  assert.ok(Date.parse(start.data.containers[0].expiresAt) > Date.UTC(2026, 10, 1));
+  const reduced = await f.billingRequest({ spendLimitCents: 500 });
+  assert.equal(reduced.status, 409); assert.equal(reduced.data.error, 'spend_limit_below_committed_usage');
+  await f.read('DELETE', 'small');
+  assert.equal((await f.billingRequest({ spendLimitCents: 500 })).status, 200);
 });

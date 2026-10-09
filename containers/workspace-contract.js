@@ -1,6 +1,8 @@
 export const WORKSPACE_POLICY = Object.freeze({
   builder: { maxSaved: 3, maxReservedBytes: 8_000_000_000, retentionMs: 7 * 86400_000, maxSavesPerMonth: 10,
     maxCaptureBytesPerMonth: 20_000_000_000, maxRetainedCaptureBytes: 20_000_000_000 },
+  usage: { maxSaved: 20, maxReservedBytes: 160_000_000_000, retentionMs: 14 * 86400_000, maxSavesPerMonth: 100,
+    maxCaptureBytesPerMonth: 400_000_000_000, maxRetainedCaptureBytes: 400_000_000_000 },
   pro: { maxSaved: 20, maxReservedBytes: 160_000_000_000, retentionMs: 14 * 86400_000, maxSavesPerMonth: 100,
     maxCaptureBytesPerMonth: 400_000_000_000, maxRetainedCaptureBytes: 400_000_000_000 },
   scale: { maxSaved: 100, maxReservedBytes: 1_000_000_000_000, retentionMs: 29 * 86400_000, maxSavesPerMonth: 500,

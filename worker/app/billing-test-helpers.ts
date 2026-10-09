@@ -5,19 +5,20 @@ import type { TestContext } from 'node:test';
 import { hashToken } from './auth-core';
 import { PLAN_PRICES, type BillingEnv, type Plan, type StripeSubscription } from '../lib/stripe';
 
+export const TEST_USAGE_PRICE = 'price_usage_test';
 export const TEST_USER = 'user_test';
 export const TEST_CUSTOMER = 'cus_test';
 export const TEST_SESSION = 'browser_token';
 export function paidSubscription(plan: Plan = 'builder'): StripeSubscription {
   const now = Math.floor(Date.now() / 1000);
   return { id: 'sub_paid', customer: TEST_CUSTOMER, status: 'active', cancel_at_period_end: false,
-    items: { data: [{ id: 'si_paid', quantity: 1, price: { id: PLAN_PRICES[plan] }, current_period_start: now - 3600, current_period_end: now + 86400 }] } };
+    items: { data: [{ id: 'si_paid', quantity: 1, price: { id: plan === 'usage' ? TEST_USAGE_PRICE : PLAN_PRICES[plan] }, current_period_start: now - 3600, current_period_end: now + 86400 }] } };
 }
 export function paidInvoice(plan: Plan = 'builder') {
   const now = Math.floor(Date.now() / 1000);
   return { id: 'in_paid', status: 'paid', amount_paid: 500, amount_due: 500, total: 500, subtotal: 500,
     total_discount_amounts: [] as { amount: number }[], paid_out_of_band: false,
-    lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: PLAN_PRICES[plan] as string } },
+    lines: { data: [{ id: 'il_paid', amount: 500, quantity: 1, pricing: { price_details: { price: plan === 'usage' ? TEST_USAGE_PRICE : PLAN_PRICES[plan] as string } },
       parent: { subscription_item_details: { subscription: 'sub_paid', subscription_item: 'si_paid' } },
       period: { start: now - 3600, end: now + 86400 } }], has_more: false } };
 }
@@ -30,14 +31,14 @@ export function billingRequest(path = '/subscription', body: unknown = undefined
 }
 export async function billingFixture(t: TestContext, plan: Plan = 'builder', record = true) {
   const sqlite = new DatabaseSync(':memory:');
-  for (const migration of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks']) {
+  for (const migration of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '018_usage_billing']) {
     sqlite.exec(readFileSync(fileURLToPath(new URL(`../../migrations/${migration}.sql`, import.meta.url)), 'utf8'));
   }
   sqlite.prepare('INSERT INTO users (id,email,name) VALUES (?,?,?)').run(TEST_USER, 'test@example.com', 'Test');
   sqlite.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').run(await hashToken(TEST_SESSION), TEST_USER, '2099-01-01');
   if (record) sqlite.prepare('INSERT INTO pro_billing (user_id,stripe_customer_id,checkout_session_id) VALUES (?,?,?)').run(TEST_USER, TEST_CUSTOMER, 'cs_old');
   t.after(() => sqlite.close());
-  const env = { STRIPE_SECRET_KEY: 'sk_test', STRIPE_PUBLISHABLE_KEY: 'pk_test', STRIPE_WEBHOOK_SECRET: 'whsec_test', DB: {
+  const env = { STRIPE_SECRET_KEY: 'sk_test', STRIPE_PUBLISHABLE_KEY: 'pk_test', STRIPE_WEBHOOK_SECRET: 'whsec_test', STRIPE_USAGE_BASE_PRICE_ID: TEST_USAGE_PRICE, DB: {
     prepare(sql: string) { let values: unknown[] = []; return {
       bind(...args: unknown[]) { values = args; return this; },
       async first<T>() { return (sqlite.prepare(sql).get(...values as never[]) as T) ?? null; },
@@ -49,7 +50,7 @@ export async function billingFixture(t: TestContext, plan: Plan = 'builder', rec
     subscriptions: [paidSubscription(plan)] as StripeSubscription[], invoices: [paidInvoice(plan)],
     payments: [{ id: 'inpay_paid', invoice: 'in_paid', status: 'paid', amount_paid: 500, payment: { type: 'payment_intent', payment_intent: 'pi_paid', charge: undefined as string | undefined } }],
     intent: { id: 'pi_paid', status: 'succeeded', amount_received: 500, latest_charge: paidCharge() },
-    checkout: { id: 'cs_old', status: 'open', ui_mode: 'custom', allow_promotion_codes: true, payment_method_collection: 'if_required' as string | null, client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
+    checkout: { id: 'cs_old', status: 'open', ui_mode: 'custom', allow_promotion_codes: true, payment_method_collection: (plan === 'usage' ? 'always' : 'if_required') as string | null, client_secret: 'cs_old_secret', customer: TEST_CUSTOMER, client_reference_id: TEST_USER, metadata: { plan } },
     schedules: new Map<string, Record<string, any>>(),
     override: null as null | ((url: URL, init: RequestInit | undefined) => Promise<Response | undefined> | Response | undefined),
   };

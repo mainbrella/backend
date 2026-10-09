@@ -1,3 +1,4 @@
+import { invoiceResourceUsage } from '../lib/usage-billing';
 import { DurableObject } from 'cloudflare:workers';
 import { ContainerAccountController, machineName } from '../../containers/container-account-core.js';
 import { PrivateServicesController } from '../../containers/private-services.js';
@@ -11,7 +12,7 @@ export class ContainerAccount extends DurableObject<Env> {
       if (!env.USER_CONTAINER) throw new Error('missing_container_binding');
       return env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(machineName(userId, id)));
     };
-    this.controller = new ContainerAccountController(ctx, machineFor);
+    this.controller = new ContainerAccountController(ctx, machineFor, undefined, event => invoiceResourceUsage(env, event));
     this.privateServices = new PrivateServicesController(ctx, machineFor);
   }
   fetch(request: Request): Promise<Response> {

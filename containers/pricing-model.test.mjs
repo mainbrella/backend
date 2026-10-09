@@ -7,7 +7,7 @@ import { MACHINE_SIZES, PLAN_DETAILS } from './plan-policy.js';
 const costPerHour = size => size.cpuVcpu * 0.072 + size.memoryMiB / 1024 * 0.009 + size.diskGB * 0.000252;
 test('full CPU utilization remains within the subscription compute envelope for every size mix', () => {
   const worstCostPerUnit = Math.max(...MACHINE_SIZES.map(size => costPerHour(size) / size.computeUnits));
-  for (const plan of Object.values(PLAN_DETAILS)) {
+  for (const plan of Object.values(PLAN_DETAILS).filter(plan => !plan.features.usageBilling)) {
     const maximumCost = worstCostPerUnit * plan.limits.maxComputeUnitHours;
     assert.ok(maximumCost <= plan.price * 0.72, `${plan.name}: ${maximumCost}`);
     assert.ok(plan.limits.maxConcurrentComputeUnits >= 28, 'Every plan can run an XL');

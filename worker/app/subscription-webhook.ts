@@ -1,3 +1,4 @@
+import { invoiceAccountUsage, invoiceCanceledUsage } from '../lib/usage-billing';
 import { authJson } from "./auth-core";
 import { resolveEntitlement, type Entitlement } from "../lib/entitlements";
 import { stripeRequest, type BillingEnv } from "../lib/stripe";
@@ -29,7 +30,7 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
     || !await verifyStripeSignature(body, request.headers.get("Stripe-Signature"), env.STRIPE_WEBHOOK_SECRET)) {
     return authJson({ error: "invalid_signature" }, 400, {});
   }
-  let event: { id: string; type: string; data: { object: { customer?: string | { id: string }; charge?: string } } };
+  let event: { id: string; type: string; data: { object: { id?: string; customer?: string | { id: string }; charge?: string } } };
   try {
     event = JSON.parse(body);
     if (!/^evt_[A-Za-z0-9_]+$/.test(event.id) || typeof event.type !== "string" || !event.data?.object) throw new Error();
@@ -46,6 +47,12 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
     }
     const record = customer ? await env.DB.prepare("SELECT user_id FROM pro_billing WHERE stripe_customer_id = ?").bind(customer).first<{ user_id: string }>() : null;
     if (record) {
+      if (event.type === 'invoice.created' && /^in_[A-Za-z0-9_]+$/.test(event.data.object.id ?? '')) {
+        await invoiceAccountUsage(env, record.user_id, customer!, event.data.object.id!);
+      }
+      if (event.type === 'customer.subscription.deleted' && /^sub_[A-Za-z0-9_]+$/.test(event.data.object.id ?? '')) {
+        await invoiceCanceledUsage(env, record.user_id, customer!, event.data.object.id!);
+      }
       // Events can arrive late or out of order. The signed event identifies the
       // account only; live Stripe subscription/invoice state determines access.
       const entitlement = await resolveEntitlement(env, record.user_id);

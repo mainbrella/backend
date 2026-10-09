@@ -2,6 +2,8 @@ import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, va
 import { IMAGE_CATALOG } from './image-catalog.js';
 import { readFileBytes } from './file-contract.js';
 import { AccountWorkspaces } from './workspaces.js';
+import { AccountBilling } from './account-billing.js';
+import { validSpendLimit } from './usage-policy.js';
 
 const KEY = 'containerAccount';
 const CREATION_PREFIX = 'creation:';
@@ -14,10 +16,11 @@ export const machineName = (userId, id) => id === 'small' ? `user:${userId}` : `
 // One serialized account owner reserves every start before provisioning a slot.
 // It survives restarts and plan/customer/subscription changes without resetting usage.
 export class ContainerAccountController {
-  constructor(ctx, machineFor, now = () => Date.now()) {
+  constructor(ctx, machineFor, now = () => Date.now(), invoiceUsage) {
     Object.assign(this, { ctx, machineFor, now });
     this.tail = Promise.resolve();
     this.workspaces = new AccountWorkspaces(this);
+    this.billing = new AccountBilling(this, invoiceUsage);
   }
   async serialized(fn) {
     const previous = this.tail;
@@ -73,6 +76,7 @@ export class ContainerAccountController {
   settleLease(state, id, stoppedAt = this.now()) {
     const lease = state.leases[id];
     if (!lease) return;
+    this.billing.record(state, lease, stoppedAt);
     const elapsed = Math.max(0, Math.min(lease.endAt, stoppedAt) - lease.startAt);
     const refund = lease.unitMs - elapsed * machineSize(lease.size).computeUnits;
     state.computeUsage[lease.month] = Math.max(0, (state.computeUsage[lease.month] ?? 0) - refund);
@@ -92,12 +96,14 @@ export class ContainerAccountController {
     const date = new Date(startAt);
     const month = date.toISOString().slice(0, 7);
     const limits = PLAN_LIMITS[state.entitlement.plan];
-    const remaining = limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
-    endAt = Math.min(endAt, Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+    const remaining = state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state)
+      : limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
+    endAt = Math.min(endAt, state.entitlement.plan === 'usage' ? state.entitlement.billing?.periodEnd ?? startAt : Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
       startAt + Math.max(0, Math.floor(remaining / size.computeUnits)));
     const unitMs = (endAt - startAt) * size.computeUnits;
     state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
     state.leases[id] = { size: size.id, startAt, endAt, month, unitMs };
+    this.billing.attach(state, state.leases[id]);
     return endAt;
   }
   async stopIndependently(state, ids, entitlement) {
@@ -145,6 +151,9 @@ export class ContainerAccountController {
     if (retry && state.slots.length) alarmAt = this.now() + 30_000;
     else if (state.entitlement.active && state.slots.length) {
       alarmAt = Math.min(state.entitlement.validUntil, ...Object.values(state.pending).map(at => at + 90_000));
+    }
+    if (Object.values(state.leases).some(lease => lease.billing) || Object.values(state.billingPeriods ?? {}).some(period => period.pending)) {
+      alarmAt = Math.min(alarmAt ?? Infinity, this.now() + 60_000);
     }
     if (state.nextCreationExpiry) alarmAt = Math.min(alarmAt ?? Infinity, state.nextCreationExpiry);
     const workspaceAlarm = await this.workspaces.nextAlarm();
@@ -206,6 +215,7 @@ export class ContainerAccountController {
           data.containers[0] = clamped.containers[0];
         }
         this.clampLease(state, id, Date.parse(data.containers[0].expiresAt));
+        this.billing.record(state, state.leases[id], this.now());
         return { ...data.containers[0], id, name: state.leases[id]?.name ?? (id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`) };
       }));
       batch.forEach((result, index) => {
@@ -236,7 +246,7 @@ export class ContainerAccountController {
       failedStops.push(...await this.stopIndependently(state, extra.map(c => c.id), entitlement));
     }
     const month = new Date(this.now()).toISOString().slice(0, 7);
-    while (retained.length && (state.computeUsage[month] ?? 0) > limits.maxComputeUnitHours * 3600000) {
+    while (retained.length && limits.maxComputeUnitHours !== null && (state.computeUsage[month] ?? 0) > limits.maxComputeUnitHours * 3600000) {
       const extra = retained.pop();
       failedStops.push(...await this.stopIndependently(state, [extra.id], entitlement));
     }
@@ -255,18 +265,34 @@ export class ContainerAccountController {
     const reservedUnitMs = Object.values(state.leases).filter(lease => lease.month === month)
       .reduce((sum, lease) => sum + Math.max(0, lease.endAt - Math.max(this.now(), lease.startAt)) * machineSize(lease.size).computeUnits, 0);
     const committedUnitMs = state.computeUsage[month] ?? 0;
-    return { sizes: MACHINE_SIZES, plan: state.entitlement.plan, active: state.entitlement.active,
+    const billing = this.billing.status(state);
+    return { billing, sizes: MACHINE_SIZES, plan: state.entitlement.plan, active: state.entitlement.active,
       limits: state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS,
       usage: { month, starts: state.usage[month] ?? 0,
         computeUnitHours: Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
         reservedComputeUnitHours: reservedUnitMs / 3600000,
-        availableComputeUnitHours: Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
+        availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
         concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? 'lite').computeUnits, 0) }, containers, imageCatalog: state.imageCatalog ?? [] };
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === '/billing/invoice') {
+      if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
+      return this.serialized(async () => {
+        const state = await this.ctx.storage.get(KEY);
+        if (!state) return this.respond({ invoiced: true });
+        if (request.headers.get('x-mainbrella-user') !== state.userId) return this.respond({ error: 'account_mismatch' }, 403);
+        // Confirm stops and final runtime before closing any billing period.
+        const context = await request.json();
+        await this.reconcile(state, context.entitlement ?? state.entitlement);
+        await this.billing.invoice(state, context);
+        await this.saveState(state);
+        return this.respond({ invoiced: true });
+      });
+    }
     if (url.pathname === '/workspaces') return this.workspaces.fetch(request);
-    if (url.pathname !== '/containers') return this.respond({ error: 'not_found' }, 404);
+    const billingRequest = url.pathname === '/billing';
+    if (url.pathname !== '/containers' && !billingRequest) return this.respond({ error: 'not_found' }, 404);
     if (!['GET', 'POST', 'DELETE', 'PUT'].includes(request.method)) return this.respond({ error: 'method_not_allowed' }, 405);
     const userId = request.headers.get('x-mainbrella-user');
     if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return this.respond({ error: 'not_authenticated' }, 401);
@@ -295,7 +321,24 @@ export class ContainerAccountController {
         let entitlement = cleanupOnly && validEntitlement(state.entitlement, this.now()) ? state.entitlement : suppliedEntitlement;
         let containers = await this.reconcile(state, entitlement);
         entitlement = state.entitlement;
+        // Stop/status paths remain available even if usage invoicing is down.
+        if (billingRequest) {
+          if (request.method === 'POST') {
+            if (entitlement.plan !== 'usage' || !entitlement.active) return this.respond({ error: 'subscription_required' }, 402);
+            if (!validSpendLimit(selection?.spendLimitCents)) return this.respond({ error: 'invalid_spend_limit' }, 400);
+            if (selection.spendLimitCents > 500 && selection.authorizeOverages !== true) return this.respond({ error: 'overage_authorization_required' }, 400);
+            if (selection.spendLimitCents < (this.billing.status(state)?.committedCents ?? 500)) return this.respond({ error: 'spend_limit_below_committed_usage' }, 409);
+            state.spendLimitCents = selection.spendLimitCents;
+            state.overageConsent = selection.spendLimitCents > 500 ? { authorizedAt: this.now(), spendLimitCents: selection.spendLimitCents } : null;
+            await this.saveState(state);
+          }
+          return this.respond({ billing: this.billing.status(state) });
+        }
         if (request.method === 'POST') {
+          if (entitlement.plan === 'usage') {
+            if (!entitlement.billing || !this.billing.invoiceUsage) return this.respond({ error: 'billing_unavailable' }, 503);
+            this.billing.checkPending(state);
+          }
           if (!validEntitlement(entitlement, this.now())) {
             await this.reconcile(state, { active: false, plan: null, validUntil: null, checkedAt: entitlement.checkedAt });
             return this.respond({ error: 'subscription_required' }, 402);
@@ -324,10 +367,11 @@ export class ContainerAccountController {
           if ((state.usage[month] ?? 0) >= limits.maxStartsPerMonth) return this.respond({ error: 'container_quota_exceeded' }, 429);
           const startAt = this.now();
           const monthEnd = Date.UTC(new Date(startAt).getUTCFullYear(), new Date(startAt).getUTCMonth() + 1, 1);
-          const remaining = limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
-          const endAt = Math.min(startAt + limits.maxSessionMs, entitlement.validUntil, monthEnd,
+          const remaining = state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state)
+            : limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
+          const endAt = Math.min(startAt + limits.maxSessionMs, entitlement.validUntil, entitlement.plan === 'usage' ? entitlement.billing.periodEnd : monthEnd,
             startAt + Math.floor(remaining / size.computeUnits));
-          if (endAt <= startAt) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
+          if (endAt <= startAt || (entitlement.plan === 'usage' && endAt - startAt < 1000)) return this.respond({ error: entitlement.plan === 'usage' ? 'spend_limit_reached' : 'compute_allowance_exhausted' }, 429);
           const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));
           if (selection?.workspaceId) {
             const response = await this.machineFor(state.userId, slot).fetch(new Request('https://internal/workspaces/restore-preflight-v1', {
@@ -351,6 +395,7 @@ export class ContainerAccountController {
           const unitMs = (endAt - startAt) * size.computeUnits;
           state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
           state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true, ...(selection?.name === undefined ? {} : { name: selection.name }) };
+          this.billing.attach(state, state.leases[slot]);
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
@@ -400,7 +445,7 @@ export class ContainerAccountController {
       if (error.message === 'image_not_available') return this.respond({ error: error.message }, 409);
       if (error.message === 'compute_allowance_exhausted') return this.respond({ error: error.message }, 429);
       if (error.message === 'subscription_required') return this.respond({ error: error.message }, 402);
-      if (['network_policy_unavailable','persistence_unavailable'].includes(error.message)) return this.respond({ error: error.message }, 503);
+      if (['billing_unavailable','billing_reconciliation_required','network_policy_unavailable','persistence_unavailable'].includes(error.message)) return this.respond({ error: error.message }, 503);
       if (error.message === 'workspace_expired') return this.respond({error:error.message},410);
       if (error.message === 'workspace_not_found') return this.respond({error:error.message},404);
       if (['workspace_not_ready','workspace_policy_conflict','workspace_image_incompatible','workspace_restore_failed'].includes(error.message)) return this.respond({error:error.message},409);
@@ -414,7 +459,9 @@ export class ContainerAccountController {
       await this.workspaces.prune();
       await this.pruneCreations(state);
       const entitlement = validEntitlement(state.entitlement, this.now()) ? state.entitlement : { active: false, plan: null, validUntil: null, checkedAt: state.entitlement.checkedAt };
-      await this.reconcile(state, entitlement);
+      try { await this.reconcile(state, entitlement); } finally {
+        await this.saveState(state, true);
+      }
     });
   }
 }

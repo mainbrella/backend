@@ -1,12 +1,15 @@
+import { usageBillingConfigured } from '../lib/usage-billing';
+import { entitlementHeaders } from '../../containers/plan-policy.js';
+import { USAGE_PRICING, validSpendLimit } from '../../containers/usage-policy.js';
 import { redeemTrial } from '../lib/trial-coupons';
 import { authCorsHeaders, authJson, currentUser, readJSON, type StringHeaders } from "./auth-core";
-import { PLAN_PRICES, planPrices, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
+import { planPrices, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
 import { resolveBillingState, syncSubscriptionRecord, type BillingRecord, type BillingState } from "../lib/entitlements";
 import { PLAN_DETAILS } from "../../containers/plan-policy.js";
 import { PLAN_ORDER, portalSession, releaseScheduledChange, scheduleDowngrade, scheduledChange, scheduleID } from "../lib/billing-changes";
 import { handleSubscriptionWebhook, type EntitlementChanged } from "./subscription-webhook";
 
-function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_PRICES, value); }
+function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_DETAILS, value); }
 async function stateResponse(env: BillingEnv, state: BillingState, cors: StringHeaders): Promise<Response> {
   const plan = state.entitlement.plan || subscriptionPlan(state.subscription, env);
   return authJson({ subscription: state.subscription, trial: state.trial || null, plan, active: state.entitlement.active,
@@ -22,13 +25,13 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (path === "/subscription/config" && request.method === "GET") {
-    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS,
+    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS, usage_pricing: USAGE_PRICING, usage_configured: usageBillingConfigured(env),
       configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
   }
-  if (!["/subscription", "/subscription/trial", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume"].includes(path)) {
+  if (!["/subscription", "/subscription/trial", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume", "/subscription/usage"].includes(path)) {
     return authJson({ error: "not_found" }, 404, cors);
   }
-  if (request.method !== (path === "/subscription" ? "GET" : "POST")) return authJson({ error: "method_not_allowed" }, 405, cors);
+  if (path === "/subscription/usage" ? !["GET", "POST"].includes(request.method) : request.method !== (path === "/subscription" ? "GET" : "POST")) return authJson({ error: "method_not_allowed" }, 405, cors);
   if (request.method === "POST" && !request.headers.get("Origin")) return authJson({ error: "origin_required" }, 403, cors);
   let lock: { userId: string; token: string } | null = null;
   try {
@@ -40,6 +43,18 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (["/subscription/checkout", "/subscription/trial", "/subscription/change"].includes(path) && !validPlan(body?.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (path === "/subscription/portal" && body?.plan !== undefined && !validPlan(body.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (["/subscription/change", "/subscription/cancel"].includes(path) && body?.confirm !== true) return authJson({ error: "confirmation_required" }, 400, cors);
+    if (path === '/subscription/usage') {
+      const state = await resolveBillingState(env, user.id);
+      if (request.method === 'POST' && !validSpendLimit(body?.spendLimitCents)) return authJson({ error: 'invalid_spend_limit' }, 400, cors);
+      if (!env.CONTAINER_ACCOUNT) throw new Error('billing_unavailable');
+      const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${user.id}`));
+      const response = await account.fetch(new Request('https://internal/billing', { method: request.method,
+        headers: { ...entitlementHeaders(state.entitlement), 'x-mainbrella-user': user.id },
+        ...(body ? { body: JSON.stringify(body) } : {}) }));
+      return authJson(await response.json(), response.status, cors);
+    }
+    if (['/subscription/checkout', '/subscription/change', '/subscription/portal'].includes(path) && body?.plan === 'usage' && !usageBillingConfigured(env)) return authJson({ error: 'billing_unavailable' }, 503, cors);
+    if (path === '/subscription/trial' && body?.plan === 'usage') return authJson({ error: 'invalid_plan' }, 400, cors);
     if (!["/subscription", "/subscription/complete"].includes(path)) {
       if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
       const now = Date.now();
@@ -52,7 +67,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       lock = { userId: user.id, token };
     }
     const origin = cors["access-control-allow-origin"] || "https://mainbrella.com";
-    const returnUrl = `${origin}/#pricing`;
+    const returnUrl = `${origin}/pricing/`;
     let record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
       .bind(user.id).first<BillingRecord>();
     if (path === "/subscription/complete") {
@@ -86,6 +101,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
         if (target) {
           const currentPlan = subscriptionPlan(subscription, env);
           if (!subscription || !currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
+          if (currentPlan === 'usage' && target !== 'usage') return authJson({ error: 'legacy_plan_unavailable' }, 409, cors);
           if (PLAN_ORDER[target] <= PLAN_ORDER[currentPlan]) return authJson({ error: "use_scheduled_change" }, 409, cors);
           if (scheduleID(subscription)) return authJson({ error: "scheduled_change_exists" }, 409, cors);
           if (subscription.cancel_at_period_end) return authJson({ error: "cancellation_pending" }, 409, cors);
@@ -97,6 +113,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
         const plan = body!.plan as Plan;
         const currentPlan = subscriptionPlan(subscription, env);
         if (!currentPlan || !state.entitlement.active) return authJson({ error: "payment_required" }, 402, cors);
+        if (currentPlan === 'usage' && plan !== 'usage') return authJson({ error: 'legacy_plan_unavailable' }, 409, cors);
         if (subscription.cancel_at_period_end) return authJson({ error: "cancellation_pending" }, 409, cors);
         if (PLAN_ORDER[plan] > PLAN_ORDER[currentPlan]) return authJson({ error: "use_upgrade_confirmation" }, 409, cors);
         if (plan === currentPlan) await releaseScheduledChange(env, subscription, user.id);
@@ -113,6 +130,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       return stateResponse(env, updated, cors);
     }
     const plan = body!.plan as Plan;
+    if (plan !== 'usage') return authJson({ error: 'legacy_plan_unavailable' }, 409, cors);
     if (!record) {
       const params = new URLSearchParams({ "metadata[app_user_id]": user.id });
       // Checkout inherits this email from the Customer. Stripe fixes it for the
@@ -130,20 +148,21 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (record.checkout_session_id) {
       const existing = await stripeRequest<CheckoutSession>(env, `/checkout/sessions/${encodeURIComponent(record.checkout_session_id)}`);
       if (existing.status === "open") {
-        if (existing.ui_mode === "custom" && existing.allow_promotion_codes === true && existing.payment_method_collection === "if_required" && existing.metadata?.plan === plan && existing.client_secret) return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
+        if (existing.ui_mode === "custom" && existing.allow_promotion_codes === true && existing.payment_method_collection === "always" && existing.metadata?.plan === plan && existing.client_secret) return authJson({ client_secret: existing.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);
         await stripeRequest(env, `/checkout/sessions/${encodeURIComponent(existing.id)}/expire`, new URLSearchParams());
       }
     }
     const params = new URLSearchParams({
-      mode: "subscription", ui_mode: "custom", allow_promotion_codes: "true", payment_method_collection: "if_required", "payment_method_types[0]": "card",
+      mode: "subscription", ui_mode: "custom", allow_promotion_codes: "true", payment_method_collection: "always", "payment_method_types[0]": "card",
       "metadata[plan]": plan, "subscription_data[metadata][plan]": plan,
       customer: record.stripe_customer_id, client_reference_id: user.id,
       "line_items[0][price]": planPrices(env)[plan], "line_items[0][quantity]": "1",
       "metadata[app_user_id]": user.id, "subscription_data[metadata][app_user_id]": user.id,
-      return_url: `${origin}/?subscription_return=1&session_id={CHECKOUT_SESSION_ID}#pricing`,
+      return_url: `${origin}/pricing/usage?subscription_return=1&session_id={CHECKOUT_SESSION_ID}`,
     });
+    // A card is required even with a coupon; usage is invoiced separately.
     const session = await stripeRequest<CheckoutSession>(env, "/checkout/sessions", params,
-      `mainbrella-optional-card-checkout-${user.id}-${plan}-${record.checkout_session_id || "initial"}`);
+      `mainbrella-usage-checkout-${user.id}-${plan}-${record.checkout_session_id || "initial"}`);
     if (!session.client_secret) throw new Error("billing_unavailable");
     await env.DB.prepare("UPDATE pro_billing SET checkout_session_id = ? WHERE user_id = ?").bind(session.id, user.id).run();
     return authJson({ client_secret: session.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY }, 200, cors);

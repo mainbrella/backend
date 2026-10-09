@@ -224,19 +224,19 @@ repository must remain accessible to the authenticated deployment user.
 | Plan | Monthly USD fee | Concurrent containers | Starts per UTC month | Hard session limit | Idle timeout |
 | --- | ---: | ---: | ---: | --- | --- |
 | No paid plan | $0 | 0 | 0 | No access | No access |
-| Builder | $5 | 5 | 1,000 | 1 hour | 10 minutes |
-| Pro | $180 | 100 | 10,000 | 24 hours | 30 minutes |
-| Scale | $999 | 500 | 100,000 | 72 hours | 60 minutes |
+| Usage | $5 minimum | 100 | 10,000 | 24 hours | 30 minutes |
+| Builder (legacy) | $5 | 5 | 1,000 | 1 hour | 10 minutes |
+| Pro (legacy) | $180 | 100 | 10,000 | 24 hours | 30 minutes |
+| Scale (legacy) | $999 | 500 | 100,000 | 72 hours | 60 minutes |
 
-Every plan supports Lite, Small, Medium, Large, and XL machines, up to 4 vCPU / 12 GiB RAM / 20 GB disk. Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Units/hour are 1, 6, 10, 16, and 28. Both the unit ceiling and container ceiling apply. Browser terminal, SSH and outbound internet are included. Each container permits
+Every plan supports Lite, Small, Medium, Large, and XL machines, up to 4 vCPU / 12 GiB RAM / 20 GB disk. Legacy Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Units/hour are 1, 6, 10, 16, and 28. Both the unit ceiling and container ceiling apply. Browser terminal, SSH and outbound internet are included. Each container permits
 up to four attached terminals (browser and SSH combined); each account permits
 ten live SSH access tokens, each expiring within 15 minutes or the machine deadline. Snapshots,
 filesystem persistence after stop, custom sizes, team seats, SDKs, enhanced logs,
-audit exports and priority capacity are unavailable on all plans. There are no
-compute overages: the start quota is a hard cap and usage billing is disabled.
+audit exports and priority capacity are unavailable on all plans. Legacy plans have no compute overages. New subscriptions use the $5 minimum and durable usage ledger described in [docs/usage-billing.md](docs/usage-billing.md).
 
-A logged-in account has no container allowance until its recognized, single-item,
-quantity-one subscription is active and its current plan period has a successful
+A logged-in account has no container allowance until its recognized subscription
+(a quantity-one base fee plus explicitly allowed metered items) is active and its current plan period has a successful
 Stripe payment. Trials, incomplete, past-due, unpaid, canceled and paused
 subscriptions do not grant access. Local `pro_billing.plan` is a synchronized
 record, not authorization. Stripe lookup failures fail closed with 503; the API
@@ -249,8 +249,10 @@ Reservations are shared across all slots, browser sessions and Bearer sessions.
 The account saves a reservation before boot; readiness runs outside the reservation
 lock so multiple machines can start together. Failed or ambiguous starts remain
 charged. Stopping, upgrading, downgrading, canceling and resubscribing do not reset
-usage. UTC month rollover resets the allowance. Legacy usage migrates from the
-original slot without granting a fresh quota.
+usage. Legacy compute allowances reset at UTC month rollover; usage billing and
+spending caps follow the subscription billing period. Start limits reset on UTC
+months for all plans. Legacy usage migrates from the original slot without
+granting a fresh quota.
 
 Every reservation has a persistent sequence number. Slot cleanup fences canceled
 reservations, so delayed boots and responses cannot resurrect a stopped machine
@@ -558,7 +560,7 @@ and [runtime feasibility](docs/runtime-feasibility.md) for web integration and r
 
 ### Size pricing and cost assumptions
 
-Policy lives in `containers/plan-policy.js`. All plans offer the same five sizes; omitted size defaults to Lite. Runtime is reserved account-wide before boot, with unused runtime released on confirmed stop. Delayed or unreadable machines retain reservations. Budget deadlines survive restarts and terminal activity. Sessions are capped at the UTC month boundary; monthly allowance does not roll over. Starts limits are now 1,000 / 10,000 / 100,000 per UTC month, as lifecycle safeguards. Top-ups and automatic overages are not implemented.
+Policy lives in `containers/plan-policy.js`. All plans offer the same five sizes; omitted size defaults to Lite. Runtime is reserved account-wide before boot, with unused runtime released on confirmed stop. Delayed or unreadable machines retain reservations. Budget deadlines survive restarts and terminal activity. Legacy sessions are capped at the UTC month boundary; monthly allowance does not roll over. Starts limits are now 1,000 / 10,000 / 100,000 per UTC month, as lifecycle safeguards. Legacy plans have no automatic overages. Usage accounts explicitly authorize a higher spending cap before overages; billing follows their subscription period.
 
 At full allowance utilization, Builder and Pro cost $0.02 per compute-unit hour; Scale costs $0.01998. Small / Medium / Large / XL effective hourly prices on Pro are $0.12 / $0.20 / $0.32 / $0.56. These are about 33–42% above equivalent CPU/RAM at E2B/Daytona's published $0.0504/vCPU-hour and $0.0162/GiB-hour rates, before their storage charges and E2B plan fees. Partially used subscriptions have higher effective hourly prices. Resources, CPU scheduling and platform features differ; this is a resource-rate comparison, not a workload-performance benchmark.
 

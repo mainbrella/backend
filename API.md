@@ -345,7 +345,8 @@ that account's existing containers.
 
 | Plan | USD/month | Concurrent containers | Starts/UTC month | Hard limit | Idle timeout |
 | --- | ---: | ---: | ---: | --- | --- |
-| Builder | $5 | 5 | 1,000 | 1 hour | 10 minutes |
+| Usage | $5 minimum | 100 | 10,000 | 24 hours | 30 minutes |
+| Builder (legacy) | $5 | 5 | 1,000 | 1 hour | 10 minutes |
 | Pro | $180 | 100 | 10,000 | 24 hours | 30 minutes |
 | Scale | $999 | 500 | 100,000 | 72 hours | 60 minutes |
 
@@ -353,7 +354,7 @@ All plans offer five sizes with bash, tmux and outbound internet. `POST /contain
 terminal connections (browser/SSH combined). An account permits ten live SSH
 access tokens, each lasting at most 15 minutes or the machine deadline. Process
 resume after stop, custom resources, teams, advanced logs/audits and
-priority capacity are unavailable. Monthly fees are fixed; compute usage is not billed.
+priority capacity are unavailable. New usage subscriptions have a $5 monthly minimum credited toward resource usage. Existing fixed-price subscriptions retain their terms.
 Ordinary stop discards unsaved filesystem changes; save a workspace explicitly
 to restore its filesystem into a fresh container.
 
@@ -510,14 +511,16 @@ Bearer automation credentials do not authorize purchases or plan changes.
 | --- | --- |
 | `GET /subscription/config` | Public server plan definitions and billing availability. |
 | `GET /subscription` | Current Stripe subscription, paid `active`, `plan`, `valid_until` (Unix ms), `scheduled_plan`, and `scheduled_change_at` (Unix seconds). |
-| `POST /subscription/checkout` with `{"plan":"builder"}` | Creates/reuses account-owned embedded checkout; rejects an existing live subscription. |
+| `POST /subscription/checkout` with `{"plan":"usage"}` | Creates/reuses account-owned embedded checkout for the $5 monthly minimum; requires a saved payment method and rejects an existing live subscription. New legacy purchases are unavailable. |
 | `POST /subscription/complete` with `{"session_id":"cs_..."}` | Verifies owned checkout completion and current paid entitlement. |
 | `POST /subscription/portal` with `{"plan":"pro"}` | Stripe confirmation URL for an upgrade with immediate invoiced proration. |
 | `POST /subscription/portal` with `{}` | Payment methods and invoice history portal URL. |
-| `POST /subscription/change` with `{"plan":"builder","confirm":true}` | Schedules a downgrade for renewal. Select the current plan to remove a scheduled downgrade. |
+| `POST /subscription/change` with `{"plan":"usage","confirm":true}` | Explicitly migrates an existing legacy subscription at renewal. Existing legacy downgrades remain supported. Select the current plan to remove a scheduled change. |
+| `GET /subscription/usage` | Current billing period, measured compute, estimated bill, reserved cost, spending cap and usage alert. |
+| `POST /subscription/usage` with `{"spendLimitCents":5000,"authorizeOverages":true}` | Sets the account spending cap. Any cap above the default $5 requires explicit overage authorization. |
 | `POST /subscription/cancel` with `{"confirm":true}` | Cancels at paid period end and removes a pending downgrade. |
 | `POST /subscription/resume` with `{}` | Resumes a subscription pending period-end cancellation. |
-| `POST /subscription/webhook` | Stripe signature authenticated; private integration for live reconciliation. |
+| `POST /subscription/webhook` | Stripe signature authenticated; private integration for live entitlement reconciliation and renewal/final usage invoicing. |
 
 Use the web billing controls for explicit user confirmation. Never perform a
 purchase, plan change or cancellation as part of an ordinary container job.
@@ -838,11 +841,11 @@ after resolution. Incident text is public.
 | large | standard-3 | 2 | 8 GiB | 16 GB | 16 |
 | xl | standard-4 | 4 | 12 GiB | 20 GB | 28 |
 
-Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Container ceilings and monthly start safeguards (1,000 / 10,000 / 100,000) also apply. Monthly usage resets on the UTC calendar month, without rollover.
+Legacy Builder includes 250 compute-unit hours/month and 28 concurrent units; Pro 9,000 and 128; Scale 50,000 and 640. Container ceilings and monthly start safeguards (1,000 / 10,000 / 100,000) also apply. Monthly usage resets on the UTC calendar month, without rollover.
 
-Create with `{"catalogId":"node","size":"medium"}`. `GET /containers` returns `sizes`, `limits.maxComputeUnitHours`, `limits.maxConcurrentComputeUnits`, and `usage.computeUnitHours`, `reservedComputeUnitHours`, `availableComputeUnitHours`, and `concurrentComputeUnits`. Runtime is reserved durably before provisioning; unused runtime is released on a reconciled stop. Used hours include provisioning and idle time. Ambiguous starts retain reservations until reconciliation. Capacity rejection does not reserve usage. Machines receive an immutable budget deadline and stop at the earliest of that deadline, idle/session/paid-access expiry, or the UTC month boundary. Clients must honor returned `expiresAt`.
+Create with `{"catalogId":"node","size":"medium"}`. `GET /containers` returns `sizes`, `limits.maxComputeUnitHours`, `limits.maxConcurrentComputeUnits`, and `usage.computeUnitHours`, `reservedComputeUnitHours`, `availableComputeUnitHours`, and `concurrentComputeUnits`. Runtime is reserved durably before provisioning; unused runtime is released on a reconciled stop. Used hours include provisioning and idle time. Ambiguous starts retain reservations until reconciliation. Capacity rejection does not reserve usage. Machines receive an immutable budget deadline and stop at the earliest of that deadline, idle/session/paid-access expiry, or, for legacy plans, the UTC month boundary. Clients must honor returned `expiresAt`.
 
-Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. No automatic overages or top-ups are enabled.
+Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. Legacy plans have no overages. Usage subscriptions meter compute at $0.02 per unit-hour, subject to a spending cap.
 
 ## Saved workspaces and portable export
 
@@ -856,7 +859,8 @@ Restore with `POST /containers` and `{workspaceId}` using a new persisted creati
 
 | Plan | Saved workspaces | Reserved capacity | Retention | Saves/month | Capture capacity/month | Retained capture capacity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Builder | 3 | 8 GB | 7 days | 10 | 20 GB | 20 GB |
+| Usage | 20 | 160 GB | 14 days | 100 | 400 GB | 400 GB |
+| Builder (legacy) | 3 | 8 GB | 7 days | 10 | 20 GB | 20 GB |
 | Pro | 20 | 160 GB | 14 days | 100 | 400 GB | 400 GB |
 | Scale | 100 | 1,000 GB | 29 days | 500 | 2,000 GB | 2,000 GB |
 
@@ -934,3 +938,16 @@ lease, and give anyone with the URL access. Cookie-based apps are unsupported.
 Apply `migrations/013_repo_launches.sql` before deploying this API. Production
 rollout requires the frontend, API and new SDK CLI release together; source
 availability does not imply the currently published npm package contains `repo`.
+
+
+## Usage subscription billing
+
+New accounts purchase one monthly Stripe subscription using `plan: "usage"` at `/subscription/checkout`. The $5 monthly minimum covers the first $5 of aggregate resource usage. Compute costs $0.02 per compute-unit hour; weighted hourly rates are Lite $0.02, Small $0.12, Medium $0.20, Large $0.32 and XL $0.56. Provisioning and idle time count; only elapsed allocation is billed. Ephemeral machine disk is included. Storage, dedicated IPs and email have no separately enabled usage charges yet.
+
+Mainbrella keeps a durable account ledger by Stripe subscription billing period, independently of calendar-month start limits. Usage accounts return `limits.maxComputeUnitHours: null`; `availableComputeUnitHours` expresses remaining spending capacity after runtime reservations. `GET /containers` additionally returns `billing` with period bounds, actual compute-unit hours, an estimated total in USD cents, spending cap, committed cost, overage authorization, invoicing status and an alert at 50%, 80% or 100%. Legacy accounts return `billing: null` and retain their fixed UTC-month allowances. All clients must honor `expiresAt`; usage sandboxes still have a 24-hour session deadline and 30-minute idle timeout. Always-on deployments are a separate future lifecycle mode.
+
+Browser-only `GET /subscription/usage` returns `{billing}`. `POST /subscription/usage` accepts `{spendLimitCents:500}` to keep overages disabled, or `{spendLimitCents:5000,authorizeOverages:true}` to authorize usage charges up to $50 per billing month. Dollar caps exclude taxes; supported caps are $5–$1,000. Raising a cap requires explicit authorization, recorded with its timestamp. A cap below committed usage returns 409 `spend_limit_below_committed_usage`; missing overage consent returns 400 `overage_authorization_required`. New starts can be shortened or rejected with 429 `spend_limit_reached`. Stopping releases unused reservations. Paid access and normal concurrency/start safeguards still apply.
+
+At `invoice.created`, the signed webhook reconciles closed ledger periods, subtracts the included $5 once across all resources, and attaches any overage as an invoice item to that exact draft renewal invoice. Stable ledger identifiers, an immutable pending write, HTTP idempotency keys and Stripe invoice-item metadata prevent retries from creating duplicate charges. Cancellation ends access and generates a final subscription-linked usage invoice without another minimum. Stripe manages payment collection, receipts and failed invoices. Billing failures remain retryable and cannot grant unpaid access.
+
+Existing subscriptions stay unchanged until an authenticated customer confirms `POST /subscription/change` with `{plan:"usage",confirm:true}`. The same subscription switches at renewal; there is no second subscription or checkout. New purchases of legacy plans return 409 `legacy_plan_unavailable`. See `docs/usage-billing.md` for migration, Stripe configuration and qualification requirements.

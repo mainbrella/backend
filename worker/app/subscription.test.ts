@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleSubscriptionRequest } from './subscription';
 import { PLAN_PRICES, billingSubscription, subscriptionPlan, type Plan, type BillingEnv } from '../lib/stripe';
-import { billingFixture, billingRequest, paidSubscription, TEST_CUSTOMER, TEST_USER } from './billing-test-helpers';
+import { billingFixture, billingRequest, paidSubscription, TEST_USAGE_PRICE, TEST_CUSTOMER, TEST_USER } from './billing-test-helpers';
 
 const post = (path: string, body: unknown = {}) => billingRequest(path, body);
 
@@ -46,25 +46,13 @@ test('an unpaid account has no plan even when Stripe configuration is absent', a
   assert.equal(f.calls.length, 0);
 });
 
-for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
-  test(`authenticated checkout selects only the fixed ${plan} price and quantity one`, async t => {
+for (const plan of Object.keys(PLAN_PRICES) as (keyof typeof PLAN_PRICES)[]) {
+  test(`legacy ${plan} plans cannot be purchased by new accounts`, async t => {
     const f = await billingFixture(t, plan, false); f.state.subscriptions = [];
     const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env);
-    assert.equal(response.status, 200);
-    const customer = f.calls.find(c => c.url.pathname === '/v1/customers')!;
-    assert.equal(customer.params.get('metadata[app_user_id]'), TEST_USER);
-    assert.equal(customer.params.get('email'), 'test@example.com');
-    const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
-    assert.equal(checkout.params.get('line_items[0][price]'), PLAN_PRICES[plan]);
-    assert.equal(checkout.params.get('line_items[0][quantity]'), '1');
-    assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
-    assert.equal(checkout.params.get('ui_mode'), 'custom');
-    assert.equal(checkout.params.get('allow_promotion_codes'), 'true');
-    assert.equal(checkout.params.get('payment_method_collection'), 'if_required');
-    assert.equal(checkout.params.has('customer_email'), false);
-    assert.equal(checkout.params.get('client_reference_id'), TEST_USER);
-    assert.equal(checkout.params.has('subscription_data[trial_period_days]'), false);
-    assert.equal((f.sqlite.prepare('SELECT checkout_session_id FROM pro_billing').get() as any).checkout_session_id, 'cs_new');
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: 'legacy_plan_unavailable' });
+    assert.equal(f.calls.length, 0);
   });
   test(`verified ${plan} subscription is refreshed from live invoices and persisted`, async t => {
     const f = await billingFixture(t, plan);
@@ -78,27 +66,28 @@ for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
   });
 }
 
-test('checkout reuses an open matching session and expires a session for a different plan', async t => {
-  const f = await billingFixture(t); f.state.subscriptions = [];
-  const reused = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'builder' }), f.env);
+test('usage checkout reuses a compatible session and expires a legacy session', async t => {
+  const f = await billingFixture(t, 'usage'); f.state.subscriptions = [];
+  const reused = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
   assert.deepEqual(await reused.json(), { client_secret: 'cs_old_secret', publishable_key: 'pk_test' });
-  const changed = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'scale' }), f.env);
+  f.state.checkout.metadata.plan = 'builder';
+  const changed = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
   assert.equal(changed.status, 200);
   assert.ok(f.calls.some(c => c.url.pathname.endsWith('/cs_old/expire')));
-  assert.equal(f.calls.at(-1)?.params.get('line_items[0][price]'), PLAN_PRICES.scale);
+  assert.equal(f.calls.at(-1)?.params.get('line_items[0][price]'), TEST_USAGE_PRICE);
 });
 
 for (const legacy of [{ ui_mode: 'embedded', allow_promotion_codes: true }, { ui_mode: 'custom', allow_promotion_codes: false },
-  { payment_method_collection: 'always' }, { payment_method_collection: null }]) {
+  { payment_method_collection: 'if_required' }, { payment_method_collection: null }]) {
   test(`checkout replaces incompatible session ${JSON.stringify(legacy)}`, async t => {
-    const f = await billingFixture(t); f.state.subscriptions = [];
+    const f = await billingFixture(t, 'usage'); f.state.subscriptions = [];
     Object.assign(f.state.checkout, legacy);
-    const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'builder' }), f.env);
+    const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
     assert.equal(response.status, 200);
     assert.ok(f.calls.some(c => c.url.pathname.endsWith('/cs_old/expire')));
     assert.equal(f.calls.at(-1)?.params.get('ui_mode'), 'custom');
     assert.equal(f.calls.at(-1)?.params.get('allow_promotion_codes'), 'true');
-    assert.equal(f.calls.at(-1)?.params.get('payment_method_collection'), 'if_required');
+    assert.equal(f.calls.at(-1)?.params.get('payment_method_collection'), 'always');
   });
 }
 
@@ -106,7 +95,7 @@ test('live active, trialing, past_due, and unpaid subscriptions block duplicate 
   const f = await billingFixture(t);
   for (const status of ['active', 'trialing', 'past_due', 'unpaid', 'paused', 'incomplete']) {
     f.state.subscriptions[0].status = status;
-    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'pro' }), f.env)).status, 409);
+    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env)).status, 409);
   }
   assert.ok(f.calls.every(c => c.url.pathname === '/v1/subscriptions'));
 });
@@ -220,9 +209,9 @@ test('competing checkout plans serialize so they cannot create duplicate subscri
   let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
   let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
   f.state.override = async url => { if (url.pathname === '/v1/subscriptions') { entered(); await pending; } return undefined; };
-  const first = handleSubscriptionRequest(post('/subscription/checkout', { plan: 'pro' }), f.env);
+  const first = handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
   await started;
-  const competing = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'scale' }), f.env);
+  const competing = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
   assert.equal(competing.status, 409); assert.deepEqual(await competing.json(), { error: 'billing_operation_pending' });
   release(); assert.equal((await first).status, 200);
   assert.equal(f.calls.filter(c => c.url.pathname === '/v1/checkout/sessions').length, 1);
@@ -266,14 +255,12 @@ const localPrices = {
   pro: 'price_1UNs6DGgJdfq06olo5rl4TS7',
   scale: 'price_1UNs6sGgJdfq06olIK6KqNNf',
 };
-for (const plan of Object.keys(PLAN_PRICES) as Plan[]) {
-  test(`local checkout selects the expected ${plan} price`, async t => {
+for (const plan of Object.keys(PLAN_PRICES) as (keyof typeof PLAN_PRICES)[]) {
+  test(`local legacy ${plan} checkout is unavailable`, async t => {
     const f = await billingFixture(t, plan, false);
-    f.env.LOCAL_DEV = 'true';
-    f.state.subscriptions = [];
-    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env)).status, 200);
-    const checkout = f.calls.find(c => c.url.pathname === '/v1/checkout/sessions')!;
-    assert.equal(checkout.params.get('line_items[0][price]'), localPrices[plan]);
+    f.env.LOCAL_DEV = 'true'; f.state.subscriptions = [];
+    assert.equal((await handleSubscriptionRequest(post('/subscription/checkout', { plan }), f.env)).status, 409);
+    assert.equal(f.calls.length, 0);
   });
 
   test(`local ${plan} subscription and invoices authorize paid access only in local mode`, async t => {
@@ -319,3 +306,38 @@ for (const plan of ['pro', 'scale'] as const) {
     assert.equal(portal.params.get('flow_data[subscription_update_confirm][items][0][price]'), localPrices[plan]);
   });
 }
+
+
+test('usage checkout preserves one customer and one monthly recurring price, with a required card', async t => {
+  const f = await billingFixture(t, 'usage', false); f.state.subscriptions = [];
+  const response = await handleSubscriptionRequest(post('/subscription/checkout', { plan: 'usage' }), f.env);
+  assert.equal(response.status, 200);
+  const checkout = f.calls.find(call => call.url.pathname === '/v1/checkout/sessions')!;
+  assert.equal(checkout.params.get('mode'), 'subscription');
+  assert.equal(checkout.params.get('line_items[0][price]'), TEST_USAGE_PRICE);
+  assert.equal(checkout.params.get('line_items[0][quantity]'), '1');
+  assert.equal(checkout.params.has('line_items[1][price]'), false);
+  assert.equal(checkout.params.get('payment_method_collection'), 'always');
+  assert.equal(checkout.params.get('customer'), TEST_CUSTOMER);
+});
+
+test('legacy subscribers consent to usage at renewal without changing current paid access or creating a subscription', async t => {
+  const f = await billingFixture(t, 'pro');
+  const response = await handleSubscriptionRequest(post('/subscription/change', { plan: 'usage', confirm: true }), f.env);
+  assert.equal(response.status, 200);
+  const data = await response.json() as any;
+  assert.equal(data.plan, 'pro'); assert.equal(data.scheduled_plan, 'usage'); assert.equal(data.active, true);
+  const change = f.calls.find(call => call.params.has('phases[1][items][0][price]'))!;
+  assert.equal(change.params.get('phases[1][items][0][price]'), TEST_USAGE_PRICE);
+  assert.equal(change.params.get('phases[1][items][0][quantity]'), '1');
+  assert.equal(change.params.has('phases[1][items][1][price]'), false);
+  assert.ok(!f.calls.some(call => call.url.pathname === '/v1/checkout/sessions'));
+});
+
+test('usage subscriptions verify the paid minimum and cannot move to legacy plans', async t => {
+  const f = await billingFixture(t, 'usage');
+  const response = await handleSubscriptionRequest(billingRequest(), f.env);
+  assert.equal(response.status, 200); assert.equal((await response.json() as any).plan, 'usage');
+  assert.equal((f.sqlite.prepare('SELECT plan FROM pro_billing').get() as any).plan, 'usage');
+  assert.equal((await handleSubscriptionRequest(post('/subscription/change', { plan: 'builder', confirm: true }), f.env)).status, 409);
+});

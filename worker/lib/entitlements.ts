@@ -1,7 +1,7 @@
 import { activeTrial, type Trial } from './trial-coupons';
 import { billingSubscription, planPrices, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
 
-export interface Entitlement { plan: Plan | null; active: boolean; validUntil: number | null; checkedAt?: number }
+export interface Entitlement { plan: Plan | null; active: boolean; validUntil: number | null; checkedAt?: number; billing?: import('../../containers/usage-policy.js').BillingPeriod }
 export interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
 export interface BillingState { record: BillingRecord | null; subscription: StripeSubscription | null; entitlement: Entitlement; trial?: Trial | null }
 const unpaid = (): Entitlement => ({ plan: null, active: false, validUntil: null });
@@ -84,13 +84,21 @@ async function paidThrough(env: BillingEnv, subscription: StripeSubscription, pl
 export async function subscriptionEntitlement(env: BillingEnv, subscription: StripeSubscription | null): Promise<Entitlement> {
   const plan = subscriptionPlan(subscription, env);
   const now = Date.now() / 1000;
-  const periodEnd = subscription?.items.data[0]?.current_period_end;
+  const baseItem = subscription?.items.data.find(item => item.price.id === (plan ? planPrices(env)[plan] : ""));
+  const periodEnd = baseItem?.current_period_end;
   if (!plan || !subscription || subscription.status !== "active" || subscription.pause_collection
     || !Number.isFinite(periodEnd) || periodEnd! <= now) return unpaid();
   const proofEnd = await paidThrough(env, subscription, plan, now);
   if (!proofEnd) return unpaid();
   const validUntil = Math.min(periodEnd!, proofEnd, subscription.cancel_at ?? Infinity) * 1000;
-  return validUntil > Date.now() ? { plan, active: true, validUntil } : unpaid();
+  if (validUntil <= Date.now()) return unpaid();
+  if (plan === 'usage') {
+    const periodStart = baseItem?.current_period_start;
+    if (!subscription.customer || !Number.isSafeInteger(periodStart) || !periodStart || periodStart > now) return unpaid();
+    return { plan, active: true, validUntil, billing: { customerId: subscription.customer, subscriptionId: subscription.id,
+      periodStart: periodStart * 1000, periodEnd: periodEnd! * 1000 } };
+  }
+  return { plan, active: true, validUntil };
 }
 
 export async function syncSubscriptionRecord(env: BillingEnv, userId: string, subscription: StripeSubscription | null): Promise<void> {
@@ -99,7 +107,7 @@ export async function syncSubscriptionRecord(env: BillingEnv, userId: string, su
     subscription_status = ?, cancel_at_period_end = ?, current_period_end = ?,
     synced_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?`)
     .bind(plan, subscription?.id || null, subscription?.status || null,
-      subscription?.cancel_at_period_end ? 1 : 0, subscription?.items.data[0]?.current_period_end ?? null, userId).run();
+      subscription?.cancel_at_period_end ? 1 : 0, subscription?.items.data.find(item => plan && item.price.id === planPrices(env)[plan])?.current_period_end ?? null, userId).run();
 }
 
 export async function resolveBillingState(env: BillingEnv, userId: string): Promise<BillingState> {

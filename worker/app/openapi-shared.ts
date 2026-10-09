@@ -8,7 +8,7 @@ export type OpenAPIApi = HonoOpenAPIRouterType<{ Bindings: Env }>;
 export const cookieSecurity = [{ cookieAuth: [] }];
 export const containerSecurity: NonNullable<OpenAPIRouteSchema["security"]> = [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }];
 export const nativeSecurity = [{ nativeBearer: [] }];
-export const planSchema = z.enum(["builder", "pro", "scale"]);
+export const planSchema = z.enum(["usage", "builder", "pro", "scale"]);
 export const okSchema = z.object({ ok: z.boolean() });
 export const userSchema = z.object({
   id: z.string(), email: z.string().nullable(), name: z.string(),

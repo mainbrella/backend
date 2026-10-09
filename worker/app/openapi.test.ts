@@ -34,7 +34,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/config": ["get"], "/subscription": ["get"],
   "/subscription/trial": ["post"], "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
-  "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
+  "/subscription/usage": ["get", "post"], "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
   "/containers/files": ["get", "put"],
@@ -185,7 +185,7 @@ test("schema describes optional container bodies, multipart image source, and We
   assert.ok(paths["/containers/terminal"].get.responses[101]);
   assert.ok(paths["/ssh/connect"].get.responses[101]);
   assert.deepEqual(paths["/subscription/checkout"].post.security, [{ cookieAuth: [] }]);
-  assert.match(paths["/subscription/checkout"].post.description, /Local development uses separate hard-coded Stripe prices for all plans/);
+  assert.match(paths["/subscription/checkout"].post.description, /usage billing requires explicitly configured test-mode recurring price/);
   assert.deepEqual(paths["/containers"].post.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
 });
 
