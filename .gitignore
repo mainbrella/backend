@@ -9,3 +9,4 @@ __pycache__/
 /artifacts/
 /sdk/python/build/
 /sdk/python/dist/
+/ingress/.env

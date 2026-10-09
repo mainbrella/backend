@@ -1,4 +1,6 @@
 import { validPreviewId, validPreviewToken } from '../containers/preview-contract.js';
+import { handleProjectGateway } from './project-gateway';
+import type { ProjectHostingEnv } from './lib/project-hosting';
 import { previewDomain, previewOrigin, previewsConfigured, previewTokenHash, prunePreviewRoutes, validPreviewGeneration,
   type PreviewRoute, type PreviewRoutingEnv } from './lib/preview-routing';
 
@@ -59,10 +61,20 @@ export async function handlePreviewGateway(request: Request, env: PreviewRouting
 }
 
 export default {
-  fetch: handlePreviewGateway,
+  fetch: handleApplicationGateway,
   async scheduled(_event: ScheduledController, env: PreviewRoutingEnv): Promise<void> {
     if (env.PREVIEW_ROUTES) await prunePreviewRoutes(env.PREVIEW_ROUTES).catch(() => {
       console.error('preview_cleanup_failed');
     });
   },
 } satisfies ExportedHandler<PreviewRoutingEnv>;
+
+// Keep bearer preview traffic on its existing path and policy. Stable project
+// hosts and registered customer hosts use separate publication authorization.
+export async function handleApplicationGateway(request: Request, env: ProjectHostingEnv): Promise<Response> {
+  const hostname = new URL(request.url).hostname;
+  const domain = previewDomain(env);
+  const label = domain && hostname.endsWith(`.${domain}`) ? hostname.slice(0, -(domain.length + 1)) : '';
+  if (hostname === domain || validPreviewToken(label)) return handlePreviewGateway(request, env);
+  return handleProjectGateway(request, env);
+}

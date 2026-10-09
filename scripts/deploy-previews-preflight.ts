@@ -31,8 +31,20 @@ export function previewConfiguration(api: Config, gateway: Config, containers: C
     requireCheck(bindings?.length === 1 && bindings[0].script_name === containers.name && bindings[0].class_name === 'UserContainer',
       'Both USER_CONTAINER bindings must target the private runtime.');
   }
-  requireCheck(gateway.durable_objects.bindings.length === 1 && gateway.d1_databases?.length === 1,
-    'The gateway must bind only USER_CONTAINER and the dedicated PREVIEW_ROUTES database.');
+  const accountBindings = gateway.durable_objects.bindings.filter((binding: Config) => binding.name === 'CONTAINER_ACCOUNT');
+  requireCheck(accountBindings.length <= 1 && (!accountBindings.length || accountBindings[0].script_name === api.name
+    && accountBindings[0].class_name === 'ContainerAccount')
+    && gateway.durable_objects.bindings.length === 1 + accountBindings.length && gateway.d1_databases?.length === 1,
+    'The gateway may bind only USER_CONTAINER, the owner-scoped CONTAINER_ACCOUNT registry, and the dedicated PREVIEW_ROUTES database.');
+  const projectsEnabled = api.vars?.PROJECT_HOSTING_ENABLED === 'true';
+  requireCheck((api.vars?.PROJECT_HOSTING_ENABLED ?? 'false') === (gateway.vars?.PROJECT_HOSTING_ENABLED ?? 'false')
+    && ['true', 'false'].includes(api.vars?.PROJECT_HOSTING_ENABLED ?? 'false'), 'Project hosting flags must match; use false while staging.');
+  if (projectsEnabled) {
+    requireCheck(accountBindings.length === 1, 'Project hosting requires the owned container network registry.');
+    for (const key of ['PROJECT_DOMAIN_PROVIDER', 'PROJECT_CLOUDFLARE_ZONE_ID', 'PROJECT_INGRESS_HOST', 'PROJECT_APEX_IPS']) {
+      requireCheck(api.vars?.[key] === gateway.vars?.[key], 'API and gateway project ingress configuration must match.');
+    }
+  }
   for (const key of ['services', 'kv_namespaces', 'r2_buckets', 'queues', 'analytics_engine_datasets', 'ai', 'browser',
     'dispatch_namespaces', 'hyperdrive', 'send_email', 'unsafe', 'env']) {
     requireCheck(!gateway[key], 'Unexpected gateway bindings or environment overrides; review isolation before rollout.');
@@ -61,8 +73,14 @@ export function previewConfiguration(api: Config, gateway: Config, containers: C
     && [`*.${domain}/*`, `https://*.${domain}/*`].includes(route.pattern));
   const apexRoutes = routes.filter((route: Config) => route && typeof route === 'object'
     && route.custom_domain === true && route.pattern === domain);
-  requireCheck(wildcardRoutes.length === 1 && apexRoutes.length <= 1 && routes.length === 1 + apexRoutes.length,
-  'Configure exactly one wildcard Worker route and optionally the exact apex custom domain for its redirect.');
+  const customRoutes = routes.filter((route: Config) => route && typeof route === 'object'
+    && route.pattern === '*/*' && !route.custom_domain);
+  requireCheck(wildcardRoutes.length === 1 && apexRoutes.length <= 1 && customRoutes.length <= 1
+    && (!customRoutes.length || projectsEnabled && gateway.vars?.PROJECT_DOMAIN_PROVIDER === 'cloudflare'
+      && gateway.vars?.PROJECT_CLOUDFLARE_ZONE_ID
+      && customRoutes[0].zone_id === gateway.vars.PROJECT_CLOUDFLARE_ZONE_ID)
+    && routes.length === 1 + apexRoutes.length + customRoutes.length,
+  'Configure one wildcard route, optionally the exact apex redirect, and a zone-pinned SaaS catch-all only for enabled Cloudflare project hosting.');
   requireCheck(gateway.triggers?.crons?.length === 1 && gateway.triggers.crons[0] === '*/5 * * * *',
     'Configure the five-minute routing cleanup schedule.');
   return { domain, issuanceEnabled: enabled === 'true' };

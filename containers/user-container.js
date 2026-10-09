@@ -6,6 +6,7 @@ import { accessFile } from "./files.js";
 import { accessFilesystem } from './filesystem.js';
 import { ManagedExecutions } from './executions.js';
 import { ContainerPreviews } from './previews.js';
+import { ContainerProjectIngress } from './project-ingress.js';
 import { WorkloadWebhooks } from './webhooks.js';
 import { exportWorkspace } from './workspace-export.js';
 import { publishActivity, validActivityUser } from './activity.js';
@@ -27,6 +28,9 @@ export class UserContainer extends DurableObject {
     this.executions.onStatus = record => this.notifyActivity({ resource: 'executions', createdAt: record.createdAt, executionId: record.id });
     this.previews = new ContainerPreviews(this.controller, { allowLocal: env.LOCAL_DEV === 'true' });
     this.previews.onChange = createdAt => this.notifyActivity({ resource: 'previews', createdAt });
+    this.projects = new ContainerProjectIngress(this.controller, { allowLocal: env.LOCAL_DEV === 'true' });
+    // Share admission capacity across preview and project connections.
+    this.projects.active = this.previews.active;
     this.webhooks = new WorkloadWebhooks(this.controller, env);
     this.controller.webhooks = this.webhooks;
     this.controller.observations.onAppend = event => {
@@ -37,6 +41,7 @@ export class UserContainer extends DurableObject {
     this.controller.onStarted = createdAt => this.monitor(createdAt);
     this.controller.onStopped = () => {
       this.previews.close();
+      this.projects.close();
       for (const session of this.terminals) session.close(1000, 'Container stopped');
       for (const session of this.commands) session.close();
     };
@@ -66,6 +71,8 @@ export class UserContainer extends DurableObject {
     if (path.startsWith('/workspaces/')) return this.controller.fetch(request);
     if (path.startsWith('/observations/webhook')) return this.webhooks.fetch(request);
     if (path === '/previews') return this.previews.manage(request);
+    if (path === '/project-bindings') return this.projects.manage(request);
+    if (path === '/project' || path.startsWith('/project/')) return this.projects.forward(request);
     if (path === '/preview' || path.startsWith('/preview/')) return this.previews.forward(request);
     if (path.startsWith('/filesystem/')) return accessFilesystem(this.controller, request, this.commands);
     if (new URL(request.url).pathname === '/executions' || new URL(request.url).pathname.startsWith('/executions/')) return this.executions.fetch(request);

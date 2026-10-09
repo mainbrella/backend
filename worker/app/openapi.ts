@@ -3,6 +3,7 @@ import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
 import { registerProjectRoutes } from "./openapi-projects";
+import { registerProjectHostingRoutes } from './openapi-project-hosting';
 import { registerAdminRoutes } from "./openapi-admin";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
@@ -62,6 +63,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);
   registerProjectRoutes(api, handler);
+  registerProjectHostingRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);
   registerContainerRoutes(api, handler);
   registerCommandRoutes(api, handler);

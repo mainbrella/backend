@@ -135,16 +135,27 @@ export class ContainerPreviews {
     // rollout. A present but invalid attestation always fails closed.
     if (origin !== null && !validPreviewOrigin(origin, token, this.allowLocal)) return c.respond({ error: 'preview_unavailable' }, 403);
     const tokenHash = await hash(token);
-    const admission = await c.serialized(async () => {
+    return this.forwardTransport(request, async () => {
       const metadata = await this.metadata(request.headers.get('x-preview-created-at'));
-      if (!metadata) return { error: 403 };
-      const grant = (await this.grants(metadata)).find(item => item.tokenHash === tokenHash);
+      if (!metadata) return null;
+      return (await this.grants(metadata)).find(item => item.tokenHash === tokenHash);
+    }, '/preview', origin);
+  }
+
+  // Both public transports use the same generation lock, bounded connection
+  // pool, stream cancellation, WebSocket bridge and lease/entitlement checks.
+  async forwardTransport(request, lookup, prefix, origin, prepareHeaders, prepareResponseHeaders) {
+    const c = this.controller;
+    const url = new URL(request.url);
+    const resource = prefix === '/project' ? 'project' : 'preview';
+    const admission = await c.serialized(async () => {
+      const grant = await lookup();
       if (!grant) return { error: 403 };
       if (this.active.size >= MAX_PREVIEW_CONNECTIONS) return { error: 429 };
       const session = this.session(grant, request.signal);
       if (session.closed) return { error: 403 };
-      const headers = new Headers(request.headers);
-      for (const name of [...headers.keys()]) {
+      const headers = prepareHeaders ? prepareHeaders(request.headers) : new Headers(request.headers);
+      if (!prepareHeaders) for (const name of [...headers.keys()]) {
         if (name.startsWith('x-preview-') || name.startsWith('x-mainbrella-')
           || name.startsWith('x-exec-') || name.startsWith('x-terminal-') || name.startsWith('x-ssh-')
           || ['authorization', 'cookie', 'host', 'forwarded', 'x-forwarded-host', 'x-forwarded-for', 'x-forwarded-proto'].includes(name)) headers.delete(name);
@@ -156,7 +167,7 @@ export class ContainerPreviews {
         headers.set('x-forwarded-proto', new URL(origin).protocol.slice(0, -1));
       }
       const target = new URL('http://container');
-      target.pathname = url.pathname.slice('/preview'.length) || '/';
+      target.pathname = url.pathname.slice(prefix.length) || '/';
       target.search = url.search;
       let response;
       try {
@@ -178,7 +189,7 @@ export class ContainerPreviews {
       }).catch(() => {});
       return { session, response };
     });
-    if (admission.error) return c.respond({ error: admission.error === 429 ? 'preview_connection_limit' : 'preview_unavailable' }, admission.error);
+    if (admission.error) return c.respond({ error: `${resource}_${admission.error === 429 ? 'connection_limit' : 'unavailable'}` }, admission.error);
     const { session } = admission;
     try {
       let timeout;
@@ -195,9 +206,10 @@ export class ContainerPreviews {
       // Preserve the application payload as well as disabling response caching.
       headers.set('cache-control', 'no-store, no-transform');
       headers.set('referrer-policy', 'no-referrer');
-      // Cookie-based application sessions remain unsupported. Forwarding the
-      // attested app origin must never propagate account cookies to the guest.
-      headers.delete('set-cookie');
+      // Bearer previews discard cookies; projects normalize app cookies to the
+      // individual host and discard the reserved account-session cookie.
+      if (prepareResponseHeaders) prepareResponseHeaders(response.headers, headers);
+      else headers.delete('set-cookie');
       if (response.status === 101) {
         if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !response.webSocket) throw new Error('bad_upgrade');
         return this.bridge(response.webSocket, session, headers);
@@ -222,7 +234,7 @@ export class ContainerPreviews {
         cancel: async () => { session.close('Client disconnected'); await reader.cancel(); },
       });
       return new Response(stream, { status: response.status, headers });
-    } catch { session.close('Preview unavailable'); return c.respond({ error: 'preview_unavailable' }, 502); }
+    } catch { session.close('Transport unavailable'); return c.respond({ error: `${resource}_unavailable` }, 502); }
   }
 
   bridge(upstream, session, headers) {

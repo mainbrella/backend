@@ -52,6 +52,9 @@ test('unsafe isolation, routing, logging and lifecycle configuration fails befor
     (o: any) => { o.gateway.account_id = 'other'; },
     (o: any) => { o.containers.name = o.api.name; },
     (o: any) => { o.gateway.durable_objects.bindings[0].script_name = o.api.name; },
+    (o: any) => { o.gateway.durable_objects.bindings[1].script_name = 'untrusted'; },
+    (o: any) => { o.gateway.durable_objects.bindings.push({ name: 'ACCOUNTS', class_name: 'AccountActivity', script_name: o.api.name }); },
+    (o: any) => { o.gateway.vars.PROJECT_HOSTING_ENABLED = 'true'; },
     (o: any) => { o.api.durable_objects.bindings.push(o.api.durable_objects.bindings.find((binding: any) => binding.name === 'USER_CONTAINER')); },
     (o: any) => { o.gateway.d1_databases.push(o.api.d1_databases[0]); },
     (o: any) => { o.gateway.services = [{ binding: 'ACCOUNT_API', service: o.api.name }]; },
@@ -83,6 +86,20 @@ test('unsafe isolation, routing, logging and lifecycle configuration fails befor
     assert.throws(() => previewPreflight(f.options));
     assert.equal(f.calls.length, 0);
   }
+});
+
+test('enabled SaaS project hosting permits only a catch-all pinned to its isolated zone', () => {
+  const f = fixture();
+  for (const config of [f.options.api, f.options.gateway]) {
+    config.vars.PROJECT_HOSTING_ENABLED = 'true';
+    config.vars.PROJECT_DOMAIN_PROVIDER = 'cloudflare';
+    config.vars.PROJECT_CLOUDFLARE_ZONE_ID = 'isolated-zone';
+  }
+  f.options.gateway.routes.push({ pattern: '*/*', zone_id: 'isolated-zone' });
+  assert.equal(previewPreflight({ ...f.options, local: true }).domain, 'preview.example');
+  f.options.gateway.routes[1].zone_id = 'account-zone';
+  assert.throws(() => previewPreflight({ ...f.options, local: true }), /zone-pinned/);
+  assert.equal(f.calls.length, 0);
 });
 
 test('the optional apex custom domain passes while preserving the wildcard route', () => {

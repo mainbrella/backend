@@ -1,5 +1,10 @@
 # Protected preview ingress
 
+Stable project endpoints and verified customer hostnames have a separate routing
+and transport policy. See [Project endpoints and custom domains](project-domains.md)
+for DNS instructions, provider configuration, migrations, and activation. Project
+hosting is staged disabled; the existing bearer preview rollout below is unchanged.
+
 The private runtime, isolated gateway and authenticated account endpoints are
 live, with preview issuance enabled on `mainbrella.dev`. Wildcard DNS/TLS,
 routing schema, operator configurable-logging review and the earlier one-Lite

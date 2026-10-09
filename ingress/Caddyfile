@@ -1,0 +1,45 @@
+{
+	email {$ACME_EMAIL}
+	admin off
+	persist_config off
+	on_demand_tls {
+		ask http://127.0.0.1:9123/check
+	}
+}
+
+# Caddy's ask callback cannot attach our upstream credential. This loopback
+# listener supplies it without putting the credential in a URL or access log.
+http://127.0.0.1:9123 {
+	bind 127.0.0.1
+	@ask {
+		method GET
+		path /check
+	}
+	handle @ask {
+		rewrite * /internal/projects/certificate?{query}
+		reverse_proxy https://{$PROJECT_INGRESS_HOST} {
+			header_up Host {$PROJECT_INGRESS_HOST}
+			header_up X-Project-Ingress-Secret {$PROJECT_INGRESS_SECRET}
+			header_up -X-Project-Original-Host
+		}
+	}
+	handle {
+		respond 403
+	}
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy https://{$PROJECT_INGRESS_HOST} {
+		header_up Host {$PROJECT_INGRESS_HOST}
+		header_up X-Project-Original-Host {host}
+		header_up X-Project-Ingress-Secret {$PROJECT_INGRESS_SECRET}
+		flush_interval -1
+	}
+}
+
+http:// {
+	redir https://{host}{uri} 308
+}

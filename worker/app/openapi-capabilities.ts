@@ -17,6 +17,7 @@ export const capabilitiesSchema = z.object({
   persistence: flags('filesystemAfterStop', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
   observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
+  projects: flags('supported', 'customDomains').extend({ apexIps: z.array(z.string()) }),
   images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
   resources: z.array(machineSizeSchema),
@@ -27,7 +28,7 @@ export const capabilitiesSchema = z.object({
 export function registerCapabilityRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/capabilities', {
     operationId: 'getCapabilities', tags: ['Operations'], summary: 'Discover API features and runtime limits', security: [],
-    description: 'Public, read-only deployment contract. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration. previews.supported requires explicit enablement, an isolated preview domain, routing database and runtime binding. Preview URLs use opaque bearer tokens rather than signatures, so signedUrls remains false.',
+    description: 'Public, read-only deployment contract. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration. previews.supported requires explicit enablement, an isolated preview domain, routing database and runtime binding. Preview URLs use opaque bearer tokens rather than signatures, so signedUrls remains false. projects.supported requires explicit project hosting enablement and routing/runtime bindings; projects.customDomains additionally requires a configured certificate provider. apexIps contains only operator-configured ingress addresses.',
     responses: { 200: jsonResponse(capabilitiesSchema), ...errors(400, 403, 405) },
   }, handler);
 }

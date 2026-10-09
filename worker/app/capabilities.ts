@@ -12,6 +12,7 @@ import { OBSERVATION_RETENTION_MS, MAX_LIFECYCLE_EVENTS } from '../../containers
 import { webhooksConfigured } from '../../containers/webhook-contract.js';
 import { activityConfigured } from './activity';
 import { privateServicesConfigured } from './private-services';
+import { projectHostingCapabilities } from '../lib/project-hosting';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
@@ -35,6 +36,7 @@ export function capabilities(env: Env) {
     observability: { lifecycleEvents: true, activityWebSocket: activityConfigured(env), metrics: metricsConfigured(env), webhooks: Boolean(env.USER_CONTAINER && webhooksConfigured(env)), otlp: false,
       eventRetentionMs: OBSERVATION_RETENTION_MS, maxLifecycleEvents: MAX_LIFECYCLE_EVENTS, maxMetricRangeMs: MAX_METRIC_RANGE_MS, metricBucketMs: METRIC_BUCKET_MS },
     previews: { supported: previewsConfigured(env), signedUrls: false },
+    projects: projectHostingCapabilities(env),
     images: { catalog: true, availableCatalogPath: '/containers',
       customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
