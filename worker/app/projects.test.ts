@@ -57,3 +57,49 @@ test('project routes validate names and require authenticated trusted browser re
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://mainbrella.com');
 });
+
+test('projects can be renamed by their owner while preserving identity and creation time', async t => {
+  const { env, sqlite } = await fixture(t);
+  const created = await (await handleRequest(request('POST', SESSION_ONE, { name: 'Original' }), env)).json() as any;
+  const before = created.project;
+  const update = (id: string, body: unknown, session = SESSION_ONE) => new Request(`https://api.mainbrella.com/projects?id=${encodeURIComponent(id)}`, {
+    method: 'PATCH', headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${session}` }, body: JSON.stringify(body),
+  });
+
+  const response = await handleRequest(update(before.id, { name: '  Renamed  ', id: 'replacement', user_id: 'account-two' }), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const { project } = await response.json() as any;
+  assert.deepEqual(project, { ...before, name: 'Renamed' });
+  const stored = sqlite.prepare('SELECT id, user_id, name, created_at FROM projects WHERE id = ?').get(before.id) as any;
+  assert.equal(stored.id, before.id);
+  assert.equal(stored.user_id, USER_ONE);
+  assert.equal(stored.name, 'Renamed');
+  assert.equal(stored.created_at, before.created_at);
+  assert.equal(Object.keys(project).sort().join(','), 'created_at,id,name');
+
+  assert.equal((await handleRequest(update(before.id, { name: 'Other owner' }, SESSION_TWO), env)).status, 404);
+  assert.equal((await handleRequest(update('4e3cb127-784d-4a9f-9828-afd093c295dc', { name: 'Missing' }), env)).status, 404);
+});
+
+test('project updates validate id, body, authentication, and trusted Origin', async t => {
+  const { env } = await fixture(t);
+  const created = await (await handleRequest(request('POST', SESSION_ONE, { name: 'Original' }), env)).json() as any;
+  const url = `https://api.mainbrella.com/projects?id=${created.project.id}`;
+  const patch = (target: string, headers: Record<string, string>, body = '{"name":"Valid"}') =>
+    new Request(target, { method: 'PATCH', headers, body });
+  const trusted = { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` };
+
+  for (const target of [
+    'https://api.mainbrella.com/projects',
+    'https://api.mainbrella.com/projects?id=',
+    'https://api.mainbrella.com/projects?id=bad',
+    `${url}&id=${created.project.id}`,
+  ]) assert.equal((await handleRequest(patch(target, trusted), env)).status, 400, target);
+  for (const body of ['{', '{}', '{"name":""}', '{"name":" "}', '{"name":1}', JSON.stringify({ name: 'a'.repeat(81) }), JSON.stringify({ name: 'x', extra: 'a'.repeat(1024) })]) {
+    assert.equal((await handleRequest(patch(url, trusted, body), env)).status, 400, body.slice(0, 40));
+  }
+  assert.equal((await handleRequest(patch(url, { Cookie: trusted.Cookie }), env)).status, 403);
+  assert.equal((await handleRequest(patch(url, { ...trusted, Origin: 'https://attacker.example' }), env)).status, 403);
+  assert.equal((await handleRequest(patch(url, { Origin: 'https://mainbrella.com', Cookie: 'mainbrella_session=unknown' }), env)).status, 401);
+});

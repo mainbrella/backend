@@ -14,4 +14,13 @@ export function registerProjectRoutes(api: OpenAPIApi, handler: LegacyHandler): 
     request: requestBody(z.object({ name: z.string().trim().min(1).max(80) })),
     responses: { 201: jsonResponse(z.object({ project })), ...errors(400, 401, 403, 503) },
   }, handler);
+  register(api, "patch", "/projects", {
+    operationId: "updateProject", tags: ["Projects"], summary: "Rename a project", security: cookieSecurity,
+    description: "Requires a trusted Origin and browser session. Updates only a project owned by the signed-in user; its ID and creation time are preserved.",
+    request: {
+      query: z.object({ id: z.string().uuid() }),
+      ...requestBody(z.object({ name: z.string().trim().min(1).max(80) })),
+    },
+    responses: { 200: jsonResponse(z.object({ project })), ...errors(400, 401, 403, 404, 503) },
+  }, handler);
 }

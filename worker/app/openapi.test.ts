@@ -22,7 +22,7 @@ const endpointMethods: Record<string, string[]> = {
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
-  "/projects": ["get", "post"],
+  "/projects": ["get", "patch", "post"],
   "/health": ["get"], "/state": ["get"],
   "/auth/google": ["post"], "/auth/email": ["post"], "/auth/me": ["get"], "/auth/logout": ["post"],
   "/auth/app/google": ["post"], "/auth/app/email": ["post"], "/auth/app/apple": ["post"],
@@ -62,6 +62,19 @@ test('Private Services schemas expose account authentication, exact generations,
   assert.match(registration.description, /No arbitrary TCP/);
   assert.match(registration.description, /exact running generations/);
   assert.ok(paths['/private-services/networks'].post.responses['201']);
+});
+
+test('project update schema documents owner-scoped renames and request validation', async () => {
+  const { paths } = await document();
+  const update = paths['/projects'].patch;
+  assert.equal(update.operationId, 'updateProject');
+  assert.deepEqual(update.security, [{ cookieAuth: [] }]);
+  assert.ok(update.parameters.some((parameter: any) => parameter.in === 'query' && parameter.name === 'id' && parameter.required && parameter.schema.format === 'uuid'));
+  const body = update.requestBody.content['application/json'].schema;
+  assert.equal(body.properties.name.minLength, 1);
+  assert.equal(body.properties.name.maxLength, 80);
+  for (const status of [200, 400, 401, 403, 404, 503]) assert.ok(update.responses[status]);
+  assert.match(update.description, /project owned by the signed-in user/);
 });
 
 test("admin users schema documents restricted cookie access and safe user fields", async () => {
