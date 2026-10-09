@@ -1,5 +1,6 @@
 import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleAPIKeysRequest } from "./api-keys";
+import { handleProjectsRequest } from "./projects";
 import { createOpenAPIApp } from "./openapi";
 import { syncAccountEntitlement } from "../lib/container-service";
 import { jsonResponse } from "../shared/http";
@@ -44,6 +45,7 @@ async function handleLegacyRequest(
   if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
 
   if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);
+  if (url.pathname === "/projects") return handleProjectsRequest(request, env);
 
   if (url.pathname === "/images" || url.pathname.startsWith("/images/")) return handleImagesRequest(request, env);
   if (url.pathname.startsWith("/internal/image-builds/")) return handleImageBuildRequest(request, env);

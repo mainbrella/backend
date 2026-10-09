@@ -22,6 +22,7 @@ const endpointMethods: Record<string, string[]> = {
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
+  "/projects": ["get", "post"],
   "/health": ["get"], "/state": ["get"],
   "/auth/google": ["post"], "/auth/email": ["post"], "/auth/me": ["get"], "/auth/logout": ["post"],
   "/auth/app/google": ["post"], "/auth/app/email": ["post"], "/auth/app/apple": ["post"],

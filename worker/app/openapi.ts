@@ -2,6 +2,7 @@ import { registerRepoLaunchRoutes } from "./openapi-repo-launches";
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
+import { registerProjectRoutes } from "./openapi-projects";
 import { registerAdminRoutes } from "./openapi-admin";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
@@ -30,7 +31,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
       openapi: "3.1.0",
       info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
-      tags: ["Operations", "Authentication", "API Keys", "Subscriptions", "Containers", "Private Services", "Images", "Internal", "Admin"].map(name => ({ name })),
+      tags: ["Operations", "Authentication", "API Keys", "Projects", "Subscriptions", "Containers", "Private Services", "Images", "Internal", "Admin"].map(name => ({ name })),
     },
   });
   const securitySchemes = {
@@ -60,6 +61,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerWorkspaceRoutes(api, handler);
   registerAuthRoutes(api, handler);
   registerAPIKeyRoutes(api, handler);
+  registerProjectRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);
   registerContainerRoutes(api, handler);
   registerCommandRoutes(api, handler);
