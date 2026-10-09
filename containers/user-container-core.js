@@ -322,7 +322,11 @@ export class UserContainerController {
       let output;
       try {
         const readiness = (async () => {
-          const process = await this.container.exec(["sh", "-lc", "uname -a"]);
+          // Cloudflare's 64-character Linux hostname exceeds the DNS label
+          // limit and breaks Python's socket.getfqdn()/http.server. Rename it
+          // before admitting commands, including after snapshot restore. Local
+          // Docker and unprivileged custom images may not allow this operation.
+          const process = await this.container.exec(["sh", "-lc", "hostname mainbrella || true; uname -a"]);
           return process.output();
         })();
         const timeout = new Promise((_, reject) => {

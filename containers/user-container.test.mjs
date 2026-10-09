@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { UserContainerController } from "./user-container-core.js";
 
 class MemoryStorage {
@@ -18,6 +19,7 @@ class FakeContainer {
   destroys = 0;
   inactivityTimeouts = [];
   startOptions = [];
+  execCalls = [];
   exitCode = 0;
   readyGate = null;
   readinessHangs = false;
@@ -29,7 +31,7 @@ class FakeContainer {
   }
   async setInactivityTimeout(timeout) { this.inactivityTimeouts.push(timeout); }
   async exec(argv) {
-    assert.deepEqual(argv, ["sh", "-lc", "uname -a"]);
+    this.execCalls.push(argv);
     if (this.readinessHangs) return new Promise(() => {});
     if (this.readyGate) await this.readyGate;
     return { output: async () => ({ exitCode: this.exitCode }) };
@@ -96,6 +98,7 @@ test("concurrent POSTs reject a second container and reserve only one monthly st
   assert.equal(f.ctx.container.startOptions[0].image, f.ctx.container.images.terminal);
   assert.deepEqual(f.ctx.container.startOptions[0].entrypoint, ["sleep", "infinity"]);
   assert.equal(f.ctx.container.startOptions[0].enableInternet, true);
+  assert.deepEqual(f.ctx.container.execCalls, [["sh", "-lc", "hostname mainbrella || true; uname -a"]]);
   assert.equal(f.ctx.storage.alarmAt, f.now() + 600_000);
   assert.equal(f.ctx.container.inactivityTimeouts[0], 600_000);
 });
@@ -111,6 +114,22 @@ test("GET is read-only and DELETE stops without erasing monthly usage", async ()
   assert.deepEqual(body.containers, []);
   assert.equal(body.usage.starts, 1);
   assert.equal(f.ctx.storage.alarmAt, null);
+});
+
+test("hostname permissions do not block startup, while failed readiness still fails", async () => {
+  const f = fixture();
+  await f.read("POST");
+  const [shell, flag, startup] = f.ctx.container.execCalls[0];
+  for (const [hostnameExit, readinessExit] of [[0, 0], [1, 0], [127, 0], [0, 7], [1, 7]]) {
+    const result = spawnSync(shell, [flag, `
+      hostname() { printf 'hostname:%s\\n' "$1"; return ${hostnameExit}; }
+      uname() { printf 'readiness\\n'; return ${readinessExit}; }
+      ${startup}
+    `], { encoding: 'utf8' });
+    assert.ifError(result.error);
+    assert.equal(result.stdout, 'hostname:mainbrella\nreadiness\n');
+    assert.equal(result.status, readinessExit);
+  }
 });
 
 

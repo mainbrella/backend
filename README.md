@@ -167,6 +167,11 @@ The container image includes Node 24, bash, and tmux, with outbound internet ena
 Deploying an image does not replace running containers; stop and recreate old
 containers to use the updated image.
 
+Startup sets the Linux hostname to `mainbrella`, including after workspace
+restore, so Python's `http.server` can bind to `0.0.0.0` without failing on
+Cloudflare's 64-character default hostname. The rename is best effort for custom
+images and local Docker environments that do not permit hostname changes.
+
 Developer SSH keys are configured in `wrangler.containers.jsonc`. Connect with
 `npx wrangler containers ssh <INSTANCE_ID> --config wrangler.containers.jsonc`.
 Private keys stay local. Status polling and SSH attachment do not renew the idle

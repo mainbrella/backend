@@ -19,10 +19,10 @@ function fixture(initialPlan='builder'){
   let now=Date.UTC(2026,9,6),paid=true;const snapshots=new Map(),machines=new Map(),accounts=new Map();
   const machineFor=(user,id)=>{
     const name=machineName(user,id);if(!machines.has(name)){
-      const runtime={running:false,images:{terminal:'registry/image@sha256:'+'a'.repeat(64)},starts:[],captures:0,files:{},
+      const runtime={running:false,images:{terminal:'registry/image@sha256:'+'a'.repeat(64)},starts:[],execCalls:[],captures:0,files:{},
         start(options){this.starts.push(options);if(this.restoreFails&&options.containerSnapshot)throw new Error('provider-private-details');this.running=true;this.files=options.containerSnapshot?structuredClone(snapshots.get(options.containerSnapshot.id)):{};},
         async snapshotContainer(){this.captures++;if(this.captureFails)throw new Error();if(this.gate)await this.gate;const handle={id:crypto.randomUUID(),size:2048};snapshots.set(handle.id,structuredClone(this.files));return handle;},
-        async setInactivityTimeout(){},async destroy(){this.running=false;},async exec(){return {output:async()=>({exitCode:0})};}};
+        async setInactivityTimeout(){},async destroy(){this.running=false;},async exec(argv){this.execCalls.push(argv);return {output:async()=>({exitCode:0})};}};
       const ctx={storage:new Storage(),container:runtime},controller=new UserContainerController(ctx,()=>now);
       machines.set(name,{ctx,controller,runtime,fetch:req=>controller.fetch(req)});
     }return machines.get(name);
@@ -49,6 +49,8 @@ test('save/stop/restore survives controller restart, restores bytes and issues a
   const current=restored.data.containers[0];assert.notEqual(current.createdAt,source.createdAt);assert.equal(current.workspaceId,saved.data.id);
   assert.deepEqual(runtime.files,{'binary':new Uint8Array([0,255,128]),'nested/marker':'preserved'});
   assert.equal(runtime.starts.at(-1).image,undefined);assert.ok(runtime.starts.at(-1).containerSnapshot.id);
+  assert.equal(runtime.execCalls.length,2);
+  assert.deepEqual(runtime.execCalls.at(-1),['sh','-lc','hostname mainbrella || true; uname -a']);
   assert.equal((await f.start({workspaceId:saved.data.id},'restore-key')).data.creation.id,restored.data.creation.id);
   assert.equal(restored.data.usage.starts,2);
   const stale=await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE');assert.equal(stale.status,409);assert.equal(runtime.running,true);
