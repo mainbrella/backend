@@ -101,8 +101,9 @@ its application route and certificate authorization.
 
 ## Configuration and activation
 
-The API and gateway deployment configurations enable default project endpoints.
-Custom domains remain unavailable until a provider is configured. An enabled
+The API and gateway deployment configurations enable default project endpoints
+and select Cloudflare for SaaS for custom domains on `mainbrella.dev`. The API
+also needs its `PROJECT_CLOUDFLARE_API_TOKEN` Worker secret. An enabled
 flag describes configured support, not live qualification. Apply both database
 migration sets and deploy the runtime and gateway before advertising support
 from the API.
@@ -134,7 +135,8 @@ from the API.
 ### Cloudflare for SaaS
 
 Enable Cloudflare for SaaS on the isolated `mainbrella.dev` zone. Configure an
-originless fallback record and set the fallback origin following Cloudflare's
+originless fallback record (`fallback.mainbrella.dev`, proxied AAAA `100::`) and
+set `fallback.mainbrella.dev` as the fallback origin following Cloudflare's
 [Worker-origin setup](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/start/advanced-settings/worker-as-origin/).
 Its zone-scoped `*/*` Worker route must send custom hostname traffic to
 `mainbrella-previews`; the existing `*.mainbrella.dev/*` route alone does not
@@ -144,7 +146,7 @@ Set these API and gateway variables:
 
 ```text
 PROJECT_DOMAIN_PROVIDER=cloudflare
-PROJECT_CLOUDFLARE_ZONE_ID=<isolated SaaS zone ID>
+PROJECT_CLOUDFLARE_ZONE_ID=e6597a41a75e1abb92f4bc5e5758c460
 ```
 
 Set the API secret `PROJECT_CLOUDFLARE_API_TOKEN` with permission to manage SSL

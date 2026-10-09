@@ -14,6 +14,10 @@ function fixture() {
   api.vars.PREVIEW_DOMAIN = gateway.vars.PREVIEW_DOMAIN = 'preview.example';
   api.vars.PREVIEWS_ENABLED = gateway.vars.PREVIEWS_ENABLED = 'false';
   api.vars.PROJECT_HOSTING_ENABLED = gateway.vars.PROJECT_HOSTING_ENABLED = 'false';
+  for (const config of [api, gateway]) {
+    delete config.vars.PROJECT_DOMAIN_PROVIDER;
+    delete config.vars.PROJECT_CLOUDFLARE_ZONE_ID;
+  }
   gateway.routes = [{ pattern: '*.preview.example/*', zone_name: 'preview.example' }];
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(migrationSql);
@@ -102,10 +106,17 @@ test('enabled SaaS project hosting permits only a catch-all pinned to its isolat
     config.vars.PROJECT_DOMAIN_PROVIDER = 'cloudflare';
     config.vars.PROJECT_CLOUDFLARE_ZONE_ID = 'isolated-zone';
   }
+  f.options.gateway.routes[0].zone_id = 'isolated-zone';
   f.options.gateway.routes.push({ pattern: '*/*', zone_id: 'isolated-zone' });
   assert.equal(previewPreflight({ ...f.options, local: true }).domain, 'preview.example');
   f.options.gateway.routes[1].zone_id = 'account-zone';
   assert.throws(() => previewPreflight({ ...f.options, local: true }), /zone-pinned/);
+  f.options.gateway.routes[1].zone_id = 'isolated-zone';
+  f.options.gateway.routes[0].zone_id = 'account-zone';
+  assert.throws(() => previewPreflight({ ...f.options, local: true }), /same isolated zone/);
+  f.options.gateway.routes[0].zone_id = 'isolated-zone';
+  f.options.gateway.routes.pop();
+  assert.throws(() => previewPreflight({ ...f.options, local: true }), /SaaS catch-all/);
   assert.equal(f.calls.length, 0);
 });
 
@@ -133,7 +144,7 @@ test('missing migration, constraints, expiry index and malformed remote evidence
   }
 });
 
-test('checked-in qualified configuration validates isolation with issuance enabled', () => {
+test('checked-in configuration enables custom domains with both routes on the isolated SaaS zone', () => {
   const f = fixture();
   f.options.api = JSON.parse(read('wrangler.jsonc'));
   f.options.gateway = JSON.parse(read('wrangler.previews.jsonc'));
@@ -142,8 +153,10 @@ test('checked-in qualified configuration validates isolation with issuance enabl
   assert.equal(result.issuanceEnabled, true);
   assert.equal(f.options.api.vars.PROJECT_HOSTING_ENABLED, 'true');
   assert.equal(f.options.gateway.vars.PROJECT_HOSTING_ENABLED, 'true');
-  assert.equal(f.options.api.vars.PROJECT_DOMAIN_PROVIDER, undefined);
-  assert.equal(f.options.gateway.vars.PROJECT_DOMAIN_PROVIDER, undefined);
+  assert.equal(f.options.api.vars.PROJECT_DOMAIN_PROVIDER, 'cloudflare');
+  assert.equal(f.options.gateway.vars.PROJECT_DOMAIN_PROVIDER, 'cloudflare');
+  assert.equal(f.options.api.vars.PROJECT_CLOUDFLARE_ZONE_ID, 'e6597a41a75e1abb92f4bc5e5758c460');
+  assert.equal(f.options.gateway.vars.PROJECT_CLOUDFLARE_ZONE_ID, f.options.api.vars.PROJECT_CLOUDFLARE_ZONE_ID);
   assert.equal(result.releaseQualified, false);
   assert.equal(f.calls.length, 0);
 });

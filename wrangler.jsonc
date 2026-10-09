@@ -20,6 +20,8 @@
 		"ACTIVITY_WEBSOCKET_ENABLED": "true",
 		"PREVIEWS_ENABLED": "true",
 		"PROJECT_HOSTING_ENABLED": "true",
+		"PROJECT_DOMAIN_PROVIDER": "cloudflare",
+		"PROJECT_CLOUDFLARE_ZONE_ID": "e6597a41a75e1abb92f4bc5e5758c460",
 		"WORKSPACE_PERSISTENCE_ENABLED": "true",
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"

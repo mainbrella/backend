@@ -75,6 +75,11 @@ export function previewConfiguration(api: Config, gateway: Config, containers: C
     && route.custom_domain === true && route.pattern === domain);
   const customRoutes = routes.filter((route: Config) => route && typeof route === 'object'
     && route.pattern === '*/*' && !route.custom_domain);
+  if (projectsEnabled && gateway.vars?.PROJECT_DOMAIN_PROVIDER === 'cloudflare') {
+    requireCheck(customRoutes.length === 1 && gateway.vars.PROJECT_CLOUDFLARE_ZONE_ID
+      && wildcardRoutes[0]?.zone_id === gateway.vars.PROJECT_CLOUDFLARE_ZONE_ID,
+    'Cloudflare project hosting requires a SaaS catch-all and wildcard route pinned to the same isolated zone.');
+  }
   requireCheck(wildcardRoutes.length === 1 && apexRoutes.length <= 1 && customRoutes.length <= 1
     && (!customRoutes.length || projectsEnabled && gateway.vars?.PROJECT_DOMAIN_PROVIDER === 'cloudflare'
       && gateway.vars?.PROJECT_CLOUDFLARE_ZONE_ID

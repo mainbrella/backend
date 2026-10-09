@@ -7,7 +7,13 @@
   "compatibility_flags": ["enable_request_signal"],
   "workers_dev": false,
   "preview_urls": false,
-  "vars": { "PREVIEWS_ENABLED": "true", "PREVIEW_DOMAIN": "mainbrella.dev", "PROJECT_HOSTING_ENABLED": "true" },
+  "vars": {
+    "PREVIEWS_ENABLED": "true",
+    "PREVIEW_DOMAIN": "mainbrella.dev",
+    "PROJECT_HOSTING_ENABLED": "true",
+    "PROJECT_DOMAIN_PROVIDER": "cloudflare",
+    "PROJECT_CLOUDFLARE_ZONE_ID": "e6597a41a75e1abb92f4bc5e5758c460"
+  },
   "d1_databases": [
     {
       "binding": "PREVIEW_ROUTES",
@@ -24,6 +30,7 @@
   "observability": { "enabled": false },
   "routes": [
     { "pattern": "mainbrella.dev", "custom_domain": true },
-    { "pattern": "https://*.mainbrella.dev/*", "zone_id": "e6597a41a75e1abb92f4bc5e5758c460" }
+    { "pattern": "https://*.mainbrella.dev/*", "zone_id": "e6597a41a75e1abb92f4bc5e5758c460" },
+    { "pattern": "*/*", "zone_id": "e6597a41a75e1abb92f4bc5e5758c460" }
   ]
 }
