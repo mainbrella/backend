@@ -112,7 +112,7 @@ test('inference stream failures retain provider codes and messages as failure de
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')

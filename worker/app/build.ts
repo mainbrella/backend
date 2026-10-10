@@ -6,7 +6,7 @@ import { validIdempotencyKey } from '../../containers/container-account-core.js'
 import { resolveEntitlement } from '../lib/entitlements';
 import { accountResponse, containerError } from '../lib/container-service';
 import { previewsConfigured } from '../lib/preview-routing';
-import { BUILD_MODEL, BUILD_MAX_APPS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema,
+import { BUILD_MODEL, BUILD_MAX_APPS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema,
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
 import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
@@ -16,6 +16,7 @@ import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, type BuildImageRow } from '../lib/build-images';
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
+import { buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
 
 export function buildConfigured(env: Env) {
   return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
@@ -24,8 +25,9 @@ function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActi
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;
   return { id: row.id, name: row.name, prompt: row.initial_prompt, revision: row.revision,
     activeTurnId: row.active_turn_id, container: row.container_json ? JSON.parse(row.container_json) as BuildContainer : null,
+    versionId: row.git_version_id ?? null, verifiedVersionId: row.verified_git_version_id ?? null,
     preview: preview && preview.expiresAt > Date.now() ? preview : null, createdAt: row.created_at, updatedAt: row.updated_at,
-    ...(turns ? { turns: turns.map(turn => ({ id: turn.id, prompt: turn.prompt, mode: turn.mode, status: turn.status,
+    ...(turns ? { turns: turns.map(turn => ({ id: turn.id, prompt: turn.prompt, mode: turn.restore_version_id ? 'restore' : turn.mode, status: turn.status,
       stage: turn.stage, summary: turn.summary, error: turn.error, log: '', model: turn.model, effort: turn.effort ?? null,
       failureOperationId: turn.failure_operation_id ?? null,
       errorExplanation: operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)
@@ -103,6 +105,7 @@ export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'a
 }
 export async function reconcileBuildTurns(env: Env) {
   await settleReportedBuildUsage(env);
+  await cleanupDeletedBuildGit(env);
   if (!buildConfigured(env)) return;
   const { results } = await env.DB.prepare("SELECT * FROM build_turns WHERE status IN ('queued', 'running') ORDER BY created_at LIMIT 20").all<BuildTurnRow>();
   for (const turn of results) {
@@ -121,10 +124,10 @@ async function stopBuildContainer(env: Env, userId: string, app: BuildAppRow) {
   const response = await accountResponse(env, userId, { plan: null, active: false, validUntil: null }, 'DELETE', container.id, container.createdAt);
   if (!response.ok && ![404, 409].includes(response.status)) throw new BuildError('containers_unavailable');
 }
-function turnInsert(env: Env, appId: string, userId: string, turnId: string, key: string, prompt: string, mode: string, revision: number, now: string, model: string, effort: string | null) {
-  return env.DB.prepare(`INSERT INTO build_turns (id, app_id, user_id, request_key, prompt, mode, base_revision, status, stage, model, created_at, effort)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Waiting to build', ?, ?, ?)`)
-    .bind(turnId, appId, userId, key, prompt, mode, revision, model, now, effort);
+function turnInsert(env: Env, appId: string, userId: string, turnId: string, key: string, prompt: string, mode: string, revision: number, now: string, model: string, effort: string | null, restoreId: string | null = null) {
+  return env.DB.prepare(`INSERT INTO build_turns (id, app_id, user_id, request_key, prompt, mode, base_revision, status, stage, model, created_at, effort, restore_version_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Waiting to build', ?, ?, ?, ?)`)
+    .bind(turnId, appId, userId, key, prompt, mode, revision, model, now, effort, restoreId);
 }
 
 export async function handleBuildRequest(request: Request, env: Env): Promise<Response> {
@@ -133,10 +136,10 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
   const diagnostic = /^\/build\/apps\/([a-f0-9-]{36})\/turns\/([a-f0-9-]{36})\/diagnostics$/.exec(url.pathname);
-  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events|images)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
+  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]
-    || ['images', 'diagnostics'].includes(match[3]) !== Boolean(match[4]) || match[4] && !validExecutionId(match[4])) return authJson({ error: 'not_found' }, 404, cors);
-  const allowed = match[1] === 'config' || ['source', 'export', 'events', 'images', 'diagnostics'].includes(match[3]) ? ['GET']
+    || ['images', 'diagnostics'].includes(match[3]) && !match[4] || match[4] && (!['images', 'diagnostics', 'versions'].includes(match[3]) || !validExecutionId(match[4]))) return authJson({ error: 'not_found' }, 404, cors);
+  const allowed = match[1] === 'config' || ['source', 'export', 'events', 'images', 'diagnostics', 'versions', 'repository'].includes(match[3]) ? ['GET']
     : match[3] ? ['POST'] : match[2] ? ['GET', 'PATCH', 'DELETE'] : ['GET', 'POST'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: `${allowed.join(', ')}, OPTIONS` });
   if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
@@ -147,6 +150,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     if (match[1] === 'config') return authJson({ available: buildConfigured(env), model: env.BUILD_MODEL || BUILD_MODEL,
       models: (localCodexConfigured(env) ? [{ id: env.BUILD_MODEL || BUILD_MODEL, name: env.BUILD_MODEL || BUILD_MODEL, description: undefined, efforts: ['low'], defaultEffort: 'low' }] : buildModels).map(({ id, name, description, efforts, defaultEffort }) => ({ id, name, ...(description ? { description } : {}), efforts, defaultEffort })),
       maxApps: BUILD_MAX_APPS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
+      versionHistory: Boolean(env.BUCKET),
       aiMarkupPercent: BUILD_AI_MARKUP_PERCENT, computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
     const id = match[2];
     if (request.method === 'GET' && !id) {
@@ -156,6 +160,27 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     if (id) {
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
+      if (match[3] === 'versions') {
+        if (match[4]) {
+          const version = await buildGitVersion(env, id, match[4]);
+          if (!version) return authJson({ error: 'version_not_found' }, 404, cors);
+          const parent = version.parent_version_id ? await buildGitVersion(env, id, version.parent_version_id) : null;
+          const files = JSON.parse(version.source_json) as Record<string, string>, before = JSON.parse(parent?.source_json ?? '{}') as Record<string, string>;
+          const changes: { path: string; type: string; before: string | null; after: string | null }[] = [...new Set([...Object.keys(before), ...Object.keys(files)])].sort().filter(path => before[path] !== files[path])
+            .map(path => ({ path, type: !Object.hasOwn(before, path) ? 'added' : !Object.hasOwn(files, path) ? 'deleted' : 'modified', before: before[path] ?? null, after: files[path] ?? null }));
+          if ((parent?.lockfile ?? null) !== version.lockfile) changes.push({ path: 'package-lock.json', type: !parent?.lockfile ? 'added' : !version.lockfile ? 'deleted' : 'modified', before: parent?.lockfile ?? null, after: version.lockfile });
+          const oldAssets = JSON.parse(parent?.assets_json ?? '[]') as string[], assets = JSON.parse(version.assets_json) as string[];
+          for (const imageId of [...new Set([...oldAssets, ...assets])]) if (oldAssets.includes(imageId) !== assets.includes(imageId)) changes.push({ path: `public${buildImagePath(imageId)}`, type: assets.includes(imageId) ? 'added' : 'deleted', before: null, after: null });
+          return authJson({ version: publicGitVersion(version), files, changes }, 200, cors);
+        }
+        const { results } = await env.DB.prepare('SELECT * FROM build_git_versions WHERE app_id = ? ORDER BY rowid DESC LIMIT 100').bind(id).all<BuildGitVersion>();
+        return authJson({ versions: results.map(publicGitVersion), versionId: app.git_version_id ?? null, verifiedVersionId: app.verified_git_version_id ?? null }, 200, cors);
+      }
+      if (match[3] === 'repository') {
+        const version = app.git_version_id ? await buildGitVersion(env, id, app.git_version_id) : null;
+        if (!version) return authJson({ error: 'version_not_found' }, 404, cors);
+        return await exportBuildGit(env, user.id, id, version, cors);
+      }
       if (match[3] === 'diagnostics') {
         const turn = await env.DB.prepare('SELECT * FROM build_turns WHERE id = ? AND app_id = ? AND user_id = ?')
           .bind(match[4], id, user.id).first<BuildTurnRow>();
@@ -198,7 +223,14 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
         if (app.active_turn_id) return authJson({ error: 'build_busy' }, 409, cors);
         await stopBuildContainer(env, user.id, app);
         if (request.method === 'DELETE') {
-          await env.DB.prepare('DELETE FROM build_apps WHERE id = ? AND user_id = ? AND active_turn_id IS NULL').bind(id, user.id).run();
+          await env.DB.batch([
+            env.DB.prepare('INSERT INTO build_git_deletions (app_id, user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(app_id) DO NOTHING').bind(id, user.id, new Date().toISOString()),
+            env.DB.prepare('DELETE FROM build_apps WHERE id = ? AND user_id = ? AND active_turn_id IS NULL').bind(id, user.id),
+          ]);
+          if (env.BUCKET) try {
+            await deleteBuildGit(env, user.id, id);
+            await env.DB.prepare('DELETE FROM build_git_deletions WHERE app_id = ?').bind(id).run();
+          } catch { console.error('build_git_deletion_deferred', { appId: id }); }
           return authJson({ deleted: true }, 200, cors);
         }
         await env.DB.prepare('UPDATE build_apps SET container_json = NULL, preview_json = NULL WHERE id = ? AND user_id = ? AND active_turn_id IS NULL').bind(id, user.id).run();
@@ -216,17 +248,20 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const key = request.headers.get('Idempotency-Key');
     if (!validIdempotencyKey(key)) return authJson({ error: 'invalid_idempotency_key' }, 400, cors);
     const body = await readCommandBody(request);
-    const parsed = id ? buildTurnSchema.safeParse(body) : buildCreateSchema.safeParse(body);
+    const restoring = match[3] === 'restore';
+    const parsed = restoring ? buildRestoreSchema.safeParse(body) : id ? buildTurnSchema.safeParse(body) : buildCreateSchema.safeParse(body);
     if (!parsed.success) return authJson({ error: 'invalid_request' }, 400, cors);
     const data = parsed.data;
-    const mode = 'mode' in data ? data.mode : 'build';
-    const prompt = 'prompt' in data ? data.prompt : '';
+    const restoreId = 'versionId' in data ? data.versionId : null;
+    if (restoreId && (!env.BUCKET || !await buildGitVersion(env, id, restoreId))) return authJson({ error: 'version_not_found' }, 404, cors);
+    const mode = restoring ? 'preview' : 'mode' in data ? data.mode : 'build';
+    const prompt = restoring ? `Restore version ${restoreId}` : 'prompt' in data ? data.prompt : '';
     const options = mode === 'build' ? resolveBuildModel(env.BUILD_MODEL || BUILD_MODEL, 'prompt' in data ? data : {}, localCodexConfigured(env)) : { model: env.BUILD_MODEL || BUILD_MODEL, effort: null };
     const existing = id
       ? await env.DB.prepare('SELECT * FROM build_turns WHERE app_id = ? AND user_id = ? AND request_key = ?').bind(id, user.id, key).first<BuildTurnRow>()
       : await env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? AND create_key = ?').bind(user.id, key).first<BuildAppRow>();
     if (existing) {
-      if ('prompt' in existing ? existing.prompt !== prompt || existing.mode !== mode || ('revision' in data && existing.base_revision !== data.revision) : existing.initial_prompt !== prompt) return authJson({ error: 'idempotency_key_conflict' }, 409, cors);
+      if ('prompt' in existing ? existing.prompt !== prompt || existing.mode !== mode || (existing.restore_version_id ?? null) !== restoreId || ('revision' in data && existing.base_revision !== data.revision) : existing.initial_prompt !== prompt) return authJson({ error: 'idempotency_key_conflict' }, 409, cors);
       const appId = 'app_id' in existing ? existing.app_id : existing.id;
       const queued = 'app_id' in existing ? existing : await env.DB.prepare('SELECT * FROM build_turns WHERE app_id = ? AND request_key = ?').bind(appId, key).first<BuildTurnRow>();
       if (queued && mode === 'build' && (('model' in data && data.model !== queued.model) || ('effort' in data && data.effort !== queued.effort))) return authJson({ error: 'idempotency_key_conflict' }, 409, cors);
@@ -243,7 +278,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const statements = !id ? [env.DB.prepare(`INSERT INTO build_apps
       (id, user_id, create_key, initial_prompt, name, source_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(appId, user.id, key, prompt, buildName(prompt), JSON.stringify(buildStarter), now, now)] : [];
-    statements.push(turnInsert(env, appId, user.id, turnId, key!, prompt, mode, 'revision' in data ? data.revision : 0, now, options.model, options.effort));
+    statements.push(turnInsert(env, appId, user.id, turnId, key!, prompt, mode, 'revision' in data ? data.revision : 0, now, options.model, options.effort, restoreId));
     statements.push(env.DB.prepare('UPDATE build_apps SET active_turn_id = ?, preview_json = NULL, updated_at = ? WHERE id = ? AND user_id = ?').bind(turnId, now, appId, user.id));
     await env.DB.batch(statements);
     const turn = (await env.DB.prepare('SELECT * FROM build_turns WHERE id = ? AND user_id = ?').bind(turnId, user.id).first<BuildTurnRow>())!;

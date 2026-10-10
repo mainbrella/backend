@@ -10,6 +10,7 @@ import { settleReportedBuildUsage } from './build-billing';
 import { buildFailure, failureError, proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation,
   retainBuildSource, type OperationResult, type OperationStatus } from './build-journal';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
+import { buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from './build-git';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
@@ -202,6 +203,31 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
 
 export async function runBuildAgent(env: Env, params: BuildParams, step: Step, startedAt: number) {
   let currentOperation: string | null = null;
+  let container: BuildContainer | undefined;
+  let currentTurn: BuildTurnRow | undefined;
+  let originalSource: string | undefined;
+  const gitRuntime = (guest: BuildContainer): BuildGitRuntime => ({
+    run: (label, command) => runCommand(env, params, guest, step, label, command, 60_000),
+    write: (path, content) => writeGuestFile(env, params.userId, guest, path, content),
+    async read(path) {
+      const { stub, headers } = await machine(env, params.userId, guest);
+      const url = new URL('https://internal/files'); url.searchParams.set('path', path);
+      return stub.fetch(new Request(url, { headers }));
+    },
+    persist: (label, action) => step.do(label, { ...retry, timeout: '5 minutes' }, action),
+  });
+  async function checkpoint(guest: BuildContainer, files: BuildFiles, checked: boolean) {
+    if (!env.BUCKET || !currentTurn) return null;
+    await step.do('Git saving stage', retry, async () => {
+      await stage(env, params, 'Saving version');
+      await proposeBuildOperation(env, { params, id: 'git-save' }, 'source', 'Save Git version');
+      await recordBuildOperation(env, { params, id: 'git-save' }, { status: 'unknown', started: true });
+    });
+    const version = await saveBuildGitVersion(env, params, gitRuntime(guest), currentTurn, files, checked);
+    await step.do('Git saved stage', retry, async () => recordBuildOperation(env, { params, id: 'git-save' },
+      { status: 'succeeded', finished: true, evidence: { versionId: version?.id, commitId: version?.commit_id, bundleKey: version?.bundle_key } }));
+    return version;
+  }
   async function stopForLimit(limitName: string, limit: number, reason: string, observed: number, counters: Record<string, number>) {
     const id = `limit-${limitName}`;
     const error = new BuildError('build_budget_exceeded', 503, reason);
@@ -223,7 +249,10 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const { results: images } = await env.DB.prepare('SELECT id, label FROM build_images WHERE app_id = ? ORDER BY rowid').bind(params.appId).all<{ id: string; label: string }>();
       return { app, turn, images };
     });
-    let container: BuildContainer | undefined;
+    currentTurn = initial.turn; originalSource = initial.app.source_json;
+    const restored = initial.turn.restore_version_id ? await buildGitVersion(env, params.appId, initial.turn.restore_version_id) : null;
+    if (initial.turn.restore_version_id && !restored) throw new BuildError('version_not_found', 404);
+    const parent = initial.app.git_version_id ? await buildGitVersion(env, params.appId, initial.app.git_version_id) : null;
     // File inspection and model output can start before the sandbox is ready.
     async function sandbox() {
       if (container) return container;
@@ -234,12 +263,15 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
         return allocate(env, params);
       });
       // Clear this dedicated app directory; callers materialize the current files.
-      const reset = await runCommand(env, params, container, step, 'reset-source', `mkdir -p ${root} && find ${root} -mindepth 1 -maxdepth 1 ! -name node_modules ! -name package-lock.json -exec rm -rf -- {} +`, 30_000);
+      const reset = await runCommand(env, params, container, step, 'reset-source', `mkdir -p ${root} && find ${root} -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf -- {} +`, 30_000);
       if (reset.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
+      await hydrateBuildGit(env, params, gitRuntime(container), parent, initial.turn);
+      const lockfile = (restored ?? parent)?.lockfile;
+      if (lockfile) await step.do('Restore npm lockfile', retry, async () => writeGuestFile(env, params.userId, container!, `${root}/package-lock.json`, lockfile));
       return container;
     }
-    let files = JSON.parse(initial.app.source_json) as BuildFiles;
-    let inputTokens = 0, outputTokens = 0, logs = '', summary = 'Preview restarted from saved source.';
+    let files = JSON.parse(restored?.source_json ?? initial.app.source_json) as BuildFiles;
+    let inputTokens = 0, outputTokens = 0, logs = '', summary = restored ? `Restored version ${restored.commit_id.slice(0, 12)}.` : 'Preview restarted from saved source.';
     const starterContext = JSON.stringify(files) === JSON.stringify(buildStarter)
       ? `\nStarter source (already supplied; begin editing without listing or reading these files):\n${JSON.stringify(files)}\n` : '';
     const messages: BuildAIMessage[] = [{ role: 'system', content: `${buildSystemPrompt}${initial.turn.base_revision === 0 ? `\n${buildFirstVersionPrompt}` : ''}` },
@@ -353,8 +385,10 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     }
     if (!verified) await stopForLimit('round-limit', BUILD_MAX_ROUNDS, `The build used all ${BUILD_MAX_ROUNDS} repair rounds without a successful verification.`, BUILD_MAX_ROUNDS,
       { outputTokens, inputTokens, rounds: BUILD_MAX_ROUNDS });
-    await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
     const ready = await sandbox();
+    currentOperation = 'git-save';
+    const savedVersion = initial.turn.mode === 'build' || restored || !parent || parent.source_json !== JSON.stringify(files) ? await checkpoint(ready, files, true) : parent;
+    await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
     currentOperation = 'start-preview';
     const launched = await runCommand(env, params, ready, step, 'start-preview', startPreview, 60_000);
     if (launched.status !== 'succeeded') throw new BuildError('preview_start_failed');
@@ -366,12 +400,16 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     });
     await step.do('Save verified revision', retry, async () => {
       const now = new Date().toISOString();
-      const revision = initial.app.revision + (initial.turn.mode === 'build' ? 1 : 0);
+      const changed = initial.turn.mode === 'build' || Boolean(restored);
+      const revision = initial.app.revision + (changed ? 1 : 0);
       await env.DB.batch([
-        ...(initial.turn.mode === 'build' ? [env.DB.prepare('INSERT INTO build_revisions (app_id, revision, turn_id, source_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO NOTHING')
+        ...(changed ? [env.DB.prepare('INSERT INTO build_revisions (app_id, revision, turn_id, source_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO NOTHING')
           .bind(params.appId, revision, params.turnId, JSON.stringify(files), now)] : []),
         env.DB.prepare('UPDATE build_apps SET source_json = ?, revision = ?, preview_json = ?, active_turn_id = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
           .bind(JSON.stringify(files), revision, JSON.stringify(preview), now, params.appId, params.userId, params.turnId),
+        ...(savedVersion ? [env.DB.prepare('UPDATE build_apps SET verified_git_version_id = ? WHERE id = ? AND user_id = ? AND git_version_id = ?')
+          .bind(savedVersion.id, params.appId, params.userId, savedVersion.id),
+          env.DB.prepare('UPDATE build_git_versions SET verified = 1 WHERE id = ? AND app_id = ?').bind(savedVersion.id, params.appId)] : []),
         env.DB.prepare("UPDATE build_turns SET status = 'succeeded', stage = 'Preview ready', summary = ?, finished_at = ? WHERE id = ? AND user_id = ?")
           .bind(summary, now, params.turnId, params.userId),
       ]);
@@ -380,6 +418,21 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     const code = error instanceof BuildError ? error.message : error instanceof Error && error.message === 'subscription_required' ? 'subscription_required' : 'build_failed';
     const details = (error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : '')?.trim().slice(0, 4000);
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
+    if (env.BUCKET && currentTurn && code !== 'build_git_unavailable') {
+      try {
+        const app = await ownedBuildApp(env, params.userId, params.appId);
+        if (app?.active_turn_id === params.turnId && app.source_json !== originalSource && !await buildGitVersion(env, params.appId, params.turnId)) {
+          container ??= await step.do('Allocate checkpoint sandbox', retry, () => allocate(env, params));
+          const files = JSON.parse(app.source_json) as BuildFiles;
+          await materialize(env, params, container, files, step, 'checkpoint-source');
+          await checkpoint(container, files, false);
+        }
+      } catch (saveError) {
+        console.error('build_git_checkpoint_failed', { turnId: params.turnId });
+        await recordBuildOperation(env, { params, id: 'git-save' }, { status: 'failed', finished: true,
+          result: { ok: false, failure: buildFailure(saveError, 'git-save') } }).catch(() => {});
+      }
+    }
     await step.do('Record build failure', retry, async () => {
       if (details && details !== code) {
         // Preserve the command output and underlying failure without changing

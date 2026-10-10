@@ -1,21 +1,24 @@
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type OpenAPIApi, type LegacyHandler } from './openapi-shared';
-import { buildCreateSchema, buildRenameSchema, buildTurnSchema } from '../lib/build-contract';
+import { buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema } from '../lib/build-contract';
 
 const params = z.object({ appId: z.uuid() });
 const headers = z.object({ Origin: z.string().optional() });
 const submissionHeaders = headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
 const image = z.object({ id: z.uuid(), toolId: z.string(), label: z.string(), path: z.string() }).openapi('BuildImage');
-const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
+const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview', 'restore']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
   activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['proposed', 'running', 'skipped', 'blocked', 'succeeded', 'failed', 'unknown']), explanation: z.string().nullable() })),
   images: z.array(image).max(4),
   stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), errorExplanation: z.string().nullable(), failureOperationId: z.string().nullable(), log: z.string(), model: z.string(), effort: z.string().nullable(), inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), aiCostCents: z.number().nonnegative(),
   createdAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable() }).openapi('BuildTurn');
 const app = z.object({ id: z.uuid(), name: z.string(), prompt: z.string(), revision: z.number().int(), activeTurnId: z.string().nullable(),
+  versionId: z.uuid().nullable(), verifiedVersionId: z.uuid().nullable(),
   container: z.object({ id: z.string(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime() }).nullable(),
   preview: z.object({ id: z.string(), url: z.url(), expiresAt: z.number().int() }).nullable(), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime() }).openapi('BuildApp');
 const detail = z.object({ app: app.extend({ turns: z.array(turn) }) });
 const failures = errors(400, 401, 402, 403, 404, 405, 409, 413, 429, 503);
+const version = z.object({ id: z.uuid(), commitId: z.string().regex(/^[a-f0-9]{40}$/), parentVersionId: z.uuid().nullable(),
+  message: z.string(), verified: z.boolean(), createdAt: z.iso.datetime() }).openapi('BuildVersion');
 export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   const common = { tags: ['Build'], security: cookieSecurity };
   register(api, 'get', '/build/apps/{appId}/turns/{turnId}/diagnostics', { ...common, operationId: 'getBuildTurnDiagnostics', summary: 'Inspect an owned turn’s durable operation evidence',
@@ -31,7 +34,7 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
     })), ...errors(400,401,403,404,405,503) } }, handler);
   register(api, 'get', '/build/config', { ...common, operationId: 'getBuildConfig', summary: 'Read Build availability, models and billing',
     description: 'Reports a curated list of three models: GLM-5.3 (default, best quality), Kimi K2.7 Code (coding), and GLM-5.3 Flash (lower cost). GLM models accept high (default) or max reasoning effort; Kimi reasoning is always on. Each build accepts model and effort; choices outside this list return 400. Production uses Workers AI; opt-in local development can use a Codex app-server bridge with the same build tools and validation. There is no daily turn quota; prepaid builds require available balance and reserve funds within the account spending limit before each AI request.',
-    responses: { 200: jsonResponse(z.object({ available: z.boolean(), model: z.string(), models: z.array(z.object({ id: z.string(), name: z.string(), description: z.string().optional(), efforts: z.array(z.string()), defaultEffort: z.string() })), maxApps: z.number(), aiBilling: z.enum(['prepaid', 'included']), aiMarkupPercent: z.number(), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);
+    responses: { 200: jsonResponse(z.object({ available: z.boolean(), versionHistory: z.boolean(), model: z.string(), models: z.array(z.object({ id: z.string(), name: z.string(), description: z.string().optional(), efforts: z.array(z.string()), defaultEffort: z.string() })), maxApps: z.number(), aiBilling: z.enum(['prepaid', 'included']), aiMarkupPercent: z.number(), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);
   register(api, 'get', '/build/apps', { ...common, operationId: 'listBuildApps', summary: 'List account-saved apps', request: { headers },
     responses: { 200: jsonResponse(z.object({ apps: z.array(app).max(50) })), ...failures } }, handler);
   register(api, 'post', '/build/apps', { ...common, operationId: 'createBuildApp', summary: 'Create an app and queue its first Workers AI build',
@@ -54,6 +57,19 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   register(api, 'post', '/build/apps/{appId}/stop', { ...common, operationId: 'stopBuildPreview', summary: 'Stop the editing container while keeping source', request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}/source', { ...common, operationId: 'getBuildSource', summary: 'Read saved working source, including edits from a failed build', request: { params, headers }, responses: { 200: jsonResponse(z.object({ revision: z.number().int(), files: z.record(z.string(), z.string()) })), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}/export', { ...common, operationId: 'exportBuildSource', summary: 'Download portable source as a ZIP archive', request: { params, headers }, responses: { 200: { description: 'Source archive including original JPEG assets under public/generated. Run npm install and npm run build.', content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } } }, ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/versions', { ...common, operationId: 'listBuildVersions', summary: 'List saved Git versions of an owned app',
+    description: 'Read-only and available without paid access. Returns up to 100 versions, newest first. Checkpoints preserve edits from failed builds; verified indicates a successful compile. versionId identifies the current saved head and verifiedVersionId the last version with a successful preview. Repositories persist as immutable Git bundles in private R2 storage; no GitHub account is required.',
+    request: { params, headers }, responses: { 200: jsonResponse(z.object({ versions: z.array(version), versionId: z.uuid().nullable(), verifiedVersionId: z.uuid().nullable() })), ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/versions/{versionId}', { ...common, operationId: 'getBuildVersion', summary: 'Read a version’s source and changes from its parent',
+    description: 'Owner-scoped source and changes, including additions, deletions, lockfile changes and referenced generated JPEGs. Binary assets have null before/after text.',
+    request: { params: params.extend({ versionId: z.uuid() }), headers }, responses: { 200: jsonResponse(z.object({ version, files: z.record(z.string(), z.string()),
+      changes: z.array(z.object({ path: z.string(), type: z.enum(['added','modified','deleted']), before: z.string().nullable(), after: z.string().nullable() })) })), ...failures } }, handler);
+  register(api, 'post', '/build/apps/{appId}/restore', { ...common, operationId: 'restoreBuildVersion', summary: 'Restore a saved version and create a new Git commit',
+    description: 'Requires active funded access, Origin, Idempotency-Key and the current revision. Queues a build without AI, restores source and its npm lockfile, compiles it and starts a preview. Success creates a new commit and source revision, preserving intervening history. Existing active turns and stale revisions return 409; versions belonging to another app return 404. Failed restores preserve the working source.',
+    request: { params, headers: submissionHeaders, ...requestBody(buildRestoreSchema) }, responses: { 200: jsonResponse(detail), 202: jsonResponse(detail), ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/repository', { ...common, operationId: 'exportBuildRepository', summary: 'Download an owned app’s complete Git history',
+    description: 'Read-only, available without paid access. Streams the current saved repository, including source, referenced assets and npm lockfile, as a complete Git bundle. Download as app.bundle and run git clone -b main app.bundle app. The cloned repository can be pushed to any Git host.',
+    request: { params, headers }, responses: { 200: { description: 'Complete Git bundle.', content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } }, ...failures } }, handler);
   const imageRequest = { params: params.extend({ imageId: z.uuid() }), headers };
   register(api, 'get', '/build/apps/{appId}/images/{imageId}', { ...common, operationId: 'getBuildImage', summary: 'Read an original image from an owned app',
     description: 'Session-authenticated JPEG bytes. Generated with Workers AI, retained independently of the sandbox and deleted with the app. Maximum 4 images per build and 12 per app. App previews and ZIP exports use local copies of these assets.',

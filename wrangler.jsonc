@@ -8,6 +8,12 @@
 		"nodejs_compat",
 		"global_fetch_strictly_public"
 	],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "romeo"
+    }
+  ],
 	"cache": {
 		"enabled": true
 	},

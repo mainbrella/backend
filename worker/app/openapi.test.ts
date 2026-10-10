@@ -11,6 +11,8 @@ const endpointMethods: Record<string, string[]> = {
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
   '/build/apps/{appId}/images/{imageId}': ['get'],
   '/build/apps/{appId}/turns/{turnId}/diagnostics': ['get'],
+  '/build/apps/{appId}/versions': ['get'], '/build/apps/{appId}/versions/{versionId}': ['get'],
+  '/build/apps/{appId}/restore': ['post'], '/build/apps/{appId}/repository': ['get'],
   '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
   '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
