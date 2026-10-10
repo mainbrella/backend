@@ -112,7 +112,7 @@ export function operationExplanation(row: OperationRow): string | null {
   const reasons: Record<string, string> = {
     build_image_limit: 'Image limit reached: 4 per turn or 12 per app. No image request was sent.',
     insufficient_balance: 'Available credit was insufficient. No provider request was sent.',
-    spend_limit_exceeded: 'The monthly spending limit blocked this request before dispatch.',
+    spend_limit_exceeded: "Your Mainbrella account's monthly spending limit could not cover this request and existing reservations. No request was sent to Cloudflare.",
     build_journal_unavailable: 'Required operation records could not be saved. Execution stopped to preserve a safe recovery path.',
     build_billing_unavailable: 'Funding could not be verified. No provider request was sent.',
     build_billing_reconciliation_required: 'Provider usage could not be confirmed. The funding hold is retained for reconciliation.',

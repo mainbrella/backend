@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
-import { readBuildInference, buildInference, type BuildToolCall } from '../lib/build-ai';
+import { readBuildInference, buildInference, buildFirstVersionPrompt, type BuildToolCall } from '../lib/build-ai';
 import { buildAppStream, saveBuildActivity, buildToolDraftLabel, buildToolLabel } from '../lib/build-activity';
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
@@ -131,6 +131,67 @@ const jpegBase64 = btoa(String.fromCharCode(...jpeg));
 
 const immediateStep = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return structuredClone(await operation()); },
   async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
+
+test('first builds receive a small scope and fresh starter source without restricting later edits', async t => {
+  for (const [revision, edited] of [[0, false], [0, true], [1, true]] as const) await t.test(`revision ${revision}, edited ${edited}`, async sub => {
+    const f = await fixture(sub); sub.mock.method(console, 'error', () => {});
+    const files = { ...buildStarter, ...(edited ? { 'src/App.tsx': 'Existing user feature' } : {}) };
+    f.sqlite.prepare('UPDATE build_apps SET source_json = ?, revision = ? WHERE id = ?').run(JSON.stringify(files), revision, f.appId);
+    f.sqlite.prepare('UPDATE build_turns SET base_revision = ? WHERE id = ?').run(revision, f.turnId);
+    let calls = 0;
+    f.env.AI = { async run(_model: string, payload: any) {
+      calls++;
+      const system = payload.messages[0].content, context = payload.messages[1].content;
+      assert.equal(system.includes(buildFirstVersionPrompt), revision === 0);
+      assert.equal(context.includes('Starter source (already supplied'), !edited);
+      if (!edited) assert.ok(context.includes(JSON.stringify(buildStarter)));
+      assert.ok(payload.tools.some((tool: any) => tool.function.name === 'generate_image'), 'requested imagery remains available');
+      throw new BuildError('build_interrupted');
+    } } as unknown as Ai;
+    await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+    assert.equal(calls, 1); assert.equal(f.accountCalls.length, 0);
+    assert.deepEqual(JSON.parse(f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId)!.source_json as string), files);
+  });
+});
+
+test('a direct build tool installs dev dependencies first and returns install or compiler failures', async t => {
+  for (const failure of [null, 'install', 'compile'] as const) await t.test(failure ?? 'success', async sub => {
+    const f = await fixture(sub); sub.mock.method(console, 'error', () => {});
+    f.sqlite.prepare('UPDATE build_apps SET source_json = ?, container_json = ? WHERE id = ?')
+      .run(JSON.stringify(buildStarter), JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT }), f.appId);
+    const commands: string[] = [], executions = new Map<string, unknown>();
+    f.env.USER_CONTAINER = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/files' && request.method === 'PUT') return Response.json({ saved: true });
+      if (url.pathname === '/executions' && request.method === 'POST') {
+        const { command } = await request.json() as { command: string }; commands.push(command);
+        const failed = failure === 'install' && command.includes('npm install') || failure === 'compile' && command.includes('tsc --noEmit');
+        const id = `execution-${commands.length}`, result = { id, status: failed ? 'failed' : 'succeeded', exitCode: failed ? 1 : 0,
+          stdout: '', stderr: failed ? `${failure} failed` : '' };
+        executions.set(id, result); return Response.json(result);
+      }
+      if (url.pathname.startsWith('/executions/')) return Response.json(executions.get(url.pathname.split('/').at(-1)!));
+      assert.fail(`Unexpected container request: ${request.method} ${url.pathname}`);
+    } }) } as unknown as DurableObjectNamespace;
+    let calls = 0;
+    f.env.AI = { async run(_model: string, payload: any) {
+      if (calls++ === 0) return { choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'build', type: 'function',
+        function: { name: 'run_command', arguments: JSON.stringify({ command: 'npm run build' }) } }] } }], usage: { prompt_tokens: 5, completion_tokens: 5 } };
+      assert.equal(payload.messages.at(-1).role, 'tool');
+      assert.equal(payload.messages.at(-1).content, failure ? `failed\n\n${failure} failed` : 'succeeded\n\n');
+      throw new BuildError('build_interrupted'); // Stop after observing the tool result.
+    } } as unknown as Ai;
+    await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+    const installIndex = commands.findIndex(command => command.includes('npm install'));
+    assert.ok(installIndex >= 0); assert.match(commands[installIndex], /--include=dev/);
+    const compileIndex = commands.findIndex(command => command.includes('tsc --noEmit'));
+    if (failure === 'install') assert.equal(compileIndex, -1); else assert.ok(compileIndex > installIndex);
+    const install = await readBuildOperation(f.env, { params: f.params, id: 'tool-0-0-install' });
+    assert.equal(install!.status, failure === 'install' ? 'failed' : 'succeeded');
+    const tool = await readBuildOperation(f.env, { params: f.params, id: 'tool-0-0' });
+    assert.equal(tool!.status, failure ? 'failed' : 'succeeded');
+  });
+});
 
 test('token exhaustion retains actual usage, explains why the build stopped and skips proposed images', async t => {
   const f = await fixture(t); let images = 0;

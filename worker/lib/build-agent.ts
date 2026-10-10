@@ -3,14 +3,14 @@ import { accountResponse, runningContainer } from './container-service';
 import { resolveEntitlement } from './entitlements';
 import { handleOwnedPreviewRequest } from '../app/previews';
 import { failBuildTurn } from '../app/build';
-import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
+import { buildInference, buildSystemPrompt, buildFirstVersionPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
 import { buildToolDraftLabel, buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { settleReportedBuildUsage } from './build-billing';
 import { buildFailure, failureError, proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation,
   retainBuildSource, type OperationResult, type OperationStatus } from './build-journal';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
-import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
+import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
 type Step = Pick<WorkflowStep, 'do' | 'sleep'>;
@@ -19,7 +19,7 @@ const noRetry = { retries: { limit: 0, delay: '1 second' }, timeout: '5 minutes'
 const retry = { retries: { limit: 2, delay: '2 seconds', backoff: 'exponential' }, timeout: '1 minute' } as const;
 const shellQuote = (text: string) => `'${text.replace(/'/g, `'"'"'`)}'`;
 const root = '/workspace/app';
-const install = `cd ${root} && npm install --no-audit --no-fund`;
+const install = `cd ${root} && npm install --no-audit --no-fund --include=dev`;
 const compile = `cd ${root} && ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vite build`;
 // Serve compiled files rather than a development server. The app's own package
 // scripts never decide whether the platform's production build check passed.
@@ -173,7 +173,12 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
   if (call.function.name === 'run_command') {
     if (!container) throw new BuildError('build_runtime_unavailable');
     await materialize(env, params, container, files, step, `${label}-source`);
-    const result = await runCommand(env, params, container, step, `${label}-command`, args.command === 'npm install' ? install : compile, 300_000, files);
+    // A fresh sandbox has no project dependencies. The model may ask to build
+    // directly, so installation is a platform prerequisite, not a model duty.
+    const installed = await runCommand(env, params, container, step,
+      args.command === 'npm install' ? `${label}-command` : `${label}-install`, install, 300_000, files);
+    const result = args.command === 'npm run build' && installed.status === 'succeeded'
+      ? await runCommand(env, params, container, step, `${label}-command`, compile, 300_000, files) : installed;
     const output = `${result.status}\n${result.stdout || ''}\n${result.stderr || ''}`.slice(-12_000);
     return { files, output, logs: output, succeeded: result.status === 'succeeded' };
   }
@@ -235,8 +240,10 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     }
     let files = JSON.parse(initial.app.source_json) as BuildFiles;
     let inputTokens = 0, outputTokens = 0, logs = '', summary = 'Preview restarted from saved source.';
-    const messages: BuildAIMessage[] = [{ role: 'system', content: buildSystemPrompt },
-      { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
+    const starterContext = JSON.stringify(files) === JSON.stringify(buildStarter)
+      ? `\nStarter source (already supplied; begin editing without listing or reading these files):\n${JSON.stringify(files)}\n` : '';
+    const messages: BuildAIMessage[] = [{ role: 'system', content: `${buildSystemPrompt}${initial.turn.base_revision === 0 ? `\n${buildFirstVersionPrompt}` : ''}` },
+      { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}${starterContext}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
     let verified = false;
     for (let round = 0; round < BUILD_MAX_ROUNDS; round++) {
       if (initial.turn.mode === 'build') {

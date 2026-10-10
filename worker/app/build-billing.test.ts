@@ -8,6 +8,7 @@ import { buildImageCostMicroUsd, buildTokenCostMicroUsd, buildInferenceChargeMic
 import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageDimensions } from '../lib/build-images';
+import { readBuildOperation, operationExplanation } from '../lib/build-journal';
 import { readFileSync } from 'node:fs';
 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
@@ -103,6 +104,10 @@ test('insufficient credit and monthly caps stop the request before Cloudflare in
   f.stored.set('containerAccount', state);
   await assert.rejects(f.infer('text-1'), /spend_limit_exceeded/);
   assert.equal(calls, 0);
+  const blocked = await readBuildOperation(f.env, { params: f.params, id: 'text-1' });
+  assert.equal(blocked!.status, 'blocked'); assert.equal(blocked!.dispatch_attempted, 0);
+  assert.match(operationExplanation(blocked!)!, /Mainbrella account's monthly spending limit/);
+  assert.match(operationExplanation(blocked!)!, /No request was sent to Cloudflare/);
 });
 
 test('length-limited and malformed responses still settle provider usage', async t => {
