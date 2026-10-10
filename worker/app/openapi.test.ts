@@ -129,6 +129,9 @@ test('Build configuration describes the opt-in local Codex provider and preserve
   assert.match(config.description, /Production uses Workers AI/);
   assert.match(config.description, /local development.*Codex app-server/);
   assert.equal(config.responses[200].content['application/json'].schema.properties.model.type, 'string');
+  assert.equal(config.responses[200].content['application/json'].schema.properties.models.type, 'array');
+  const creation = paths['/build/apps'].post.requestBody.content['application/json'].schema.properties;
+  assert.equal(creation.model.type, 'string'); assert.equal(creation.effort.type, 'string');
 });
 
 test('project hosting schemas describe local aliases and simulated DNS and TLS', async () => {

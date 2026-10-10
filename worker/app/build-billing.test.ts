@@ -125,3 +125,17 @@ test('missing usage or a disconnected provider keeps a hold and never replays in
   await assert.rejects(f.infer('text-1'), /disconnect/);
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM build_ai_usage WHERE status = 'running'").get()!.n, 2);
 });
+
+
+test('a selected model uses its saved effort and its own token price for settlement', async t => {
+  const f = await fixture(t), model = '@cf/zai-org/glm-5.3';
+  f.env.AI = { async run(id: string, payload: any) {
+    assert.equal(id, model); assert.equal(payload.reasoning_effort, 'max');
+    return answer({ prompt_tokens: 1000, completion_tokens: 100 });
+  } } as unknown as Ai;
+  await buildInference(f.env, [{ role: 'user', content: 'Build' }], 1024, undefined, f.params.turnId,
+    { params: f.params, operation: 'selected-model', model, effort: 'max' });
+  const usage = f.sqlite.prepare('SELECT model, cost_micro_usd FROM build_ai_usage WHERE turn_id = ?').get(f.params.turnId) as any;
+  assert.equal(usage.model, model);
+  assert.equal(usage.cost_micro_usd, buildInferenceChargeMicroUsd(buildTokenCostMicroUsd(model, { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 100 })));
+});

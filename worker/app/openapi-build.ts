@@ -9,7 +9,7 @@ const image = z.object({ id: z.uuid(), toolId: z.string(), label: z.string(), pa
 const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
   activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['running', 'succeeded', 'failed']) })),
   images: z.array(image).max(4),
-  stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), log: z.string(), model: z.string(), inputTokens: z.number().int(), outputTokens: z.number().int(), aiCostCents: z.number().nonnegative(),
+  stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), log: z.string(), model: z.string(), effort: z.string().nullable(), inputTokens: z.number().int(), outputTokens: z.number().int(), aiCostCents: z.number().nonnegative(),
   createdAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable() }).openapi('BuildTurn');
 const app = z.object({ id: z.uuid(), name: z.string(), prompt: z.string(), revision: z.number().int(), activeTurnId: z.string().nullable(),
   container: z.object({ id: z.string(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime() }).nullable(),
@@ -19,8 +19,8 @@ const failures = errors(400, 401, 402, 403, 404, 405, 409, 413, 429, 503);
 export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   const common = { tags: ['Build'], security: cookieSecurity };
   register(api, 'get', '/build/config', { ...common, operationId: 'getBuildConfig', summary: 'Read Build availability and beta limits',
-    description: 'Reports the configured inference model. Production uses Workers AI; opt-in local development can use a Codex app-server bridge with the same build tools and validation.',
-    responses: { 200: jsonResponse(z.object({ available: z.boolean(), model: z.string(), maxApps: z.number(), dailyTurns: z.number(), aiBilling: z.enum(['prepaid', 'included']), aiMarkupPercent: z.number(), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);
+    description: 'Reports the default inference model and supported model/effort choices. Each build accepts model and effort; unsupported choices return 400. Production uses Workers AI; opt-in local development can use a Codex app-server bridge with the same build tools and validation.',
+    responses: { 200: jsonResponse(z.object({ available: z.boolean(), model: z.string(), models: z.array(z.object({ id: z.string(), name: z.string(), efforts: z.array(z.string()), defaultEffort: z.string() })), maxApps: z.number(), dailyTurns: z.number(), aiBilling: z.enum(['prepaid', 'included']), aiMarkupPercent: z.number(), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);
   register(api, 'get', '/build/apps', { ...common, operationId: 'listBuildApps', summary: 'List account-saved apps', request: { headers },
     responses: { 200: jsonResponse(z.object({ apps: z.array(app).max(50) })), ...failures } }, handler);
   register(api, 'post', '/build/apps', { ...common, operationId: 'createBuildApp', summary: 'Create an app and queue its first Workers AI build',

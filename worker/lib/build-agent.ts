@@ -211,7 +211,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
                 if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
                   { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
               }
-            }, params.turnId, { params, operation: `text-${round}`, model: initial.turn.model });
+            }, params.turnId, { params, operation: `text-${round}`, model: initial.turn.model, effort: initial.turn.effort });
             if (result.message.content) await saveBuildActivity(env, params, round * 10,
               { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
             return result;

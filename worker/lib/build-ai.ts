@@ -1,3 +1,4 @@
+import { buildReasoningOptions } from './build-models';
 import { z } from 'zod';
 import { BUILD_MODEL, BuildError, validBuildPath, type BuildParams } from './build-contract';
 import { codexInference, localCodexConfigured } from './build-codex';
@@ -41,15 +42,14 @@ export type BuildAIResult = { message: BuildAIMessage; inputTokens: number; outp
 
 export async function buildInference(env: Env, messages: BuildAIMessage[], maxTokens: number,
   onProgress?: (text: string, calls: BuildToolCall[]) => Promise<void>, sessionId?: string,
-  billing?: { params: BuildParams; operation: string; model: string }): Promise<BuildAIResult> {
+  billing?: { params: BuildParams; operation: string; model: string; effort?: string | null }): Promise<BuildAIResult> {
   const codex = localCodexConfigured(env);
   if ((!codex && !env.AI) || (codex && !sessionId)) throw new BuildError('build_unavailable');
-  // A deployment-controlled model name allows changing Workers AI models without
-  // accepting an arbitrary provider or model from the browser.
+  // The API validates user choices against the priced tool-calling catalog.
   const tools = env.AI ? buildTools : buildTools.filter(tool => tool.function.name !== 'generate_image');
   const model = billing?.model || env.BUILD_MODEL || BUILD_MODEL;
   const payload = { messages: messages.map(({ tool_success, ...message }) => message), tools,
-    parallel_tool_calls: false, max_completion_tokens: maxTokens, reasoning_effort: 'low', stream: true,
+    parallel_tool_calls: false, max_completion_tokens: maxTokens, max_tokens: maxTokens, ...buildReasoningOptions(model, billing?.effort), stream: true,
     stream_options: { include_usage: true },
   };
   const invoke = async (report?: (cost: number, usage: Record<string, unknown>) => Promise<void>): Promise<BuildAIResult> => {
@@ -59,11 +59,12 @@ export async function buildInference(env: Env, messages: BuildAIMessage[], maxTo
   };
   const output = codex ? await codexInference(env, sessionId!, messages, tools, maxTokens)
     : await env.AI.run(model, payload, env.BUILD_AI_GATEWAY ? { gateway: { id: env.BUILD_AI_GATEWAY, skipCache: true } } : undefined);
-  const result = output instanceof ReadableStream ? await readBuildInference(output, onProgress, onUsage) : output as Record<string, any>;
+  const result: Record<string, any> = output instanceof ReadableStream ? await readBuildInference(output, onProgress, onUsage) : output as Record<string, any>;
   if (!(output instanceof ReadableStream)) await onUsage(result.usage);
   const usage = readBuildTokenUsage(result.usage);
   if (report && !usage) throw new BuildError('build_billing_reconciliation_required');
-  const choice = result.choices?.[0];
+  const native = typeof result.response === 'string' || Array.isArray(result.tool_calls);
+  const choice = result.choices?.[0] ?? (native ? { finish_reason: result.finish_reason ?? 'stop', message: { content: result.response, tool_calls: normalizeBuildToolCalls(result.tool_calls) } } : undefined);
   const response = choice?.message;
   if (!response || choice.finish_reason === 'length') throw new BuildError('model_response_incomplete');
   const content = typeof response.content === 'string' ? response.content.slice(0, 6000) : null;
@@ -86,20 +87,36 @@ export async function buildInference(env: Env, messages: BuildAIMessage[], maxTo
   return meteredBuildInference(env, billing.params, billing.operation, model, reserved, invoke);
 }
 
+function normalizeBuildToolCalls(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((call, index) => call?.function ? call : { id: call?.id ?? `native-${index}`, type: 'function',
+    function: { name: call?.name, arguments: typeof call?.arguments === 'string' ? call.arguments : JSON.stringify(call?.arguments) } });
+}
+
 /** Assemble function-call arguments before execution; only public assistant text is shown. */
 export async function readBuildInference(stream: ReadableStream<Uint8Array>, onProgress?: (text: string, calls: BuildToolCall[]) => Promise<void>,
   onUsage?: (usage: unknown) => Promise<void>) {
   const reader = stream.getReader(), decoder = new TextDecoder();
   const calls: BuildToolCall[] = [];
   let buffer = '', content = '', finish: string | null = null, usage: Record<string, unknown> | undefined;
-  let lastProgress = 0, lastText = '', done = false;
+  let lastProgress = 0, lastText = '', done = false, native = false;
   async function event(data: string) {
-    if (data === '[DONE]') { done = true; return; }
+    if (data === '[DONE]') { done = true; if (native && !finish) finish = calls.length ? 'tool_calls' : 'stop'; return; }
     let chunk: Record<string, any>;
     try { chunk = JSON.parse(data); } catch { throw new BuildError('invalid_model_response'); }
     if (chunk.usage) usage = chunk.usage;
     if (chunk.error) throw new BuildError(['build_inference_timeout', 'build_inference_disconnected', 'build_interrupted',
       'build_budget_exceeded', 'invalid_model_response', 'build_unavailable'].includes(chunk.error.code) ? chunk.error.code : 'build_failed');
+    if (typeof chunk.response === 'string' || Array.isArray(chunk.tool_calls)) {
+      native = true;
+      if (typeof chunk.response === 'string') content = (content + chunk.response).slice(0, 6000);
+      if (chunk.tool_calls) {
+        const normalized = normalizeBuildToolCalls(chunk.tool_calls) as BuildToolCall[];
+        if (normalized.length > 8) throw new BuildError('invalid_model_response');
+        calls.splice(0, calls.length, ...normalized);
+      }
+      if (chunk.finish_reason) finish = chunk.finish_reason;
+    }
     const choice = chunk.choices?.[0];
     if (choice?.finish_reason) finish = choice.finish_reason;
     const delta = choice?.delta;

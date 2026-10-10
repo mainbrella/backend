@@ -6,12 +6,12 @@ import { appendAccountingEvent } from '../lib/accounting-ledger';
 export async function buildBillingFixture(env: Env, sqlite: DatabaseSync, userId: string) {
   for (const name of ['020_accounting_ledger.sql', '026_build_ai_billing.sql'])
     sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
-  const stored = new Map<string, unknown>(), billingCalls: Request[] = [];
+  const stored = new Map<string, unknown>(), billingCalls: ReturnType<Request['clone']>[] = [];
   const ctx = { storage: {
     async get(key: string) { return structuredClone(stored.get(key)); },
     async put(key: string, value: unknown) { stored.set(key, structuredClone(value)); },
     async setAlarm() {}, async deleteAlarm() {},
-  } };
+  } } as unknown as ConstructorParameters<typeof ContainerAccountController>[0];
   const controller = new ContainerAccountController(ctx, () => { throw new Error('Unexpected machine request'); },
     Date.now, undefined, undefined, undefined, (event: any) => appendAccountingEvent(env, event));
   const internal = (body: unknown) => new Request('https://internal/billing/funding', { method: 'POST',

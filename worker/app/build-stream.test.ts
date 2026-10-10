@@ -7,6 +7,8 @@ import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
 import { readBuildInference, buildInference } from '../lib/build-ai';
 import { buildAppStream, saveBuildActivity, buildToolLabel } from '../lib/build-activity';
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
+import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
+import { buildTokenPrices } from '../lib/build-pricing';
 import { BUILD_MODEL, buildStarter } from '../lib/build-contract';
 import { buildBillingFixture } from './build-billing-test-helpers';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
@@ -65,7 +67,7 @@ test('inference uses streaming, keeps usage accounting and rejects truncated or 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -362,4 +364,66 @@ test('inference failures survive Workflow serialization and Codex cleanup runs i
   assert.deepEqual(cleanupSteps, ['Close local inference'], 'cleanup I/O belongs to a durable Workflow step');
   assert.equal(steps.at(-1), 'Close local inference');
   assert.deepEqual(errors, [['build_turn_failed', { appId: f.appId, turnId: f.turnId, error: 'build_inference_timeout' }]]);
+});
+
+
+test('model choices are priced and validate the actual provider effort modes', () => {
+  for (const model of buildModels) {
+    assert.ok(buildTokenPrices[model.id], model.id);
+    assert.ok(model.efforts.includes(model.defaultEffort));
+    for (const effort of model.efforts) assert.equal(resolveBuildModel(BUILD_MODEL, { model: model.id, effort }).effort, effort);
+  }
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { model: '@cf/unknown/model' }), /invalid_build_model/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'medium' }), /invalid_build_effort/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'none' }), /invalid_build_effort/);
+  assert.deepEqual(buildReasoningOptions('@cf/zai-org/glm-5.3', 'max'), { reasoning_effort: 'max' });
+  assert.deepEqual(buildReasoningOptions('@cf/google/gemma-4-26b-a4b-it', 'none'), { chat_template_kwargs: { enable_thinking: false } });
+  assert.deepEqual(buildReasoningOptions('@cf/nvidia/nemotron-3-120b-a12b', 'low'), { chat_template_kwargs: { enable_thinking: true, low_effort: true, force_nonempty_content: true } });
+  assert.deepEqual(buildReasoningOptions('@cf/moonshotai/kimi-k2.7-code', 'always'), {});
+  assert.deepEqual(resolveBuildModel('local-model', {}, true), { model: 'local-model', effort: 'low' });
+  assert.throws(() => resolveBuildModel('local-model', { model: BUILD_MODEL }, true), /invalid_build_model/);
+});
+
+test('model selection is saved, returned and protected by idempotency on create and update', async t => {
+  const f = await fixture(t);
+  f.sqlite.prepare("UPDATE build_turns SET status = 'succeeded' WHERE id = ?").run(f.turnId);
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id = NULL WHERE id = ?').run(f.appId);
+  const dispatched: unknown[] = [];
+  Object.assign(f.env, { BUILD_ENABLED: 'true', AI: {}, PREVIEWS_ENABLED: 'true', PREVIEW_DOMAIN: 'mainbrella.dev', PREVIEW_ROUTES: {},
+    BUILD_WORKFLOW: { async create(options: unknown) { dispatched.push(options); } } });
+  function submit(path: string, key: string, body: unknown) {
+    return handleBuildRequest(new Request(`https://api.mainbrella.com/build/${path}`, { method: 'POST',
+      headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) }), f.env);
+  }
+  const config = await (await handleBuildRequest(new Request('https://api.mainbrella.com/build/config', { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env)).json() as any;
+  assert.equal(config.models.length, buildModels.length);
+  const body = { prompt: 'An expense tracker', model: '@cf/zai-org/glm-5.3', effort: 'max' };
+  const response = await submit('apps', 'selected-model', body);
+  assert.equal(response.status, 202, await response.clone().text());
+  const { app } = await response.json() as any;
+  assert.equal(app.turns[0].model, body.model); assert.equal(app.turns[0].effort, 'max');
+  assert.equal((await submit('apps', 'selected-model', body)).status, 200);
+  assert.equal((await submit('apps', 'selected-model', { ...body, effort: 'low' })).status, 409);
+  assert.equal((await submit('apps', 'invalid-model', { ...body, model: '@cf/unknown' })).status, 400);
+  assert.equal((await submit('apps', 'invalid-effort', { ...body, effort: 'medium' })).status, 400);
+  await failBuildTurn(f.env, { id: app.turns[0].id, app_id: app.id, user_id: USER_ONE }, 'build_interrupted');
+  const changed = await submit(`apps/${app.id}/turns`, 'next-model', { mode: 'build', revision: 0, prompt: 'Add charts', model: '@cf/moonshotai/kimi-k2.6', effort: 'none' });
+  assert.equal(changed.status, 202, await changed.clone().text());
+  const updated = (await changed.json() as any).app.turns;
+  assert.ok(updated.some((turn: any) => turn.model === '@cf/moonshotai/kimi-k2.6' && turn.effort === 'none'));
+});
+
+test('inference forwards the saved model and effort and normalizes native Workers AI tool calls', async () => {
+  let chosen: string | undefined, payload: any;
+  const model = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+  const env = { BUILD_MODEL: model, AI: { async run(id: string, input: any) {
+    chosen = id; payload = input;
+    return { response: 'Editing files', tool_calls: [{ name: 'write_file', arguments: { path: 'src/App.tsx', content: 'Hello' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
+  } } } as unknown as Env;
+  const result = await buildInference(env, [{ role: 'user', content: 'Build' }], 512);
+  assert.equal(chosen, model); assert.equal(payload.max_tokens, 512); assert.equal(payload.reasoning_effort, undefined);
+  assert.equal(result.message.tool_calls?.[0].function.arguments, '{"path":"src/App.tsx","content":"Hello"}');
+  const streamed = await readBuildInference(chunks(event({ response: 'Hello', usage: { prompt_tokens: 10, completion_tokens: 5 } }) + event('[DONE]')));
+  assert.equal(streamed.choices[0].message.content, 'Hello');
+  await assert.rejects(readBuildInference(chunks(event({ response: 'Incomplete' }))), /model_response_incomplete/);
 });

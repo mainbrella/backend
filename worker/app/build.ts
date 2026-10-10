@@ -1,3 +1,4 @@
+import { buildModels, resolveBuildModel } from '../lib/build-models';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 import { readCommandBody } from '../../containers/command-contract.js';
 import { validExecutionId } from '../../containers/execution-contract.js';
@@ -24,7 +25,7 @@ function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActi
     activeTurnId: row.active_turn_id, container: row.container_json ? JSON.parse(row.container_json) as BuildContainer : null,
     preview: preview && preview.expiresAt > Date.now() ? preview : null, createdAt: row.created_at, updatedAt: row.updated_at,
     ...(turns ? { turns: turns.map(turn => ({ id: turn.id, prompt: turn.prompt, mode: turn.mode, status: turn.status,
-      stage: turn.stage, summary: turn.summary, error: turn.error, log: turn.log, model: turn.model,
+      stage: turn.stage, summary: turn.summary, error: turn.error, log: turn.log, model: turn.model, effort: turn.effort ?? null,
       activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => item),
       images: images.filter(image => image.turn_id === turn.id).map(publicBuildImage),
       inputTokens: turn.input_tokens, outputTokens: turn.output_tokens, aiCostCents: (costs[turn.id] ?? 0) / 10000,
@@ -94,10 +95,10 @@ async function stopBuildContainer(env: Env, userId: string, app: BuildAppRow) {
   const response = await accountResponse(env, userId, { plan: null, active: false, validUntil: null }, 'DELETE', container.id, container.createdAt);
   if (!response.ok && ![404, 409].includes(response.status)) throw new BuildError('containers_unavailable');
 }
-function turnInsert(env: Env, appId: string, userId: string, turnId: string, key: string, prompt: string, mode: string, revision: number, now: string) {
-  return env.DB.prepare(`INSERT INTO build_turns (id, app_id, user_id, request_key, prompt, mode, base_revision, status, stage, model, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Waiting to build', ?, ?)`)
-    .bind(turnId, appId, userId, key, prompt, mode, revision, env.BUILD_MODEL || BUILD_MODEL, now);
+function turnInsert(env: Env, appId: string, userId: string, turnId: string, key: string, prompt: string, mode: string, revision: number, now: string, model: string, effort: string | null) {
+  return env.DB.prepare(`INSERT INTO build_turns (id, app_id, user_id, request_key, prompt, mode, base_revision, status, stage, model, created_at, effort)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Waiting to build', ?, ?, ?)`)
+    .bind(turnId, appId, userId, key, prompt, mode, revision, model, now, effort);
 }
 
 export async function handleBuildRequest(request: Request, env: Env): Promise<Response> {
@@ -117,6 +118,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (match[1] === 'config') return authJson({ available: buildConfigured(env), model: env.BUILD_MODEL || BUILD_MODEL,
+      models: (localCodexConfigured(env) ? [{ id: env.BUILD_MODEL || BUILD_MODEL, name: env.BUILD_MODEL || BUILD_MODEL, efforts: ['low'], defaultEffort: 'low' }] : buildModels).map(({ id, name, efforts, defaultEffort }) => ({ id, name, efforts, defaultEffort })),
       maxApps: BUILD_MAX_APPS, dailyTurns: BUILD_DAILY_TURNS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
       aiMarkupPercent: BUILD_AI_MARKUP_PERCENT, computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
     const id = match[2];
@@ -180,6 +182,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const data = parsed.data;
     const mode = 'mode' in data ? data.mode : 'build';
     const prompt = 'prompt' in data ? data.prompt : '';
+    const options = mode === 'build' ? resolveBuildModel(env.BUILD_MODEL || BUILD_MODEL, 'prompt' in data ? data : {}, localCodexConfigured(env)) : { model: env.BUILD_MODEL || BUILD_MODEL, effort: null };
     const existing = id
       ? await env.DB.prepare('SELECT * FROM build_turns WHERE app_id = ? AND user_id = ? AND request_key = ?').bind(id, user.id, key).first<BuildTurnRow>()
       : await env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? AND create_key = ?').bind(user.id, key).first<BuildAppRow>();
@@ -187,6 +190,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
       if ('prompt' in existing ? existing.prompt !== prompt || existing.mode !== mode || ('revision' in data && existing.base_revision !== data.revision) : existing.initial_prompt !== prompt) return authJson({ error: 'idempotency_key_conflict' }, 409, cors);
       const appId = 'app_id' in existing ? existing.app_id : existing.id;
       const queued = 'app_id' in existing ? existing : await env.DB.prepare('SELECT * FROM build_turns WHERE app_id = ? AND request_key = ?').bind(appId, key).first<BuildTurnRow>();
+      if (queued && mode === 'build' && (('model' in data && data.model !== queued.model) || ('effort' in data && data.effort !== queued.effort))) return authJson({ error: 'idempotency_key_conflict' }, 409, cors);
       if (queued?.status === 'queued') await dispatchBuildTurn(env, queued).catch(() => { console.error('build_dispatch_deferred', { turnId: queued.id }); });
       return authJson(await detail(env, user.id, appId), 200, cors);
     }
@@ -200,7 +204,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const statements = !id ? [env.DB.prepare(`INSERT INTO build_apps
       (id, user_id, create_key, initial_prompt, name, source_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(appId, user.id, key, prompt, buildName(prompt), JSON.stringify(buildStarter), now, now)] : [];
-    statements.push(turnInsert(env, appId, user.id, turnId, key!, prompt, mode, 'revision' in data ? data.revision : 0, now));
+    statements.push(turnInsert(env, appId, user.id, turnId, key!, prompt, mode, 'revision' in data ? data.revision : 0, now, options.model, options.effort));
     statements.push(env.DB.prepare('UPDATE build_apps SET active_turn_id = ?, preview_json = NULL, updated_at = ? WHERE id = ? AND user_id = ?').bind(turnId, now, appId, user.id));
     await env.DB.batch(statements);
     const turn = (await env.DB.prepare('SELECT * FROM build_turns WHERE id = ? AND user_id = ?').bind(turnId, user.id).first<BuildTurnRow>())!;

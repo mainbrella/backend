@@ -11,9 +11,10 @@ export const BUILD_MAX_ROUNDS = 16;
 export const BUILD_OUTPUT_BUDGET = 24_000;
 export const BUILD_INPUT_BUDGET = 240_000;
 export const buildPrompt = z.string().trim().min(1).max(6000);
-export const buildCreateSchema = z.object({ prompt: buildPrompt }).strict();
+const modelOptions = { model: z.string().min(1).max(120).optional(), effort: z.string().min(1).max(20).optional() };
+export const buildCreateSchema = z.object({ prompt: buildPrompt, ...modelOptions }).strict();
 export const buildTurnSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('build'), prompt: buildPrompt, revision: z.number().int().min(0) }).strict(),
+  z.object({ mode: z.literal('build'), prompt: buildPrompt, ...modelOptions, revision: z.number().int().min(0) }).strict(),
   z.object({ mode: z.literal('preview'), revision: z.number().int().min(1) }).strict(),
 ]);
 export const buildRenameSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
@@ -30,7 +31,7 @@ export interface BuildTurnRow {
   id: string; app_id: string; user_id: string; request_key: string; prompt: string; mode: 'build' | 'preview';
   base_revision: number; log: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed'; stage: string; summary: string | null; error: string | null;
-  model: string; input_tokens: number; output_tokens: number; created_at: string; finished_at: string | null;
+  model: string; effort?: string | null; input_tokens: number; output_tokens: number; created_at: string; finished_at: string | null;
 }
 export class BuildError extends Error {
   constructor(message: string, public status = 503) { super(message); }
