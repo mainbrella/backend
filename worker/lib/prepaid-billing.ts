@@ -235,7 +235,7 @@ export async function completePrepaidCheckout(env: BillingEnv, account: PrepaidA
   verifyOwnedCheckout(session, account, request);
   if (session.status === 'expired') throw new Error('topup_expired');
   if (session.status !== 'complete') throw new Error('payment_pending');
-  if (session.amount_total === 0 && session.payment_status === 'no_payment_required' && session.payment_intent === null) {
+  if (session.amount_total === 0 && ['paid', 'no_payment_required'].includes(session.payment_status) && session.payment_intent === null) {
     // Stripe creates no PaymentIntent for a 100% discount. A completed live
     // Session is the funding identity, shared by browser and webhook retries.
     const result = await accountBillingRequest(env, account.user_id, '/billing/funding', {

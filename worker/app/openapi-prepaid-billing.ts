@@ -28,7 +28,7 @@ export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHan
   }, handler);
   register(api, 'post', '/billing/topups/complete', {
     operationId: 'completePrepaidTopup', tags: ['Billing'], summary: 'Verify owned Checkout and apply confirmed prepaid funding once', security: cookieSecurity,
-    description: 'Requires browser cookie and trusted Origin. The Checkout redirect does not prove payment. Live Checkout subtotal, Stripe discount, ownership and completion are verified. Nonzero totals additionally require a verified PaymentIntent and captured card charge with matching currency, amount and refund/dispute state. Refunds revoke the corresponding proportion of purchased compute credit, rounded up; disputes revoke the full credit. Pending payments do not increase the balance.',
+    description: 'Requires browser cookie and trusted Origin. The Checkout redirect does not prove payment. Live Checkout subtotal, Stripe discount, ownership and completion are verified. Completed zero-total orders with paid or no_payment_required status and no PaymentIntent fund the selected balance once using their Checkout session ID. Nonzero totals additionally require a verified PaymentIntent and captured card charge with matching currency, amount and refund/dispute state. Refunds revoke the corresponding proportion of purchased compute credit, rounded up; disputes revoke the full credit. Pending payments do not increase the balance.',
     request: { headers: z.object({ Origin: z.string() }), ...requestBody(z.object({ sessionId: z.string().regex(/^cs_[A-Za-z0-9_]+$/) })) },
     responses: { 200: jsonResponse(result), ...errors(400, 401, 403, 409, 503) },
   }, handler);

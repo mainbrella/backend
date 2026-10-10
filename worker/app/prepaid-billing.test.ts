@@ -45,7 +45,7 @@ async function fixture(t: test.TestContext, owned = true) {
       amount: 2000, currency: 'usd', amount_refunded: 0, refunded: false, disputed: false, payment_method_details: { type: 'card' } } };
   const checkout = { id: 'cs_prepaid', url: null, mode: 'payment', ui_mode: 'custom', client_secret: 'cs_secret_prepaid', status: 'complete', payment_status: 'paid', currency: 'usd',
     amount_subtotal: 2000, amount_total: 2000, total_details: { amount_discount: 0, amount_tax: 0, amount_shipping: 0 },
-    allow_promotion_codes: true, customer: TEST_CUSTOMER, client_reference_id: TEST_USER, payment_intent: 'pi_prepaid', metadata: { mainbrella_request_id: requestId } };
+    allow_promotion_codes: true, customer: TEST_CUSTOMER, client_reference_id: TEST_USER, payment_intent: 'pi_prepaid' as string | null, metadata: { mainbrella_request_id: requestId } };
   let rechargeIntent: any = null; let createRechargeStatus = 'succeeded';
   const price = { id: 'price_prepaid', active: true, type: 'one_time', currency: 'usd', unit_amount: 500, recurring: null as unknown, product: { id: 'prod_prepaid', active: true } };
   f.state.override = (url, init) => {
@@ -261,6 +261,9 @@ test('discounted Checkout rejects a changed nominal subtotal, invalid discount a
   f.checkout.amount_total = 1501;
   assert.equal((await complete()).status, 403);
   f.checkout.amount_total = 1500;
+  f.checkout.payment_intent = 'pi_other';
+  assert.equal((await complete()).status, 503);
+  f.checkout.payment_intent = 'pi_prepaid';
   f.intent.amount = 1499; f.intent.amount_received = 1499; f.intent.latest_charge.amount = 1499;
   assert.equal((await complete()).status, 403);
   assert.equal(f.funding.size, 0);
@@ -283,24 +286,29 @@ test('a coupon can reduce a minimum $5 topup below $5 and refunds revoke proport
   assert.equal(f.balance.balanceCents, 0);
 });
 
-test('a zero-cost promotion funds once by Checkout identity without PaymentIntent or card requests', async t => {
-  const f = await fixture(t);
-  f.checkout.total_details.amount_discount = 2000; f.checkout.amount_total = 0;
-  f.checkout.payment_status = 'no_payment_required'; f.checkout.payment_intent = null;
+for (const paymentStatus of ['no_payment_required', 'paid']) {
+  test(`a zero-cost ${paymentStatus} promotion funds once by Checkout identity without PaymentIntent or card requests`, async t => {
+    const f = await fixture(t);
+    f.checkout.total_details.amount_discount = 2000; f.checkout.amount_total = 0;
+    f.checkout.payment_status = paymentStatus; f.checkout.payment_intent = null;
 
-  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env)).status, 200);
-  assert.equal(f.balance.balanceCents, 2000);
-  assert.equal(f.funding.size, 1); assert.ok(f.funding.has('cs_prepaid'));
-  assert.equal((await handleSubscriptionWebhook(await webhook('checkout.session.completed', { id: 'cs_prepaid', customer: TEST_CUSTOMER }, 'evt_free_checkout'), f.env)).status, 200);
-  assert.equal(f.funding.size, 1); assert.equal(f.balance.balanceCents, 2000);
-  assert.equal(f.calls.some(call => call.url.pathname.startsWith('/v1/payment_intents')), false);
-  assert.equal(f.calls.some(call => call.url.pathname.startsWith('/v1/payment_methods')), false);
-});
+    assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env)).status, 200);
+    assert.equal(f.balance.balanceCents, 2000);
+    assert.equal(f.funding.size, 1); assert.ok(f.funding.has('cs_prepaid'));
+    assert.equal((await handleSubscriptionWebhook(await webhook('checkout.session.completed', { id: 'cs_prepaid', customer: TEST_CUSTOMER }, 'evt_free_checkout'), f.env)).status, 200);
+    assert.equal(f.funding.size, 1); assert.equal(f.balance.balanceCents, 2000);
+    assert.equal(f.calls.some(call => call.url.pathname.startsWith('/v1/payment_intents')), false);
+    assert.equal(f.calls.some(call => call.url.pathname.startsWith('/v1/payment_methods')), false);
+  });
+}
 
-test('an incomplete zero-cost Checkout cannot fund credit', async t => {
+test('an incomplete or unpaid zero-cost Checkout cannot fund credit', async t => {
   const f = await fixture(t);
   f.checkout.status = 'open'; f.checkout.total_details.amount_discount = 2000; f.checkout.amount_total = 0;
   f.checkout.payment_status = 'no_payment_required'; f.checkout.payment_intent = null;
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env)).status, 409);
+  assert.equal(f.funding.size, 0);
+  f.checkout.status = 'complete'; f.checkout.payment_status = 'unpaid';
   assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env)).status, 409);
   assert.equal(f.funding.size, 0);
 });
@@ -326,7 +334,7 @@ test('a lost Checkout creation response is reconciled by payment_intent identity
     ? Response.json({ data: [{ ...f.checkout }], has_more: false }) : previous(url, init);
   assert.equal((await handleSubscriptionWebhook(await webhook('payment_intent.succeeded', { id: 'pi_prepaid', customer: TEST_CUSTOMER }, 'evt_lost_checkout'), f.env)).status, 200);
   const lookup = f.calls.find(call => call.url.pathname === '/v1/checkout/sessions' && call.init?.method === 'GET')!;
-  assert.equal(lookup.params.get('payment_intent'), 'pi_prepaid');
+  assert.equal(lookup.url.searchParams.get('payment_intent'), 'pi_prepaid');
   assert.equal(f.funding.get('pi_prepaid')?.amountCents, 2000);
 });
 
@@ -346,7 +354,7 @@ test('refund and dispute events replace payment funding using live charge state 
 test('verified large purchases cannot grant client-invented credit and refunds remove the paid cents', async t => {
   const f = await fixture(t);
   f.sqlite.prepare('UPDATE prepaid_topups SET amount_cents=99900').run();
-  f.checkout.amount_total = 99900; f.intent.amount = 99900; f.intent.amount_received = 99900; f.intent.latest_charge.amount = 99900;
+  f.checkout.amount_subtotal = 99900; f.checkout.amount_total = 99900; f.intent.amount = 99900; f.intent.amount_received = 99900; f.intent.latest_charge.amount = 99900;
   const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid', creditCents: 999999999 }), f.env);
   assert.equal(response.status, 200); assert.equal(f.balance.balanceCents, 99900);
   assert.equal(f.funding.get('pi_prepaid')?.amountCents, 99900); assert.equal(Object.hasOwn(f.funding.get('pi_prepaid')!, 'creditCents'), false);
@@ -460,7 +468,7 @@ for (const amountCents of [18000, 100000]) {
   test(`a $${amountCents / 100} manual payment adds exactly the paid amount`, async t => {
     const f = await fixture(t);
     f.sqlite.prepare('UPDATE prepaid_topups SET amount_cents=?').run(amountCents);
-    f.checkout.amount_total = amountCents; f.intent.amount = amountCents; f.intent.amount_received = amountCents; f.intent.latest_charge.amount = amountCents;
+    f.checkout.amount_subtotal = amountCents; f.checkout.amount_total = amountCents; f.intent.amount = amountCents; f.intent.amount_received = amountCents; f.intent.latest_charge.amount = amountCents;
     const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env);
     assert.equal(response.status, 200); assert.equal(f.balance.balanceCents, amountCents);
     assert.equal(f.funding.get('pi_prepaid')?.amountCents, amountCents);

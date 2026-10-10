@@ -40,9 +40,11 @@ must include the Compute Credit Product. The existing Mainbrella trial-coupon
 system is separate. For example, a 50% code on a $20 top-up charges $10 and adds
 $20 of compute balance. The server verifies Stripe's live subtotal and discount
 against the saved purchase, and checks the actual captured card payment.
-A 100% discount credits only a completed `no_payment_required` Checkout, using
-its session ID instead of a PaymentIntent ID. Automatic recharge uses its
-explicitly authorized amount and does not apply promotion codes.
+A 100% discount hides card entry and requires confirmation. Credit is added
+only for a completed zero-total Checkout with `paid` or `no_payment_required`
+status and no PaymentIntent, using its session ID as the funding identity.
+Automatic recharge uses its explicitly authorized amount and does not apply
+promotion codes.
 Configure `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` separately for each
 mode. Send signed events to `/subscription/webhook`, including
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,

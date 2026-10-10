@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PrepaidWallet, UNIT_MS_PER_CENT, utcPeriod } from './prepaid-wallet.js';
+import { ContainerAccountController } from './container-account-core.js';
 
 function fixture(recharge) {
   let now = Date.UTC(2026, 9, 31, 23, 59);
@@ -37,6 +38,36 @@ test('out-of-order refund and dispute observations cannot restore reversed money
   f.wallet.applyFunding(f.state, { ...f.payment, disputed: true });
   f.wallet.applyFunding(f.state, f.payment);
   assert.equal(f.wallet.status(f.state).balanceCents, 0);
+});
+
+test('a zero-cost Checkout session is a durable idempotent funding identity', async () => {
+  const stored = new Map();
+  const storage = {
+    async get(key) { return structuredClone(stored.get(key)); },
+    async put(key, value) { stored.set(key, structuredClone(value)); },
+    async getAlarm() { return null; }, async setAlarm() {}, async deleteAlarm() {},
+  };
+  const controller = new ContainerAccountController({ storage }, () => { throw new Error('funding_must_not_allocate_compute'); });
+  const freeFunding = { id: 'cs_free_topup', customerId: 'cus_owner', amountCents: 500, refundedCents: 0,
+    disputed: false, createdAt: 1800000000000, kind: 'topup' };
+  const postFunding = funding => controller.fetch(new Request('https://internal/billing/funding', {
+    method: 'POST', headers: { 'x-mainbrella-user': 'owner' }, body: JSON.stringify(funding),
+  }));
+  const balance = async () => {
+    const response = await controller.fetch(new Request('https://internal/billing/balance', { headers: { 'x-mainbrella-user': 'owner' } }));
+    assert.equal(response.status, 200);
+    return (await response.json()).balance;
+  };
+
+  assert.equal((await postFunding(freeFunding)).status, 200);
+  assert.equal((await postFunding(freeFunding)).status, 200); // Browser and webhook share the cs identity.
+  assert.equal((await balance()).balanceCents, 500);
+  assert.equal((await postFunding({ ...freeFunding, refundedCents: 250 })).status, 200);
+  assert.equal((await postFunding(freeFunding)).status, 200); // A delayed success cannot undo a refund.
+  assert.equal((await balance()).balanceCents, 250);
+  assert.equal((await postFunding({ ...freeFunding, disputed: true })).status, 200);
+  assert.equal((await postFunding({ ...freeFunding, refundedCents: 0 })).status, 200);
+  assert.equal((await balance()).balanceCents, 0);
 });
 
 test('a lowered monthly cap also protects already funded next-month runtime', () => {
