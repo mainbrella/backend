@@ -118,7 +118,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (match[1] === 'config') return authJson({ available: buildConfigured(env), model: env.BUILD_MODEL || BUILD_MODEL,
-      models: (localCodexConfigured(env) ? [{ id: env.BUILD_MODEL || BUILD_MODEL, name: env.BUILD_MODEL || BUILD_MODEL, efforts: ['low'], defaultEffort: 'low' }] : buildModels).map(({ id, name, efforts, defaultEffort }) => ({ id, name, efforts, defaultEffort })),
+      models: (localCodexConfigured(env) ? [{ id: env.BUILD_MODEL || BUILD_MODEL, name: env.BUILD_MODEL || BUILD_MODEL, description: undefined, efforts: ['low'], defaultEffort: 'low' }] : buildModels).map(({ id, name, description, efforts, defaultEffort }) => ({ id, name, ...(description ? { description } : {}), efforts, defaultEffort })),
       maxApps: BUILD_MAX_APPS, dailyTurns: BUILD_DAILY_TURNS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
       aiMarkupPercent: BUILD_AI_MARKUP_PERCENT, computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
     const id = match[2];

@@ -22,7 +22,9 @@ const answer = (usage: unknown, finish = 'stop') => ({ choices: [{ finish_reason
 test('Cloudflare token and image costs cover neuron pricing, cached discounts, reasoning output and 50% markup', () => {
   const usage = readBuildTokenUsage({ prompt_tokens: 100000, prompt_tokens_details: { cached_tokens: 80000 },
     completion_tokens: 20000, completion_tokens_details: { reasoning_tokens: 15000 } })!;
-  assert.equal(buildTokenCostMicroUsd(BUILD_MODEL, usage), 15401);
+  assert.equal(buildTokenCostMicroUsd(BUILD_MODEL, usage), 136801);
+  assert.equal(buildInferenceChargeMicroUsd(136801), 205202);
+  assert.equal(buildTokenCostMicroUsd('@cf/zai-org/glm-5.3-flash', usage), 15401);
   assert.equal(buildInferenceChargeMicroUsd(15401), 23102);
   assert.equal(buildImageCostMicroUsd(1024, 1024, 4), 634);
   assert.equal(buildInferenceChargeMicroUsd(634), 951);
@@ -48,8 +50,8 @@ test('inference holds funds before the provider call and settles exact fractiona
   await settleReportedBuildUsage(f.env);
   await settleReportedBuildUsage(f.env);
   const history = await accountBillingRequest<any>(f.env, USER_ONE, '/billing/history');
-  assert.equal(history.totals.inferenceUsedCents, 0.0158);
-  assert.equal(history.totals.usedCents, 0.0158);
+  assert.equal(history.totals.inferenceUsedCents, 0.1394);
+  assert.equal(history.totals.usedCents, 0.1394);
   assert.equal(history.totals.unattributedUsedCents, 0);
   assert.equal(history.historyTruncated, false);
   assert.equal(history.balance.reservedBalanceCents, 0);
@@ -78,7 +80,7 @@ test('a lost settlement acknowledgement retries the existing debit without anoth
   assert.equal(f.sqlite.prepare('SELECT status FROM build_ai_usage').get()!.status, 'reported');
   await settleReportedBuildUsage(f.env);
   const history = await accountBillingRequest<any>(f.env, USER_ONE, '/billing/history');
-  assert.equal(history.totals.inferenceUsedCents, 0.0302);
+  assert.equal(history.totals.inferenceUsedCents, 0.2762);
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM accounting_ledger WHERE event_type = 'inference'").get()!.n, 1);
 });
 
@@ -108,7 +110,7 @@ test('length-limited and malformed responses still settle provider usage', async
   await settleReportedBuildUsage(f.env);
   assert.equal(f.sqlite.prepare('SELECT status FROM build_ai_usage').get()!.status, 'settled');
   const history = await accountBillingRequest<any>(f.env, USER_ONE, '/billing/history');
-  assert.equal(history.totals.inferenceUsedCents, 0.0995);
+  assert.equal(history.totals.inferenceUsedCents, 0.8859);
 });
 
 test('missing usage or a disconnected provider keeps a hold and never replays inference', async t => {
@@ -128,7 +130,7 @@ test('missing usage or a disconnected provider keeps a hold and never replays in
 
 
 test('a selected model uses its saved effort and its own token price for settlement', async t => {
-  const f = await fixture(t), model = '@cf/zai-org/glm-5.3';
+  const f = await fixture(t), model = '@cf/zai-org/glm-5.3-flash';
   f.env.AI = { async run(id: string, payload: any) {
     assert.equal(id, model); assert.equal(payload.reasoning_effort, 'max');
     return answer({ prompt_tokens: 1000, completion_tokens: 100 });

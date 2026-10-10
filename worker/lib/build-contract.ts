@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const BUILD_MODEL = '@cf/zai-org/glm-5.3-flash';
+export const BUILD_MODEL = '@cf/zai-org/glm-5.3';
 export const BUILD_MAX_APPS = 50;
 export const BUILD_MAX_TURNS = 100;
 export const BUILD_DAILY_TURNS = 10;

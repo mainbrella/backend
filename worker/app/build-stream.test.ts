@@ -368,6 +368,8 @@ test('inference failures survive Workflow serialization and Codex cleanup runs i
 
 
 test('model choices are priced and validate the actual provider effort modes', () => {
+  assert.deepEqual(buildModels.map(model => model.id), ['@cf/zai-org/glm-5.3', '@cf/moonshotai/kimi-k2.7-code', '@cf/zai-org/glm-5.3-flash']);
+  assert.deepEqual(resolveBuildModel(BUILD_MODEL, {}), { model: '@cf/zai-org/glm-5.3', effort: 'high' });
   for (const model of buildModels) {
     assert.ok(buildTokenPrices[model.id], model.id);
     assert.ok(model.efforts.includes(model.defaultEffort));
@@ -376,12 +378,23 @@ test('model choices are priced and validate the actual provider effort modes', (
   assert.throws(() => resolveBuildModel(BUILD_MODEL, { model: '@cf/unknown/model' }), /invalid_build_model/);
   assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'medium' }), /invalid_build_effort/);
   assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'none' }), /invalid_build_effort/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'low' }), /invalid_build_effort/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { effort: 'xhigh' }), /invalid_build_effort/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { model: '@cf/moonshotai/kimi-k2.6' }), /invalid_build_model/);
+  assert.throws(() => resolveBuildModel(BUILD_MODEL, { model: '@cf/zai-org/glm-5.3-flash', effort: 'low' }), /invalid_build_effort/);
+  assert.deepEqual(resolveBuildModel(BUILD_MODEL, { model: '@cf/zai-org/glm-5.3-flash' }), { model: '@cf/zai-org/glm-5.3-flash', effort: 'high' });
   assert.deepEqual(buildReasoningOptions('@cf/zai-org/glm-5.3', 'max'), { reasoning_effort: 'max' });
   assert.deepEqual(buildReasoningOptions('@cf/google/gemma-4-26b-a4b-it', 'none'), { chat_template_kwargs: { enable_thinking: false } });
   assert.deepEqual(buildReasoningOptions('@cf/nvidia/nemotron-3-120b-a12b', 'low'), { chat_template_kwargs: { enable_thinking: true, low_effort: true, force_nonempty_content: true } });
   assert.deepEqual(buildReasoningOptions('@cf/moonshotai/kimi-k2.7-code', 'always'), {});
   assert.deepEqual(resolveBuildModel('local-model', {}, true), { model: 'local-model', effort: 'low' });
   assert.throws(() => resolveBuildModel('local-model', { model: BUILD_MODEL }, true), /invalid_build_model/);
+});
+
+test('queued builds retain native reasoning modes from before the menu was pruned', () => {
+  assert.deepEqual(buildReasoningOptions('@cf/zai-org/glm-5.3-flash', 'low'), { reasoning_effort: 'low' });
+  assert.deepEqual(buildReasoningOptions('@cf/moonshotai/kimi-k2.6', 'none'), { reasoning_effort: 'none' });
+  assert.throws(() => buildReasoningOptions('@cf/zai-org/glm-5.3', 'xhigh'), /invalid_build_effort/);
 });
 
 test('model selection is saved, returned and protected by idempotency on create and update', async t => {
@@ -397,20 +410,26 @@ test('model selection is saved, returned and protected by idempotency on create 
   }
   const config = await (await handleBuildRequest(new Request('https://api.mainbrella.com/build/config', { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env)).json() as any;
   assert.equal(config.models.length, buildModels.length);
+  assert.equal(config.model, '@cf/zai-org/glm-5.3');
+  assert.deepEqual(config.models.map((model: any) => [model.description, model.efforts, model.defaultEffort]), [
+    ['Best quality', ['high', 'max'], 'high'], ['Coding', ['always'], 'always'], ['Lower cost', ['high', 'max'], 'high'],
+  ]);
   const body = { prompt: 'An expense tracker', model: '@cf/zai-org/glm-5.3', effort: 'max' };
   const response = await submit('apps', 'selected-model', body);
   assert.equal(response.status, 202, await response.clone().text());
   const { app } = await response.json() as any;
   assert.equal(app.turns[0].model, body.model); assert.equal(app.turns[0].effort, 'max');
   assert.equal((await submit('apps', 'selected-model', body)).status, 200);
-  assert.equal((await submit('apps', 'selected-model', { ...body, effort: 'low' })).status, 409);
+  assert.equal((await submit('apps', 'selected-model', { ...body, effort: 'high' })).status, 409);
   assert.equal((await submit('apps', 'invalid-model', { ...body, model: '@cf/unknown' })).status, 400);
   assert.equal((await submit('apps', 'invalid-effort', { ...body, effort: 'medium' })).status, 400);
+  assert.equal((await submit('apps', 'low-effort', { ...body, effort: 'low' })).status, 400);
+  assert.equal((await submit('apps', 'removed-model', { ...body, model: '@cf/moonshotai/kimi-k2.6' })).status, 400);
   await failBuildTurn(f.env, { id: app.turns[0].id, app_id: app.id, user_id: USER_ONE }, 'build_interrupted');
-  const changed = await submit(`apps/${app.id}/turns`, 'next-model', { mode: 'build', revision: 0, prompt: 'Add charts', model: '@cf/moonshotai/kimi-k2.6', effort: 'none' });
+  const changed = await submit(`apps/${app.id}/turns`, 'next-model', { mode: 'build', revision: 0, prompt: 'Add charts', model: '@cf/moonshotai/kimi-k2.7-code' });
   assert.equal(changed.status, 202, await changed.clone().text());
   const updated = (await changed.json() as any).app.turns;
-  assert.ok(updated.some((turn: any) => turn.model === '@cf/moonshotai/kimi-k2.6' && turn.effort === 'none'));
+  assert.ok(updated.some((turn: any) => turn.model === '@cf/moonshotai/kimi-k2.7-code' && turn.effort === 'always'));
 });
 
 test('inference forwards the saved model and effort and normalizes native Workers AI tool calls', async () => {

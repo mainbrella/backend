@@ -128,8 +128,11 @@ test('Build configuration describes the opt-in local Codex provider and preserve
   assert.deepEqual(config.security, [{ cookieAuth: [] }]);
   assert.match(config.description, /Production uses Workers AI/);
   assert.match(config.description, /local development.*Codex app-server/);
+  assert.match(config.description, /curated list of three models/);
+  assert.match(config.description, /high \(default\) or max/);
   assert.equal(config.responses[200].content['application/json'].schema.properties.model.type, 'string');
   assert.equal(config.responses[200].content['application/json'].schema.properties.models.type, 'array');
+  assert.equal(config.responses[200].content['application/json'].schema.properties.models.items.properties.description.type, 'string');
   const creation = paths['/build/apps'].post.requestBody.content['application/json'].schema.properties;
   assert.equal(creation.model.type, 'string'); assert.equal(creation.effort.type, 'string');
 });
