@@ -72,6 +72,8 @@ test('accounting schemas describe protected exports, immutable revisions and exp
   const order = ledger.parameters.find((parameter: any) => parameter.name === 'order');
   assert.deepEqual(order.schema.enum, ['asc', 'desc']);
   assert.match(ledger.description, /recorded_at descending, then sequence descending/);
+  assert.match(ledger.description, /15-minute intervals/);
+  assert.match(ledger.description, /does not flush buffered usage/);
   assert.match(paths['/admin/accounting/closes'].post.description, /null until a CPA-approved policy/);
   assert.match(paths['/admin/accounting/policies'].post.description, /does not create refund rights/);
   assert.ok(components.schemas.AccountingCloseReport.properties.customerComputeCredits);

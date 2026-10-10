@@ -52,9 +52,117 @@ test('accounting activation preserves a labeled baseline without attributing old
   f.wallet.account.accountingSink = async event => ledger.push(event);
   const lease = f.lease(10); f.state.leases.small = lease; f.wallet.track(f.state, lease, 'small');
   f.advance(10); f.wallet.record(f.state, lease, f.now());
+  f.wallet.checkpoint(f.state);
   await f.wallet.flushAccounting(f.state);
   assert.equal(ledger.find(event => event.type === 'legacy_usage').data.unitMs, 500);
   assert.equal(ledger.find(event => event.type === 'compute').data.unitMs, 10);
+});
+
+test('buffered compute remains separate from immutable retries after eviction and lost acknowledgements', async () => {
+  const ledger = new Map(); let loseAcknowledgement = true;
+  const f = fixture(undefined, async event => {
+    if (ledger.has(event.key)) assert.deepEqual(event, ledger.get(event.key));
+    ledger.set(event.key, structuredClone(event));
+    if (event.type === 'compute' && loseAcknowledgement) { loseAcknowledgement = false; throw new Error('lost_ack'); }
+  });
+  f.advance(60000); // Start outside the month boundary.
+  let lease = f.lease(3600000, 'small'); f.state.leases.small = lease;
+  f.advance(900000); f.wallet.record(f.state, lease, f.now());
+  await f.wallet.flushAccounting(f.state);
+  const frozen = structuredClone(Object.values(f.state.wallet.accounting.pending));
+  assert.equal(frozen.length, 1);
+  assert.equal(frozen[0].data.unitMs, 900000 * 6);
+
+  f.state = structuredClone(f.saved.at(-1));
+  f.wallet = new PrepaidWallet(f.wallet.account);
+  lease = f.state.leases.small;
+  f.advance(30000); f.wallet.record(f.state, lease, f.now());
+  assert.deepEqual(Object.values(f.state.wallet.accounting.pending), frozen);
+  assert.equal(Object.values(f.state.wallet.accounting.computeIntervals)[0].unitMs, 30000 * 6);
+  await f.wallet.flushAccounting(f.state);
+  assert.deepEqual(f.state.wallet.accounting.pending, {});
+  assert.equal([...ledger.values()].filter(event => event.type === 'compute').length, 1);
+  f.wallet.finish(f.state, lease, f.now());
+  await f.wallet.flushAccounting(f.state);
+  const usage = [...ledger.values()].filter(event => event.type === 'compute');
+  assert.equal(usage.length, 2);
+  assert.equal(usage[0].data.endAt, usage[1].data.startAt);
+  assert.equal(usage.reduce((sum, event) => sum + event.data.unitMs, 0), f.state.wallet.usedUnitMs);
+});
+
+for (const change of ['topup', 'refund', 'dispute']) {
+  test(`an actual ${change} flushes buffered and live usage, while duplicate funding leaves intervals combined`, async () => {
+    const ledger = [], f = fixture(undefined, async event => ledger.push(structuredClone(event)));
+    f.advance(60000);
+    const lease = f.lease(3600000); f.state.leases.small = lease;
+    await f.wallet.flushAccounting(f.state);
+    f.advance(20000); f.wallet.record(f.state, lease, f.now());
+    await f.wallet.flushAccounting(f.state);
+    assert.equal(ledger.filter(event => event.type === 'compute').length, 0);
+    f.advance(10000); f.wallet.applyFunding(f.state, f.payment);
+    await f.wallet.flushAccounting(f.state);
+    assert.equal(ledger.filter(event => event.type === 'compute').length, 0);
+    assert.equal(f.state.wallet.usedUnitMs, 20000);
+
+    const changed = { ...f.payment, ...(change === 'topup' ? { id: 'pi_new', createdAt: f.now() }
+      : change === 'refund' ? { refundedCents: 100 } : { disputed: true }) };
+    f.wallet.applyFunding(f.state, changed);
+    await f.wallet.flushAccounting(f.state);
+    const usage = ledger.filter(event => event.type === 'compute');
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0].data.unitMs, 30000);
+    assert.equal(ledger.at(-1).type, 'funding_state');
+    assert.equal(ledger.at(-1).occurredAt, usage[0].occurredAt);
+    assert.deepEqual(f.state.wallet.accounting.computeIntervals, {});
+
+    f.advance(30000); f.wallet.record(f.state, lease, f.now());
+    f.wallet.applyFunding(f.state, changed);
+    await f.wallet.flushAccounting(f.state);
+    assert.equal(ledger.filter(event => event.type === 'compute').length, 1);
+    assert.equal(Object.values(f.state.wallet.accounting.computeIntervals)[0].unitMs, 30000);
+  });
+}
+
+test('a resource metadata change preserves both interval descriptions without merging them', async () => {
+  const ledger = [], f = fixture(undefined, async event => ledger.push(structuredClone(event)));
+  f.advance(60000);
+  const lease = f.lease(3600000); lease.name = 'Original'; f.state.leases.small = lease;
+  f.advance(30000); f.wallet.record(f.state, lease, f.now());
+  lease.name = 'Renamed'; f.advance(30000); f.wallet.record(f.state, lease, f.now());
+  f.wallet.checkpoint(f.state);
+  await f.wallet.flushAccounting(f.state);
+  const usage = ledger.filter(event => event.type === 'compute');
+  assert.deepEqual(usage.map(event => event.data.name), ['Original', 'Renamed']);
+  assert.equal(usage[0].data.resourceId, usage[1].data.resourceId);
+  assert.equal(usage[0].data.endAt, usage[1].data.startAt);
+  assert.equal(usage.reduce((sum, event) => sum + event.data.unitMs, 0), 60000);
+});
+
+test('existing short outbox events survive upgrade, and stopping one allocation leaves the other buffered', async () => {
+  const ledger = [], f = fixture(undefined, async event => ledger.push(structuredClone(event)));
+  f.advance(60000);
+  const first = f.lease(3600000), second = f.lease(3600000, 'small');
+  f.state.leases.small = first; f.state.leases.c1 = second;
+  const resource = f.wallet.track(f.state, first, 'small');
+  // Simulate an event and metering cursor already persisted by the old writer.
+  const oldData = { resourceId: resource.id, containerId: 'small', name: null, lifecycle: 'ad_hoc', size: 'lite',
+    startAt: f.now(), endAt: f.now() + 30000, unitMs: 30000, unitMsPerCent: UNIT_MS_PER_CENT };
+  f.wallet.queue(f.state, { key: `compute:${resource.id}:${oldData.startAt}:${oldData.endAt}`, type: 'compute', occurredAt: oldData.endAt, data: oldData });
+  first.meteredUntil = oldData.endAt; resource.runtimeMs = 30000; resource.unitMs = 30000;
+  f.state.wallet.usedUnitMs = 30000; f.state.wallet.monthlyUnitMs['2026-11'] = 30000;
+  const frozen = structuredClone(Object.values(f.state.wallet.accounting.pending).find(event => event.type === 'compute'));
+  f.advance(60000);
+  f.wallet.record(f.state, first, f.now()); f.wallet.record(f.state, second, f.now());
+  f.wallet.finish(f.state, first, f.now()); delete f.state.leases.small;
+  assert.equal(Object.keys(f.state.wallet.accounting.computeIntervals).length, 1);
+  assert.equal(Object.values(f.state.wallet.accounting.computeIntervals)[0].resourceId, second.resourceHistoryId);
+  await f.wallet.flushAccounting(f.state);
+  const usage = ledger.filter(event => event.type === 'compute');
+  assert.deepEqual(usage[0], frozen);
+  assert.equal(usage.length, 2);
+  assert.equal(usage[0].data.endAt, usage[1].data.startAt);
+  f.wallet.checkpoint(f.state); await f.wallet.flushAccounting(f.state);
+  assert.equal(ledger.filter(event => event.type === 'compute').reduce((sum, event) => sum + event.data.unitMs, 0), f.state.wallet.usedUnitMs);
 });
 
 test('revocation recovery cannot create credit and records disputes after a full refund as separate evidence', async () => {

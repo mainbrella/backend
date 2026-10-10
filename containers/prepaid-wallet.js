@@ -6,6 +6,7 @@ import { USAGE_PRICING, validSpendLimit } from './usage-policy.js';
 export const UNIT_MS_PER_CENT = 3600000 / USAGE_PRICING.centsPerComputeUnitHour;
 export const MINIMUM_PRODUCTION_RUNTIME_MS = 86400000;
 export const RETAINED_RESOURCE_LIMIT = 256;
+export const COMPUTE_LEDGER_INTERVAL_MS = 15 * 60_000;
 export const prepaidState = state => Boolean(state.wallet || state.entitlement?.billing?.kind === 'prepaid');
 export function utcPeriod(at) {
   const date = new Date(at);
@@ -44,6 +45,41 @@ export class PrepaidWallet {
     const accounting = this.accounting(state);
     if (!accounting) return;
     accounting.pending[event.key] ??= { ...event, userId: state.userId };
+  }
+  flushCompute(state, resourceId) {
+    const intervals = this.accounting(state)?.computeIntervals;
+    for (const [id, data] of Object.entries(intervals ?? {})) {
+      if (resourceId !== undefined && resourceId !== id) continue;
+      // Only these unsent intervals may grow. Once queued, retry evidence and
+      // its identity stay immutable, even after a lost acknowledgement.
+      this.queue(state, { key: `compute:${id}:${data.startAt}:${data.endAt}`, type: 'compute', occurredAt: data.endAt, data });
+      delete intervals[id];
+    }
+  }
+  recordCompute(state, data) {
+    const accounting = this.accounting(state);
+    if (!accounting) return;
+    const intervals = accounting.computeIntervals ??= {};
+    const unitsPerMs = data.unitMs / (data.endAt - data.startAt);
+    for (let at = data.startAt; at < data.endAt;) {
+      let interval = intervals[data.resourceId];
+      if (interval && (interval.endAt !== at || ['containerId', 'name', 'lifecycle', 'size', 'unitMsPerCent']
+        .some(field => interval[field] !== data[field]))) {
+        this.flushCompute(state, data.resourceId);
+        interval = null;
+      }
+      interval ??= intervals[data.resourceId] = { ...data, startAt: at, endAt: at, unitMs: 0 };
+      const monthEnd = utcPeriod(at).periodEnd;
+      const until = Math.min(data.endAt, interval.startAt + COMPUTE_LEDGER_INTERVAL_MS, monthEnd);
+      interval.endAt = until;
+      interval.unitMs += (until - at) * unitsPerMs;
+      if (until === interval.startAt + COMPUTE_LEDGER_INTERVAL_MS || until === monthEnd) this.flushCompute(state, data.resourceId);
+      at = until;
+    }
+  }
+  checkpoint(state, asOf = this.account.now()) {
+    for (const lease of prepaidLeases(state)) this.record(state, lease, asOf);
+    this.flushCompute(state);
   }
   fundingEvidence(state) {
     const accounting = this.accounting(state);
@@ -107,10 +143,9 @@ export class PrepaidWallet {
     wallet.usedUnitMs += runtimeMs * machineSize(lease.size).computeUnits;
     for (let at = lease.meteredUntil; at < end;) {
       const until = Math.min(end, utcPeriod(at).periodEnd), month = new Date(at).toISOString().slice(0, 7);
-      this.queue(state, { key: `compute:${resource?.id ?? lease.resourceHistoryId}:${at}:${until}`, type: 'compute', occurredAt: until,
-        data: { resourceId: resource?.id ?? lease.resourceHistoryId, containerId: containerId ?? null, name: lease.name ?? null,
-          lifecycle: lease.lifecycle ?? 'ad_hoc', size: lease.size, startAt: at, endAt: until,
-          unitMs: (until - at) * machineSize(lease.size).computeUnits, unitMsPerCent: UNIT_MS_PER_CENT } });
+      this.recordCompute(state, { resourceId: resource?.id ?? lease.resourceHistoryId, containerId: containerId ?? null, name: lease.name ?? null,
+        lifecycle: lease.lifecycle ?? 'ad_hoc', size: lease.size, startAt: at, endAt: until,
+        unitMs: (until - at) * machineSize(lease.size).computeUnits, unitMsPerCent: UNIT_MS_PER_CENT });
       wallet.monthlyUnitMs[month] = (wallet.monthlyUnitMs[month] ?? 0) + (until - at) * machineSize(lease.size).computeUnits;
       at = until;
     }
@@ -127,6 +162,7 @@ export class PrepaidWallet {
       startAt: lease.meteredUntil, endAt: null, runtimeMs: 0, unitMs: 0 };
   }
   finish(state, lease, stoppedAt) {
+    if (lease.resourceHistoryId) this.flushCompute(state, lease.resourceHistoryId);
     const resource = state.wallet?.resources?.[lease.resourceHistoryId];
     if (!resource) return;
     resource.endAt = Math.max(resource.startAt, lease.meteredUntil, Math.min(stoppedAt, lease.endAt));
@@ -187,6 +223,7 @@ export class PrepaidWallet {
     if (funding.revokeOnly && !state.wallet?.fundings?.[funding.id]) return false;
     const wallet = this.ensure(state, funding.customerId), previous = wallet.fundings[funding.id];
     if (previous && (previous.amountCents !== funding.amountCents || previous.customerId !== funding.customerId || previous.createdAt !== funding.createdAt)) throw new Error('payment_conflict');
+    if (!previous || funding.refundedCents > previous.refundedCents || funding.disputed && !previous.disputed) this.checkpoint(state);
     // Older success webhooks cannot restore money already refunded or disputed.
     wallet.fundings[funding.id] = { ...funding, refundedCents: Math.max(previous?.refundedCents ?? 0, funding.refundedCents), disputed: Boolean(previous?.disputed || funding.disputed) };
     delete wallet.fundings[funding.id].revokeOnly;

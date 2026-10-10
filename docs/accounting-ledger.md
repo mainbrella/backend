@@ -38,6 +38,16 @@ Verified refunds/disputes can still revoke an existing wallet funding during an
 accounting outage; this recovery mode cannot create new credit, and the webhook
 remains retryable until its financial evidence is recorded.
 
+Production health checks and exact wallet metering remain on the 30-second
+cycle. Contiguous compute deltas accumulate in one durable interval per allocation
+and become immutable ledger events every 15 minutes, rather than on every check.
+Stops, actual funding/refund/dispute changes and accounting checkpoints flush
+shorter intervals; UTC month boundaries also split and flush usage. Pending ledger
+events never merge or change once queued, so retries preserve their evidence.
+Existing ledger rows and pending events remain intact. Billing/history reads stay
+current between ledger writes; the ledger itself can lag routine usage by up to
+15 minutes. No migration is required.
+
 Checkout now requires a billing address. Verified Checkout tax is recorded
 separately and never increases credit. This change does not enable automatic tax
 calculation, assign taxable product codes, or add tax to off-session recharges.

@@ -349,7 +349,7 @@ test('monthly source refresh checkpoints real wallet intervals across a month bo
   assert.equal(result.report.customerComputeCredits.outstandingCreditCents, 1998);
   assert.equal(result.report.deferredRevenue.outstandingMicroUsd, '19980000');
   assert.equal(stored.get('containerAccount').wallet.usedUnitMs, 7200000);
-  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM accounting_ledger WHERE event_type='compute'").get()!.n, 2);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM accounting_ledger WHERE event_type='compute'").get()!.n, 8);
 });
 
 test('discounted Checkout rejects a changed nominal subtotal, invalid discount arithmetic, or mismatched paid intent', async t => {

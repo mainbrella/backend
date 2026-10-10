@@ -21,7 +21,7 @@ class Storage {
   async setAlarm(at) { this.alarmAt = at; }
   async deleteAlarm() { this.alarmAt = null; }
 }
-function fixture(initialPlan = 'builder', refresh = false, recharge) {
+function fixture(initialPlan = 'builder', refresh = false, recharge, accountingSink) {
   let now = Date.UTC(2026, 9, 5, 12);
   const prepaid = initialPlan === 'prepaid';
   let plan = prepaid ? 'usage' : initialPlan;
@@ -50,7 +50,7 @@ function fixture(initialPlan = 'builder', refresh = false, recharge) {
   const refreshEntitlement = refresh ? async () => ({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } }) : undefined;
   const billing = () => prepaid ? { kind: 'prepaid', customerId: 'cus_owner', periodStart: Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1), periodEnd: Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth() + 1, 1) }
     : { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil };
-  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge);
+  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge, accountingSink);
   const request = (method = 'GET', id, overrides = {}, body) => {
     const url = new URL('https://internal/containers');
     if (id) url.searchParams.set('id', id);
@@ -67,13 +67,70 @@ function fixture(initialPlan = 'builder', refresh = false, recharge) {
   };
   return { ctx, machines, invoices, billingRequest, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
     setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, setPeriodStart(value) { periodStart = value; }, now: () => now,
-    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge); }, alarm: () => account.alarm() };
+    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge, accountingSink); }, alarm: () => account.alarm() };
 }
 
 const funding = (f, amountCents = 500, overrides = {}) => ({ id: 'pi_funded', customerId: 'cus_owner', amountCents, refundedCents: 0, disputed: false, kind: 'topup', createdAt: f.now(), ...overrides });
 const fund = (f, amount = 500, overrides = {}) => f.billingRequest(funding(f, amount, overrides), '/billing/funding');
 const walletSettings = (f, input) => f.billingRequest({ customerId: 'cus_owner', ...input }, '/billing/settings');
 const production = { lifecycle: 'production', startupCommand: 'npm start', size: 'lite' };
+
+test('production persists one combined interval through frequent checks and eviction, and flushes on stop and slot reuse', async () => {
+  const ledger = [], f = fixture('prepaid', false, undefined, async event => ledger.push(structuredClone(event)));
+  await fund(f); await walletSettings(f, { spendLimitCents: 5000 });
+  assert.equal((await f.read('POST', undefined, {}, production)).status, 200);
+  const start = f.now();
+  const usage = () => ledger.filter(event => event.type === 'compute');
+  for (let i = 1; i <= 30; i++) {
+    assert.equal(f.ctx.storage.alarmAt, f.now() + 30000);
+    f.setTime(start + i * 30000); await f.alarm();
+    const state = await f.ctx.storage.get('containerAccount');
+    assert.equal(state.wallet.usedUnitMs, i * 30000);
+    assert.equal(usage().length, i < 30 ? 0 : 1);
+    assert.equal(Object.keys(state.wallet.accounting.computeIntervals).length, i < 30 ? 1 : 0);
+    if (i === 13) f.restart();
+  }
+  assert.equal(usage()[0].data.unitMs, 900000);
+  f.setTime(start + 930000); await f.alarm(); f.restart();
+  const beforeRead = await f.ctx.storage.get('containerAccount');
+  const history = (await f.billingRequest(undefined, '/billing/history')).data;
+  assert.equal(history.totals.usedCents, 930000 / 1800000);
+  assert.deepEqual(await f.ctx.storage.get('containerAccount'), beforeRead);
+  assert.equal((await f.read('DELETE', 'small')).status, 200);
+  assert.equal(usage().length, 2);
+  assert.equal(usage()[0].data.endAt, usage()[1].data.startAt);
+  assert.equal(usage()[1].data.unitMs, 30000);
+  assert.deepEqual((await f.ctx.storage.get('containerAccount')).wallet.accounting.computeIntervals, {});
+
+  assert.equal((await f.read('POST', undefined, {}, production)).status, 200);
+  f.setTime(f.now() + 1000);
+  assert.equal((await f.read('DELETE', 'small')).status, 200);
+  assert.equal(usage().length, 3);
+  assert.notEqual(usage()[1].data.resourceId, usage()[2].data.resourceId);
+  assert.equal(usage().reduce((sum, event) => sum + event.data.unitMs, 0), 931000);
+});
+
+test('an accounting checkpoint flushes a partial interval before the wallet evidence without renewing guests', async () => {
+  const ledger = [], f = fixture('prepaid', false, undefined, async event => ledger.push(structuredClone(event)));
+  await fund(f); await walletSettings(f, { spendLimitCents: 5000 });
+  await f.read('POST', undefined, {}, production);
+  f.setTime(f.now() + 30000); await f.alarm();
+  const lease = (await f.ctx.storage.get('containerAccount')).leases.small;
+  const machine = f.machineFor('owner', 'small'), machineBefore = await machine.ctx.storage.get('builderMachine');
+  assert.ok(machineBefore);
+  assert.equal(ledger.filter(event => event.type === 'compute').length, 0);
+  f.setTime(f.now() + 1000); f.restart();
+  const checkpoint = await f.billingRequest({}, '/billing/accounting-checkpoint');
+  assert.equal(checkpoint.status, 200);
+  assert.equal(checkpoint.data.usedUnitMs, 31000);
+  assert.equal(checkpoint.data.pendingEvents, 0);
+  assert.deepEqual(ledger.slice(-2).map(event => event.type), ['compute', 'wallet_checkpoint']);
+  assert.equal(ledger.at(-2).data.unitMs, 31000);
+  assert.equal(ledger.at(-1).data.usedUnitMs, 31000);
+  assert.equal(ledger.at(-2).occurredAt, ledger.at(-1).occurredAt);
+  assert.equal((await f.ctx.storage.get('containerAccount')).leases.small.endAt, lease.endAt);
+  assert.deepEqual(await machine.ctx.storage.get('builderMachine'), machineBefore);
+});
 
 test('prepaid balance reads never provision and an empty wallet cannot start compute', async () => {
   const f = fixture('prepaid');

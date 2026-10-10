@@ -338,10 +338,11 @@ export class ContainerAccountController {
       return await this.serialized(async () => {
         const state = await load(), body = await request.json();
         if (path === '/billing/accounting-checkpoint') {
-          for (const lease of Object.values(state.leases)) if (lease.billing?.kind === 'prepaid') this.billing.wallet.record(state, lease, this.now());
+          const asOf = this.now();
+          this.billing.wallet.checkpoint(state, asOf);
           this.billing.wallet.fundingEvidence(state);
           const fundings = Object.values(state.wallet?.fundings ?? {}).map(row => ({ id: row.id, creditCents: row.amountCents, revokedCents: row.disputed ? row.amountCents : row.refundedCents }));
-          const asOf = this.now(), usedUnitMs = state.wallet?.usedUnitMs ?? 0;
+          const usedUnitMs = state.wallet?.usedUnitMs ?? 0;
           this.billing.wallet.queue(state, { key: `wallet_checkpoint:${crypto.randomUUID()}`, type: 'wallet_checkpoint', occurredAt: asOf,
             data: { asOf, usedUnitMs, fundings } });
           await this.saveState(state);
