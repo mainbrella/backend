@@ -201,7 +201,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       if (initial.turn.mode === 'build') {
         const remaining = BUILD_OUTPUT_BUDGET - outputTokens;
         if (remaining < 1024 || inputTokens >= BUILD_INPUT_BUDGET || new TextEncoder().encode(JSON.stringify(messages)).length > 192 * 1024) throw new BuildError('build_budget_exceeded');
-        const result = await step.do(`AI ${round}`, noRetry, async (): Promise<BuildAIResult | { error: string }> => {
+        const result = await step.do(`AI ${round}`, noRetry, async (): Promise<BuildAIResult | { error: string; details?: string }> => {
           try {
             if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
             await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
@@ -216,14 +216,14 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
               { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
             return result;
           } catch (error) {
-            // Workflow RPC drops custom Error prototypes. Persist expected
-            // failures as data, then restore BuildError outside the step.
-            if (error instanceof BuildError) return { error: error.message };
-            throw error;
+            // Workflow RPC drops custom Error prototypes. Return failure
+            // details as data, then restore BuildError outside the step.
+            return { error: error instanceof BuildError ? error.message : 'build_failed',
+              details: error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : undefined };
           }
         });
         await step.do(`Settle AI usage ${round}`, retry, async () => settleReportedBuildUsage(env, params.turnId));
-        if ('error' in result) throw new BuildError(result.error);
+        if ('error' in result) throw new BuildError(result.error, 503, result.details);
         inputTokens += result.inputTokens; outputTokens += result.outputTokens;
         messages.push(result.message);
         await step.do(`Record AI usage ${round}`, retry, async () => {
@@ -292,8 +292,18 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     });
   } catch (error) {
     const code = error instanceof BuildError ? error.message : error instanceof Error && error.message === 'subscription_required' ? 'subscription_required' : 'build_failed';
+    const details = (error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : '')?.trim().slice(0, 4000);
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
-    await step.do('Record build failure', retry, async () => failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code));
+    await step.do('Record build failure', retry, async () => {
+      if (details && details !== code) {
+        // Preserve the command output and underlying failure without changing
+        // the public error code or requiring a new storage field.
+        const output = `\n\n${details}`;
+        await env.DB.prepare("UPDATE build_turns SET log = substr(log || ?, -12000) WHERE id = ? AND user_id = ? AND status IN ('queued', 'running') AND substr(log, -length(?)) != ?")
+          .bind(output, params.turnId, params.userId, output, output).run();
+      }
+      await failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code);
+    });
   } finally {
     await step.do('Settle remaining AI usage', retry, async () => settleReportedBuildUsage(env, params.turnId));
     if (localCodexConfigured(env)) await step.do('Close local inference', { ...noRetry, timeout: '10 seconds' },

@@ -105,8 +105,14 @@ export async function readBuildInference(stream: ReadableStream<Uint8Array>, onP
     let chunk: Record<string, any>;
     try { chunk = JSON.parse(data); } catch { throw new BuildError('invalid_model_response'); }
     if (chunk.usage) usage = chunk.usage;
-    if (chunk.error) throw new BuildError(['build_inference_timeout', 'build_inference_disconnected', 'build_interrupted',
-      'build_budget_exceeded', 'invalid_model_response', 'build_unavailable'].includes(chunk.error.code) ? chunk.error.code : 'build_failed');
+    if (chunk.error) {
+      const code = typeof chunk.error.code === 'string' ? chunk.error.code : 'build_failed';
+      const known = ['build_inference_timeout', 'build_inference_disconnected', 'build_interrupted',
+        'build_budget_exceeded', 'invalid_model_response', 'build_unavailable'].includes(code);
+      const message = typeof chunk.error.message === 'string' ? chunk.error.message : typeof chunk.error === 'string' ? chunk.error : '';
+      const details = [known || code === 'build_failed' ? '' : code, message].filter(Boolean).join(': ').slice(0, 4000);
+      throw new BuildError(known ? code : 'build_failed', 503, details || undefined);
+    }
     if (typeof chunk.response === 'string' || Array.isArray(chunk.tool_calls)) {
       native = true;
       if (typeof chunk.response === 'string') content = (content + chunk.response).slice(0, 6000);

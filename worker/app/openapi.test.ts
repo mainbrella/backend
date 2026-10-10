@@ -73,6 +73,9 @@ test('accounting schemas describe protected exports, immutable revisions and exp
   }
   const ledger = paths['/admin/accounting/ledger'].get;
   assert.ok(ledger.responses[200].content['application/x-ndjson']);
+  assert.deepEqual(ledger.responses[200].content['application/json'].schema.properties.entries.items.properties.event_type.enum,
+    ['funding', 'refund', 'stripe_balance', 'funding_state', 'compute', 'inference', 'legacy_usage', 'wallet_checkpoint']);
+  assert.match(ledger.description, /data\.costMicroUsd/);
   const order = ledger.parameters.find((parameter: any) => parameter.name === 'order');
   assert.deepEqual(order.schema.enum, ['asc', 'desc']);
   assert.match(ledger.description, /recorded_at descending, then sequence descending/);

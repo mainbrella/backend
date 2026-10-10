@@ -9,7 +9,7 @@ import { buildAppStream, saveBuildActivity, buildToolLabel } from '../lib/build-
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
 import { buildTokenPrices } from '../lib/build-pricing';
-import { BUILD_MODEL, buildStarter } from '../lib/build-contract';
+import { BUILD_MODEL, BuildError, buildStarter } from '../lib/build-contract';
 import { buildBillingFixture } from './build-billing-test-helpers';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
@@ -62,6 +62,17 @@ test('inference uses streaming, keeps usage accounting and rejects truncated or 
     await assert.rejects(readBuildInference(chunks(text)), /model_response_incomplete/);
   await assert.rejects(readBuildInference(chunks(delta({ tool_calls: [{ index: 8 }] }) + finished)), /invalid_model_response/);
   await assert.rejects(readBuildInference(chunks(event('{invalid'))), /invalid_model_response/);
+});
+
+test('inference stream failures retain provider codes and messages as failure details', async () => {
+  for (const [error, code, details] of [
+    [{ code: 'rate_limit_exceeded', message: 'The model returned HTTP 429.' }, 'build_failed', 'rate_limit_exceeded: The model returned HTTP 429.'],
+    [{ code: 'build_inference_timeout', message: 'No response received in 240 seconds.' }, 'build_inference_timeout', 'No response received in 240 seconds.'],
+    ['The inference service disconnected.', 'build_failed', 'The inference service disconnected.'],
+  ] as const) {
+    await assert.rejects(readBuildInference(chunks(event({ error }))), cause =>
+      cause instanceof BuildError && cause.message === code && cause.details === details);
+  }
 });
 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
@@ -334,6 +345,7 @@ test('Codex variables cannot select local inference outside local dev, and tool 
 
 test('inference failures survive Workflow serialization and Codex cleanup runs in a step', async t => {
   const f = await fixture(t);
+  f.sqlite.prepare('UPDATE build_turns SET log = ? WHERE id = ?').run('Previous compiler output.', f.turnId);
   Object.assign(f.env, { LOCAL_DEV: 'true', BUILD_CODEX_URL: 'http://127.0.0.1:1234', BUILD_CODEX_TOKEN: 'local-token' });
   const steps: string[] = [], cleanupSteps: string[] = [], errors: unknown[] = [];
   let currentStep = '', inferences = 0, cleanups = 0;
@@ -345,7 +357,7 @@ test('inference failures survive Workflow serialization and Codex cleanup runs i
       return new Response(null, { status: 204 });
     }
     inferences++;
-    return new Response(chunks(delta({ content: 'Starting the app.' }) + event({ error: { code: 'build_inference_timeout' } })));
+    return new Response(chunks(delta({ content: 'Starting the app.' }) + event({ error: { code: 'build_inference_timeout', message: 'The model did not respond in 240 seconds.' } })));
   });
   const step = { async do(name: string, _options: unknown, operation: () => Promise<unknown>) {
     steps.push(name); currentStep = name;
@@ -358,12 +370,29 @@ test('inference failures survive Workflow serialization and Codex cleanup runs i
   assert.equal(data.app.activeTurnId, null);
   assert.equal(data.app.turns[0].status, 'failed');
   assert.equal(data.app.turns[0].error, 'build_inference_timeout');
+  assert.equal(data.app.turns[0].log, 'Previous compiler output.\n\nThe model did not respond in 240 seconds.');
   assert.equal(data.app.turns[0].activity[0].status, 'failed');
   assert.equal(inferences, 1, 'failed inference must not be replayed');
   assert.equal(cleanups, 1);
   assert.deepEqual(cleanupSteps, ['Close local inference'], 'cleanup I/O belongs to a durable Workflow step');
   assert.equal(steps.at(-1), 'Close local inference');
   assert.deepEqual(errors, [['build_turn_failed', { appId: f.appId, turnId: f.turnId, error: 'build_inference_timeout' }]]);
+});
+
+test('unexpected provider exceptions survive Workflow serialization and are returned in the failed turn log', async t => {
+  const f = await fixture(t), message = 'Workers AI returned HTTP 429: concurrency limit exceeded.';
+  t.mock.method(console, 'error', () => {});
+  f.env.AI = { async run() { throw new Error(message); } } as unknown as Ai;
+  const step = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) {
+    try { return structuredClone(await operation()); }
+    catch (error) { throw new Error((error as Error).message); }
+  }, async sleep() { assert.fail('no sandbox should be started after inference fails'); } } as unknown as Parameters<typeof runBuildAgent>[2];
+  await runBuildAgent(f.env, f.params, step, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(data.app.activeTurnId, null);
+  assert.equal(data.app.turns[0].status, 'failed');
+  assert.equal(data.app.turns[0].error, 'build_failed');
+  assert.equal(data.app.turns[0].log.trim(), message);
 });
 
 

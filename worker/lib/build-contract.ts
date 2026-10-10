@@ -34,7 +34,7 @@ export interface BuildTurnRow {
   model: string; effort?: string | null; input_tokens: number; output_tokens: number; created_at: string; finished_at: string | null;
 }
 export class BuildError extends Error {
-  constructor(message: string, public status = 503) { super(message); }
+  constructor(message: string, public status = 503, public details?: string) { super(message); }
 }
 export const ownedBuildApp = (env: Env, userId: string, id: string) => env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? AND id = ?').bind(userId, id).first<BuildAppRow>();
 export function buildName(prompt: string) {
