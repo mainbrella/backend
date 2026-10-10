@@ -7,6 +7,7 @@ const endpointMethods: Record<string, string[]> = {
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
+  '/build/apps/{appId}/images/{imageId}': ['get'],
   '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
   '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],

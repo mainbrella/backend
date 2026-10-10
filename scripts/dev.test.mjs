@@ -92,7 +92,7 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
     assert.match(apiConfig.vars.BUILD_CODEX_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
     assert.equal(apiConfig.vars.BUILD_MODEL, 'codex/fixture-model');
     assert.match(apiConfig.vars.BUILD_CODEX_TOKEN, /^[a-f0-9]{64}$/);
-    assert.equal(apiConfig.ai, undefined);
+    assert.deepEqual(apiConfig.ai, { binding: 'AI' }, 'Codex mode retains Workers AI for image generation');
     assert.deepEqual(apiConfig.compatibility_flags, ['nodejs_compat']);
     assert.equal(containerConfig.vars.BUILD_CODEX_URL, undefined);
     assert.equal(output.includes(apiConfig.vars.BUILD_CODEX_TOKEN), false);

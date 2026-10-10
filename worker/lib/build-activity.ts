@@ -20,7 +20,7 @@ export function buildToolLabel(name: string, argumentsJSON: string) {
   const path = typeof args?.path === 'string' ? args.path : 'source file';
   return ({ list_files: 'Inspect project files', read_file: `Read ${path}`, write_file: `Write ${path}`,
     delete_file: `Delete ${path}`, run_command: args?.command === 'npm install' ? 'Install dependencies' : 'Check the build',
-    get_logs: 'Read build output' } as Record<string, string>)[name] || 'Update the app';
+    get_logs: 'Read build output', generate_image: `Generate ${typeof args?.label === 'string' ? args.label : 'original imagery'}` } as Record<string, string>)[name] || 'Update the app';
 }
 
 /** A bounded stream of durable snapshots. Reconnecting never restarts a build. */

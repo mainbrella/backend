@@ -88,7 +88,7 @@ if (aiMode === 'codex') {
   try {
     bridge = await startCodexBridge({ signal: startup.signal });
     const config = JSON.parse(readFileSync(configPaths[0], 'utf8'));
-    delete config.ai;
+    // Codex handles code; retain Workers AI for original image generation.
     // The bridge is a loopback HTTP service, reachable only during local dev.
     config.compatibility_flags = (config.compatibility_flags ?? []).filter(flag => flag !== 'global_fetch_strictly_public');
     config.vars = { ...config.vars, BUILD_CODEX_URL: bridge.url, BUILD_CODEX_TOKEN: bridge.token, BUILD_MODEL: bridge.model };

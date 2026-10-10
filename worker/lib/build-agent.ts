@@ -6,6 +6,7 @@ import { failBuildTurn } from '../app/build';
 import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
 import { buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
+import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
@@ -105,7 +106,7 @@ async function runCommand(env: Env, params: BuildParams, container: BuildContain
   }
   throw new BuildError('build_command_timeout');
 }
-async function writeGuestFile(env: Env, userId: string, container: BuildContainer, path: string, content: string) {
+async function writeGuestFile(env: Env, userId: string, container: BuildContainer, path: string, content: string | Uint8Array<ArrayBuffer>) {
   const { stub, headers } = await machine(env, userId, container);
   const url = new URL('https://internal/files'); url.searchParams.set('path', path);
   await json(await stub.fetch(new Request(url, { method: 'PUT', headers, body: content })));
@@ -113,11 +114,14 @@ async function writeGuestFile(env: Env, userId: string, container: BuildContaine
 async function materialize(env: Env, params: BuildParams, container: BuildContainer, files: BuildFiles, step: Step, label: string) {
   validateBuildFiles(files);
   const directories = [...new Set(Object.keys(files).filter(path => path.includes('/')).map(path => `${root}/${path.slice(0, path.lastIndexOf('/'))}`))];
-  const setup = await runCommand(env, params, container, step, `${label}-directories`, `mkdir -p ${shellQuote(root)} ${directories.map(shellQuote).join(' ')}`, 30_000);
+  const setup = await runCommand(env, params, container, step, `${label}-directories`, `mkdir -p ${shellQuote(`${root}/public/generated`)} ${directories.map(shellQuote).join(' ')}`, 30_000);
   if (setup.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
   // A retry overwrites exactly the same bytes; generated text never enters a shell.
   await step.do(`${label}: files`, retry, async () => {
     for (const [path, content] of Object.entries(files)) await writeGuestFile(env, params.userId, container, `${root}/${path}`, content);
+    for (const image of await savedBuildImages(env, params.appId)) {
+      await writeGuestFile(env, params.userId, container, `${root}/public${buildImagePath(image.id)}`, buildImageBytes(image.data));
+    }
     await writeGuestFile(env, params.userId, container, '/workspace/mainbrella-build-server.cjs', buildStaticServer);
   });
 }
@@ -134,6 +138,14 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
     if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false };
     args = parsed.data;
   } catch { return { files, output: 'Arguments must be valid JSON.', logs, succeeded: false }; }
+  if (call.function.name === 'generate_image') {
+    const failure = { error: 'Could not generate this image. Continue building with CSS or reuse a saved image; do not substitute stock imagery.' };
+    const result = await step.do(`${label}: generate image`, { ...noRetry, timeout: '1 minute' }, async () => {
+      try { return { image: await generateBuildImage(env, params, label, args.label, args.prompt) }; }
+      catch { return failure; }
+    }).catch(() => failure);
+    return { files, output: 'image' in result ? JSON.stringify(result.image) : result.error, logs, succeeded: 'image' in result };
+  }
   if (call.function.name === 'list_files') return { files, output: Object.keys(files).join('\n'), logs, succeeded: true };
   if (call.function.name === 'read_file') return { files, output: files[args.path] ?? 'File not found.', logs, succeeded: Object.hasOwn(files, args.path) };
   if (call.function.name === 'get_logs') return { files, output: logs || 'No commands have run yet.', logs, succeeded: true };
@@ -161,7 +173,8 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const app = await ownedBuildApp(env, params.userId, params.appId);
       const turn = await env.DB.prepare('SELECT * FROM build_turns WHERE id = ? AND app_id = ? AND user_id = ?').bind(params.turnId, params.appId, params.userId).first<BuildTurnRow>();
       if (!app || !turn || app.active_turn_id !== params.turnId) throw new BuildError('build_interrupted', 409);
-      return { app, turn };
+      const { results: images } = await env.DB.prepare('SELECT id, label FROM build_images WHERE app_id = ? ORDER BY rowid').bind(params.appId).all<{ id: string; label: string }>();
+      return { app, turn, images };
     });
     let container: BuildContainer | undefined;
     // File inspection and model output can start before the sandbox is ready.
@@ -181,7 +194,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     let files = JSON.parse(initial.app.source_json) as BuildFiles;
     let inputTokens = 0, outputTokens = 0, logs = '', summary = 'Preview restarted from saved source.';
     const messages: BuildAIMessage[] = [{ role: 'system', content: buildSystemPrompt },
-      { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
+      { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
     let verified = false;
     for (let round = 0; round < BUILD_MAX_ROUNDS; round++) {
       if (initial.turn.mode === 'build') {

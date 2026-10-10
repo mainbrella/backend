@@ -20,10 +20,10 @@ async function setup(t, options = {}) {
   t.after(async () => { await bridge.close(); await rm(directory, { recursive: true, force: true }); });
   return { ...bridge, async records() { return (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse); } };
 }
-async function infer(bridge, id, messages, maxTokens = 1024) {
+async function infer(bridge, id, messages, maxTokens = 1024, registeredTools = tools) {
   const response = await fetch(`${bridge.url}/sessions/${id}`, { method: 'POST',
     headers: { Authorization: `Bearer ${bridge.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, tools, maxTokens }) });
+    body: JSON.stringify({ messages, tools: registeredTools, maxTokens }) });
   assert.equal(response.status, 200);
   const text = await response.text();
   const events = text.split('\n\n').filter(Boolean).map(block => block.slice(6)).filter(data => data !== '[DONE]').map(JSON.parse);
@@ -35,6 +35,21 @@ async function infer(bridge, id, messages, maxTokens = 1024) {
   return { message: { role: 'assistant', content: content || null, ...(calls.length ? { tool_calls: calls } : {}) }, usage: last.usage };
 }
 const stop = (bridge, id) => fetch(`${bridge.url}/sessions/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${bridge.token}` } });
+
+test('Codex exposes the optional image tool and pauses until the Worker supplies the saved asset', async t => {
+  const bridge = await setup(t);
+  const imageTools = [...tools, { type: 'function', function: { name: 'generate_image', description: 'Generate an original image.', parameters: { type: 'object', properties: {} } } }];
+  const messages = input('images');
+  const result = await infer(bridge, 'original-image', messages, 1024, imageTools);
+  assert.equal(result.error, undefined);
+  assert.equal(result.message.tool_calls[0].function.name, 'generate_image');
+  const registered = (await bridge.records()).find(record => record.method === 'thread/start');
+  assert.equal(registered.params.dynamicTools.length, 7);
+  messages.push(result.message, { role: 'tool', tool_call_id: result.message.tool_calls[0].id, content: '{"path":"/generated/original.jpg"}', tool_success: true });
+  const done = await infer(bridge, 'original-image', messages, 1024, imageTools);
+  assert.equal(done.error, undefined);
+  assert.equal(done.message.content, 'App updated. 🌍');
+});
 
 test('Codex pauses for all six Worker tools, preserves tool failure and starts compiler repair in the same thread', async t => {
   const bridge = await setup(t), messages = input('Build it.');

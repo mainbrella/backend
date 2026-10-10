@@ -10,7 +10,8 @@ import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildStarter } from '../lib/build-contract';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
-import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
+import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/build-images';
+import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
 
 const event = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\r\n\r\n`;
 const delta = (value: unknown) => event({ choices: [{ delta: value, finish_reason: null }] });
@@ -63,7 +64,7 @@ test('inference uses streaming, keeps usage accounting and rejects truncated or 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
     .run(appId, USER_ONE, 'create', 'Hello world', 'Hello world', '{}', now, now);
@@ -75,6 +76,103 @@ async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
 function request(id: string, session = SESSION_ONE, suffix = '') {
   return new Request(`https://api.mainbrella.com/build/apps/${id}${suffix}`, { headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${session}` } });
 }
+
+const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 2, 0xff, 0xd9]);
+const jpegBase64 = btoa(String.fromCharCode(...jpeg));
+
+test('original images are generated once, streamed as metadata, ownership-checked and exported as portable JPEGs', async t => {
+  const f = await fixture(t); let calls = 0;
+  f.env.AI = { async run(model: string, input: any) {
+    calls++; assert.equal(model, BUILD_IMAGE_MODEL); assert.equal(input.steps, 4);
+    assert.match(input.prompt, /moody forest/); return { image: jpegBase64 };
+  } } as unknown as Ai;
+  const image = await generateBuildImage(f.env, f.params, 'tool-0-0', 'Forest canopy', 'An original moody forest with ancient trees.');
+  assert.deepEqual(await generateBuildImage(f.env, f.params, 'tool-0-0', 'Forest canopy', 'An original moody forest with ancient trees.'), image);
+  assert.equal(calls, 1, 'replayed workflow steps reuse the stored asset');
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.deepEqual(data.app.turns[0].images, [image]);
+  assert.ok(!JSON.stringify(data).includes(jpegBase64), 'image bytes never bloat SSE snapshots');
+  const suffix = `/images/${image.id}`;
+  const response = await handleBuildRequest(request(f.appId, SESSION_ONE, suffix), f.env);
+  assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), jpeg);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_TWO, suffix), f.env)).status, 404);
+  assert.equal((await handleBuildRequest(request(f.appId, 'expired', suffix), f.env)).status, 401);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, `/images/${crypto.randomUUID()}`), f.env)).status, 404);
+  const exported = new Uint8Array(await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/export'), f.env)).arrayBuffer());
+  const view = new DataView(exported.buffer), nameLength = view.getUint16(26, true);
+  assert.equal(new TextDecoder().decode(exported.slice(30, 30 + nameLength)), `public${image.path}`);
+  assert.deepEqual(exported.slice(30 + nameLength, 30 + nameLength + jpeg.length), jpeg);
+  f.sqlite.prepare('DELETE FROM build_apps WHERE id = ?').run(f.appId);
+  assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_images').get() as any).count, 0);
+});
+
+test('image generation rejects invalid output, enforces asset budgets and checks active ownership', async t => {
+  const f = await fixture(t); let output: string | undefined = 'not an image', calls = 0;
+  f.env.AI = { async run() { calls++; return { image: output }; } } as unknown as Ai;
+  await assert.rejects(generateBuildImage(f.env, { ...f.params, userId: USER_TWO }, 'one', 'Tree', 'Tree'), /build_interrupted/);
+  assert.equal(calls, 0);
+  for (output of [undefined, 'not an image', btoa('not a JPEG')]) {
+    await assert.rejects(generateBuildImage(f.env, f.params, 'one', 'Tree', 'Tree'), /build_image_invalid/);
+  }
+  assert.throws(() => buildImageBytes('a'.repeat(1_400_001)), /build_image_invalid/);
+  output = jpegBase64;
+  for (let i = 0; i < 4; i++) await generateBuildImage(f.env, f.params, `image-${i}`, 'Tree', 'Tree');
+  const before = calls;
+  await assert.rejects(generateBuildImage(f.env, f.params, 'image-5', 'Tree', 'Tree'), /build_image_limit/);
+  assert.equal(calls, before);
+  await failBuildTurn(f.env, { id: f.turnId, app_id: f.appId, user_id: USER_ONE }, 'build_interrupted');
+  await assert.rejects(generateBuildImage(f.env, f.params, 'image-0', 'Tree', 'Tree'), /build_interrupted/);
+});
+
+test('the builder generates and exposes an original image before writing code or allocating compute', async t => {
+  const f = await fixture(t); f.setAccountStatus(503); t.mock.method(console, 'error', () => {});
+  const sequence: string[] = [];
+  f.env.AI = { async run(model: string, input: any) {
+    if (model === BUILD_IMAGE_MODEL) { sequence.push('image'); assert.equal(f.accountCalls.length, 0); return { image: jpegBase64 }; }
+    assert.ok(input.tools.some((tool: any) => tool.function.name === 'generate_image'));
+    const round = sequence.filter(item => item.startsWith('model')).length; sequence.push(`model-${round}`);
+    const call = round === 0 ? { name: 'generate_image', arguments: JSON.stringify({ label: 'Moody forest', prompt: 'Ancient trees in a moody forest' }) }
+      : round === 1 ? { name: 'write_file', arguments: JSON.stringify({ path: 'src/App.tsx', content: 'export default function App() { return <h1>Forest</h1> }' }) } : null;
+    if (round === 1) {
+      const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+      assert.equal(data.app.turns[0].images.length, 1, 'the UI can fetch the image while coding starts');
+      assert.match(input.messages.at(-1).content, /\/generated\//);
+    }
+    return { choices: [{ finish_reason: call ? 'tool_calls' : 'stop', message: { content: 'Building your forest app.',
+      ...(call ? { tool_calls: [{ id: `call-${round}`, type: 'function', function: call }] } : {}) } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+  } } as unknown as Ai;
+  const step = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return operation(); }, async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
+  await runBuildAgent(f.env, f.params, step, Date.now());
+  assert.deepEqual(sequence, ['model-0', 'image', 'model-1', 'model-2']);
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(data.app.turns[0].images.length, 1, 'the image survives a later sandbox failure');
+  assert.equal(data.app.turns[0].activity.find((item: any) => item.text === 'Generate Moody forest').status, 'succeeded');
+});
+
+test('a failed image request gives the model a recovery message and still saves app code', async t => {
+  const f = await fixture(t); f.setAccountStatus(503); t.mock.method(console, 'error', () => {});
+  let round = 0;
+  f.env.AI = { async run(model: string, input: any) {
+    if (model === BUILD_IMAGE_MODEL) throw new Error('private provider diagnostic');
+    const current = round++;
+    if (current === 1) {
+      assert.match(input.messages.at(-1).content, /Continue building with CSS/);
+      assert.doesNotMatch(input.messages.at(-1).content, /private provider diagnostic/);
+    }
+    const call = current === 0 ? { name: 'generate_image', arguments: JSON.stringify({ label: 'Forest', prompt: 'Ancient forest' }) }
+      : current === 1 ? { name: 'write_file', arguments: JSON.stringify({ path: 'src/App.tsx', content: 'export default function App() { return <h1>Forest guide</h1> }' }) } : null;
+    return { choices: [{ finish_reason: call ? 'tool_calls' : 'stop', message: { content: 'Building your guide.',
+      ...(call ? { tool_calls: [{ id: `call-${current}`, type: 'function', function: call }] } : {}) } }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+  } } as unknown as Ai;
+  const step = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return operation(); }, async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
+  await runBuildAgent(f.env, f.params, step, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(data.app.turns[0].activity.find((item: any) => item.text === 'Generate Forest').status, 'failed');
+  assert.equal(data.app.turns[0].images.length, 0);
+  const source = await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/source'), f.env)).json() as any;
+  assert.match(source.files['src/App.tsx'], /Forest guide/);
+});
 
 test('durable activity replaces partial messages, preserves order and respects ownership', async t => {
   const f = await fixture(t);
@@ -156,6 +254,9 @@ test('local Codex runs through the existing source, command, compiler repair and
   Object.assign(f.env, { LOCAL_DEV: 'true', BUILD_ENABLED: 'true', BUILD_MODEL: bridge.model,
     BUILD_CODEX_URL: bridge.url, BUILD_CODEX_TOKEN: bridge.token, PREVIEWS_ENABLED: 'true', BUILD_WORKFLOW: {} });
   f.env.AI = undefined as unknown as Ai;
+  const savedImageId = crypto.randomUUID();
+  f.sqlite.prepare('INSERT INTO build_images (id,app_id,turn_id,tool_id,label,prompt,data) VALUES (?,?,?,?,?,?,?)')
+    .run(savedImageId, f.appId, f.turnId, 'existing-image', 'Forest', 'Original forest', jpegBase64);
   const files = { ...buildStarter, 'src/old.ts': 'old' };
   f.sqlite.prepare('UPDATE build_apps SET source_json = ?, container_json = ? WHERE id = ?')
     .run(JSON.stringify(files), JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT }), f.appId);
@@ -166,12 +267,16 @@ test('local Codex runs through the existing source, command, compiler repair and
     return statement;
   } } as D1Database;
   const commands: string[] = [], guestFiles = new Map<string, string>();
+  const guestImages = new Map<string, Uint8Array>();
   const executions = new Map<string, { id: string; status: string; stdout: string; stderr: string }>();
   let compiles = 0;
   f.env.USER_CONTAINER = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/files' && request.method === 'PUT') {
-      guestFiles.set(url.searchParams.get('path')!, await request.text()); return Response.json({ saved: true });
+      const path = url.searchParams.get('path')!;
+      if (path.endsWith('.jpg')) guestImages.set(path, new Uint8Array(await request.arrayBuffer()));
+      else guestFiles.set(path, await request.text());
+      return Response.json({ saved: true });
     }
     if (url.pathname === '/executions' && request.method === 'POST') {
       const { command } = await request.json() as { command: string }; commands.push(command);
@@ -196,6 +301,7 @@ test('local Codex runs through the existing source, command, compiler repair and
   assert.equal(data.app.revision, 1); assert.equal(data.app.activeTurnId, null);
   assert.match(data.app.preview.url, /^http:\/\/[a-z0-9]+\.localhost:8787\/$/);
   assert.equal(compiles, 3, 'Mainbrella sends its compiler failure back to Codex before completing');
+  assert.deepEqual(guestImages.get(`/workspace/app/public/generated/${savedImageId}.jpg`), jpeg, 'preview materialization preserves original JPEG bytes');
   assert.ok(steps.indexOf('AI 0') < steps.indexOf('Allocate sandbox'));
   assert.ok(turn.activity.some((item: any) => item.type === 'message' && item.text.includes('Using write_file')));
   assert.ok(turn.activity.some((item: any) => item.type === 'tool' && item.status === 'failed'));

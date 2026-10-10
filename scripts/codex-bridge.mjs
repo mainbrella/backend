@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-const toolNames = ['list_files', 'read_file', 'write_file', 'delete_file', 'run_command', 'get_logs'];
+const requiredToolNames = ['list_files', 'read_file', 'write_file', 'delete_file', 'run_command', 'get_logs'];
+const toolNames = [...requiredToolNames, 'generate_image'];
 const inferenceTimeoutMs = 240_000;
 const sessionTimeoutMs = 30 * 60_000;
 const toolTimeoutMs = 12 * 60_000; // Materialization, install and compiler checks can span multiple Workflow steps.
@@ -147,7 +148,7 @@ export async function startCodexBridge({ executable = process.env.CODEX_PATH || 
     const params = message.params ?? {}, session = threads.get(params.threadId);
     if (message.id !== undefined) {
       if (message.method !== 'item/tool/call' || !session || !session.active
-        || !toolNames.includes(params.tool) || params.namespace != null || typeof params.callId !== 'string'
+        || !session.allowedTools?.includes(params.tool) || params.namespace != null || typeof params.callId !== 'string'
         || !params.arguments || typeof params.arguments !== 'object' || Array.isArray(params.arguments)) {
         rpc.send({ id: message.id, error: { code: -32601, message: 'Only Mainbrella build tools are supported.' } });
         if (session) terminate(session, 'invalid_model_response');
@@ -216,8 +217,9 @@ export async function startCodexBridge({ executable = process.env.CODEX_PATH || 
       || messages.some(message => !message || !['system', 'user', 'assistant', 'tool'].includes(message.role)
         || message.content !== null && typeof message.content !== 'string')
       || !Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 8192
-      || !Array.isArray(tools) || tools.length !== toolNames.length
-      || new Set(tools.map(tool => tool.function?.name)).size !== toolNames.length
+      || !Array.isArray(tools) || tools.length < requiredToolNames.length || tools.length > toolNames.length
+      || new Set(tools.map(tool => tool.function?.name)).size !== tools.length
+      || requiredToolNames.some(name => !tools.some(tool => tool.function?.name === name))
       || tools.some(tool => tool.type !== 'function' || !toolNames.includes(tool.function?.name)
         || typeof tool.function.description !== 'string' || !tool.function.parameters)) throw failure('invalid_model_response');
     clearTimeout(session.idleTimer);
@@ -227,9 +229,10 @@ export async function startCodexBridge({ executable = process.env.CODEX_PATH || 
     session.requestTimer = setTimeout(() => terminate(session, 'build_inference_timeout'), requestTimeoutMs);
     if (!session.threadId) {
       if (messages.some(message => message.role === 'tool' || message.role === 'assistant')) throw failure('build_inference_disconnected');
+      session.allowedTools = tools.map(tool => tool.function.name);
       const result = await rpc.request('thread/start', { cwd, sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true,
         config, baseInstructions: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'),
-        developerInstructions: 'Use only the six Mainbrella dynamic tools. Mainbrella owns source persistence, tool execution, compiler repair and preview lifecycle. Do not use local shell, filesystem, browsing, plugins or other tools.',
+        developerInstructions: 'Use only the registered Mainbrella dynamic tools. Mainbrella owns source persistence, image generation, tool execution, compiler repair and preview lifecycle. Do not use local shell, filesystem, browsing, plugins or other tools.',
         dynamicTools: tools.map(tool => ({ type: 'function', name: tool.function.name,
           description: tool.function.description, inputSchema: tool.function.parameters, deferLoading: false })) });
       if (!sessions.has(session.id)) {

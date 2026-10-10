@@ -1,8 +1,11 @@
-import { validateBuildFiles, type BuildFiles } from './build-contract';
+import { validBuildPath, validateBuildFiles, type BuildFiles } from './build-contract';
+import { BUILD_IMAGE_MAX_BYTES } from './build-images';
 
 // Small source exports use the ZIP store method; no archive dependency is needed.
-export function buildSourceZip(files: BuildFiles): Uint8Array<ArrayBuffer> {
+export function buildSourceZip(files: BuildFiles, assets: Record<string, Uint8Array> = {}): Uint8Array<ArrayBuffer> {
   validateBuildFiles(files);
+  if (Object.keys(assets).length > 12 || Object.entries(assets).some(([path, data]) => !validBuildPath(path)
+    || Object.hasOwn(files, path) || data.byteLength > BUILD_IMAGE_MAX_BYTES)) throw new Error('invalid_build_assets');
   const encoder = new TextEncoder();
   const local: Uint8Array[] = [], directory: Uint8Array[] = [];
   let offset = 0, directorySize = 0;
@@ -11,8 +14,9 @@ export function buildSourceZip(files: BuildFiles): Uint8Array<ArrayBuffer> {
     for (const byte of data) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); }
     return (crc ^ 0xffffffff) >>> 0;
   };
-  for (const [path, content] of Object.entries(files)) {
-    const name = encoder.encode(path), data = encoder.encode(content), crc = crc32(data);
+  const entries = [...Object.entries(files).map(([path, content]) => [path, encoder.encode(content)] as const), ...Object.entries(assets)];
+  for (const [path, data] of entries) {
+    const name = encoder.encode(path), crc = crc32(data);
     const header = new Uint8Array(30 + name.length), view = new DataView(header.buffer);
     view.setUint32(0, 0x04034b50, true); view.setUint16(4, 20, true); view.setUint16(6, 0x800, true);
     view.setUint32(14, crc, true); view.setUint32(18, data.length, true); view.setUint32(22, data.length, true);

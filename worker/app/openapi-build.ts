@@ -5,8 +5,10 @@ import { buildCreateSchema, buildRenameSchema, buildTurnSchema } from '../lib/bu
 const params = z.object({ appId: z.uuid() });
 const headers = z.object({ Origin: z.string().optional() });
 const submissionHeaders = headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
+const image = z.object({ id: z.uuid(), toolId: z.string(), label: z.string(), path: z.string() }).openapi('BuildImage');
 const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
   activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['running', 'succeeded', 'failed']) })),
+  images: z.array(image).max(4),
   stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), log: z.string(), model: z.string(), inputTokens: z.number().int(), outputTokens: z.number().int(),
   createdAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable() }).openapi('BuildTurn');
 const app = z.object({ id: z.uuid(), name: z.string(), prompt: z.string(), revision: z.number().int(), activeTurnId: z.string().nullable(),
@@ -25,7 +27,7 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
     description: 'Requires active funded or legacy paid access, Origin and Idempotency-Key. Saves source in D1 and dispatches a durable Workflow. AI inference is included during beta; Small Ad Hoc runtime uses existing compute billing. Maximum 50 apps, 10 turns per UTC day, and one active turn per account. Identical retries return the same app; different prompts with the same key return 409. Queued dispatch is reconciled by scheduled work.',
     request: { headers: submissionHeaders, ...requestBody(buildCreateSchema) }, responses: { 200: jsonResponse(detail), 202: jsonResponse(detail), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}', { ...common, operationId: 'getBuildApp', summary: 'Read an owned app and its build progress',
-    description: 'Read-only. Includes retained conversation, workflow stages, token usage, saved revision and temporary preview. Expired preview URLs are omitted. Source and conversations remain accessible without paid access.',
+    description: 'Read-only. Includes retained conversation, original generated image metadata, workflow stages, token usage, saved revision and temporary preview. Image bytes are available through the owned image endpoint. Expired preview URLs are omitted. Source and conversations remain accessible without paid access.',
     request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}/events', { ...common, operationId: 'streamBuildApp', summary: 'Stream an owned app’s model output and build activity',
     description: 'Session-authenticated, read-only SSE. Each app event contains the same JSON snapshot as getBuildApp, including incremental assistant text, tool activity and preview state. Reconnect after disconnect; retained activity is replayed without starting another build. Streams close when the build finishes or after 55 seconds.',
@@ -40,5 +42,9 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
     description: 'Uses the existing workflow ID; does not create a new turn or replay failed inference.', request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'post', '/build/apps/{appId}/stop', { ...common, operationId: 'stopBuildPreview', summary: 'Stop the editing container while keeping source', request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}/source', { ...common, operationId: 'getBuildSource', summary: 'Read saved working source, including edits from a failed build', request: { params, headers }, responses: { 200: jsonResponse(z.object({ revision: z.number().int(), files: z.record(z.string(), z.string()) })), ...failures } }, handler);
-  register(api, 'get', '/build/apps/{appId}/export', { ...common, operationId: 'exportBuildSource', summary: 'Download portable source as a ZIP archive', request: { params, headers }, responses: { 200: { description: 'UTF-8 source archive. Run npm install and npm run build.', content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } } }, ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/export', { ...common, operationId: 'exportBuildSource', summary: 'Download portable source as a ZIP archive', request: { params, headers }, responses: { 200: { description: 'Source archive including original JPEG assets under public/generated. Run npm install and npm run build.', content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } } }, ...failures } }, handler);
+  const imageRequest = { params: params.extend({ imageId: z.uuid() }), headers };
+  register(api, 'get', '/build/apps/{appId}/images/{imageId}', { ...common, operationId: 'getBuildImage', summary: 'Read an original image from an owned app',
+    description: 'Session-authenticated JPEG bytes. Generated with Workers AI, retained independently of the sandbox and deleted with the app. Maximum 4 images per build and 12 per app. App previews and ZIP exports use local copies of these assets.',
+    request: imageRequest, responses: { 200: { description: 'Original generated JPEG.', content: { 'image/jpeg': { schema: { type: 'string', format: 'binary' } } } }, ...errors(400, 401, 403, 404, 405, 503) } }, handler);
 }

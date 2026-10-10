@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { BUILD_MODEL, BuildError, validBuildPath } from './build-contract';
 import { codexInference, localCodexConfigured } from './build-codex';
 
-const path = z.string().refine(validBuildPath);
+const path = z.string().refine(value => validBuildPath(value) && !value.startsWith('public/generated/'));
 export const buildToolSchemas = {
   list_files: z.object({}).strict(),
   read_file: z.object({ path }).strict(),
@@ -10,12 +10,14 @@ export const buildToolSchemas = {
   delete_file: z.object({ path }).strict(),
   run_command: z.object({ command: z.enum(['npm install', 'npm run build']) }).strict(),
   get_logs: z.object({}).strict(),
+  generate_image: z.object({ label: z.string().trim().min(1).max(120), prompt: z.string().trim().min(1).max(2048) }).strict(),
 };
 const descriptions: Record<keyof typeof buildToolSchemas, string> = {
   list_files: 'List saved project source files.', read_file: 'Read a project source file.',
   write_file: 'Create or replace a complete source file. Relative paths only.', delete_file: 'Delete a source file.',
   run_command: 'Install dependencies or type-check and compile the application in the isolated Linux container.',
   get_logs: 'Read the output from the last install or build.',
+  generate_image: 'Generate an original JPEG image for the app. Describe the subject, composition, lighting and visual style. Returns a local /generated/...jpg path to use in img src or CSS. Up to 4 images per turn and 12 per app. Generate the main image before writing code so the user sees it early.',
 };
 export const buildTools = Object.entries(buildToolSchemas).map(([name, schema]) => ({ type: 'function',
   function: { name, description: descriptions[name as keyof typeof descriptions], parameters: z.toJSONSchema(schema, { unrepresentable: 'any' }) },
@@ -24,6 +26,7 @@ export const buildSystemPrompt = `You are Mainbrella's app builder. Create and i
 Use the file tools to inspect and edit the existing project. You MUST write files, not just describe code. Preserve existing features when making changes.
 The starter uses React 19, Vite 7, TypeScript and lucide-react. Plain CSS is available; Tailwind is not installed. Use lucide-react for icons.
 Make a thoughtful, responsive, accessible interface with realistic content, restrained colors, readable type, working controls and useful empty states.
+When photography or illustration helps the app (for example nature, travel, food, portfolios, or games), use generate_image to create original imagery that matches the user's brief and visual preferences. Your FIRST tool call must generate the main image by itself, before streaming large file contents. This shows the user the actual image while you build. Use the returned /generated/...jpg path in the app; these assets are saved, served in previews and included in source exports. Do not use Unsplash, stock-image URLs, placeholder image services or invented external image URLs. Generate supporting images only when useful. Simple forms, settings, tables and utility dashboards do not need decorative images. If generation is unavailable or fails, explain briefly and continue with a suitable CSS treatment; never claim an image was generated when it was not.
 For front-end data, use browser localStorage when persistence is needed. This release supports front-end apps only. Do not claim a backend, database, authentication, payment processing or third-party API is connected when it is not. Explain any such limitations honestly.
 Do not create secrets or platform integrations. Do not access external credentials. Work only in the project source using the provided tools.
 Use npm install after dependency changes and npm run build to check TypeScript and compile. Inspect errors and fix them. You can add npm dependencies in package.json.
@@ -40,8 +43,9 @@ export async function buildInference(env: Env, messages: BuildAIMessage[], maxTo
   if ((!codex && !env.AI) || (codex && !sessionId)) throw new BuildError('build_unavailable');
   // A deployment-controlled model name allows changing Workers AI models without
   // accepting an arbitrary provider or model from the browser.
-  const output = codex ? await codexInference(env, sessionId!, messages, buildTools, maxTokens)
-    : await env.AI.run(env.BUILD_MODEL || BUILD_MODEL, { messages: messages.map(({ tool_success, ...message }) => message), tools: buildTools,
+  const tools = env.AI ? buildTools : buildTools.filter(tool => tool.function.name !== 'generate_image');
+  const output = codex ? await codexInference(env, sessionId!, messages, tools, maxTokens)
+    : await env.AI.run(env.BUILD_MODEL || BUILD_MODEL, { messages: messages.map(({ tool_success, ...message }) => message), tools,
     parallel_tool_calls: false, max_completion_tokens: maxTokens, reasoning_effort: 'low', stream: true,
     stream_options: { include_usage: true },
   }, env.BUILD_AI_GATEWAY ? { gateway: { id: env.BUILD_AI_GATEWAY, skipCache: true } } : undefined);

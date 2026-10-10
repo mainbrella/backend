@@ -36,13 +36,15 @@ createInterface({ input: process.stdin }).on('line', line => {
   else if (method === 'account/read') send({ id, result: { account: { type: 'chatgpt' }, requiresOpenaiAuth: true } });
   else if (method === 'config/read') send({ id, result: { config: { model: 'fixture-model' } } });
   else if (method === 'thread/start') {
-    if (params.dynamicTools.length !== 6 || params.sandbox !== 'read-only' || params.ephemeral !== true) throw new Error('Invalid thread configuration');
-    const thread = { id: `thread-${++count}`, inputTokens: 0, outputTokens: 0 };
+    if (![6, 7].includes(params.dynamicTools.length) || params.sandbox !== 'read-only' || params.ephemeral !== true) throw new Error('Invalid thread configuration');
+    const thread = { id: `thread-${++count}`, inputTokens: 0, outputTokens: 0, dynamicTools: params.dynamicTools };
     threads.set(thread.id, thread); send({ id, result: { thread } });
   } else if (method === 'turn/start') {
     const thread = threads.get(params.threadId), text = params.input.map(input => input.text).join('\n');
     thread.turnId = `turn-${++count}`; thread.interrupted = false;
-    thread.tools = text.includes('repair') || text.includes('platform build check failed') ? [['write_file', { path: 'src/App.tsx', content: 'repaired' }]] : [
+    thread.tools = text === 'images' && thread.dynamicTools.some(tool => tool.name === 'generate_image')
+      ? [['generate_image', { label: 'Forest', prompt: 'Moody ancient forest' }]]
+      : text.includes('repair') || text.includes('platform build check failed') ? [['write_file', { path: 'src/App.tsx', content: 'repaired' }]] : [
       ['list_files', {}], ['read_file', { path: 'src/App.tsx' }],
       ['write_file', { path: 'src/App.tsx', content: 'updated' }], ['delete_file', { path: 'src/old.ts' }],
       ['run_command', { command: 'npm run build' }], ['get_logs', {}],
