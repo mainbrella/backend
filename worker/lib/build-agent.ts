@@ -4,6 +4,7 @@ import { resolveEntitlement } from './entitlements';
 import { handleOwnedPreviewRequest } from '../app/previews';
 import { failBuildTurn } from '../app/build';
 import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildToolCall } from './build-ai';
+import { buildToolLabel, saveBuildActivity } from './build-activity';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
@@ -124,32 +125,33 @@ async function saveSource(env: Env, params: BuildParams, files: BuildFiles) {
   await env.DB.prepare('UPDATE build_apps SET source_json = ?, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
     .bind(JSON.stringify(files), new Date().toISOString(), params.appId, params.userId, params.turnId).run();
 }
-async function executeTool(env: Env, params: BuildParams, container: BuildContainer, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string }> {
+async function executeTool(env: Env, params: BuildParams, container: BuildContainer | undefined, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string; succeeded: boolean }> {
   const schema = buildToolSchemas[call.function.name as keyof typeof buildToolSchemas];
   let args: Record<string, string>;
   try {
     const parsed = schema?.safeParse(JSON.parse(call.function.arguments));
-    if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs };
+    if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false };
     args = parsed.data;
-  } catch { return { files, output: 'Arguments must be valid JSON.', logs }; }
-  if (call.function.name === 'list_files') return { files, output: Object.keys(files).join('\n'), logs };
-  if (call.function.name === 'read_file') return { files, output: files[args.path] ?? 'File not found.', logs };
-  if (call.function.name === 'get_logs') return { files, output: logs || 'No commands have run yet.', logs };
+  } catch { return { files, output: 'Arguments must be valid JSON.', logs, succeeded: false }; }
+  if (call.function.name === 'list_files') return { files, output: Object.keys(files).join('\n'), logs, succeeded: true };
+  if (call.function.name === 'read_file') return { files, output: files[args.path] ?? 'File not found.', logs, succeeded: Object.hasOwn(files, args.path) };
+  if (call.function.name === 'get_logs') return { files, output: logs || 'No commands have run yet.', logs, succeeded: true };
   if (call.function.name === 'run_command') {
+    if (!container) throw new BuildError('build_runtime_unavailable');
     await materialize(env, params, container, files, step, `${label}-source`);
     const result = await runCommand(env, params, container, step, label, args.command === 'npm install' ? install : compile);
     const output = `${result.status}\n${result.stdout || ''}\n${result.stderr || ''}`.slice(-12_000);
-    return { files, output, logs: output };
+    return { files, output, logs: output, succeeded: result.status === 'succeeded' };
   }
   const next = { ...files };
   if (call.function.name === 'delete_file') delete next[args.path]; else next[args.path] = args.content;
-  try { validateBuildFiles(next); } catch { return { files, output: 'Source limit exceeded. Keep each file below 64 KiB and the project below 256 KiB / 80 files.', logs }; }
+  try { validateBuildFiles(next); } catch { return { files, output: 'Source limit exceeded. Keep each file below 64 KiB and the project below 256 KiB / 80 files.', logs, succeeded: false }; }
   await step.do(`${label}: save source`, retry, async () => saveSource(env, params, next));
-  if (call.function.name === 'delete_file') {
+  if (call.function.name === 'delete_file' && container) {
     const removed = await runCommand(env, params, container, step, `${label}-delete`, `rm -f -- ${shellQuote(`${root}/${args.path}`)}`, 30_000);
     if (removed.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
   }
-  return { files: next, output: 'Saved.', logs };
+  return { files: next, output: 'Saved.', logs, succeeded: true };
 }
 
 export async function runBuildAgent(env: Env, params: BuildParams, step: Step, startedAt: number) {
@@ -160,18 +162,22 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       if (!app || !turn || app.active_turn_id !== params.turnId) throw new BuildError('build_interrupted', 409);
       return { app, turn };
     });
-    await step.do('Allocate stage', retry, async () => stage(env, params, 'Starting sandbox'));
-    const container = await step.do('Allocate sandbox', retry, async () => {
-      // Do not replay allocation after the account's 24-hour key retention.
-      if (Date.now() - startedAt > 23 * 60 * 60_000) throw new BuildError('build_interrupted');
-      return allocate(env, params);
-    });
+    let container: BuildContainer | undefined;
+    // File inspection and model output can start before the sandbox is ready.
+    async function sandbox() {
+      if (container) return container;
+      await step.do('Allocate stage', retry, async () => stage(env, params, 'Starting sandbox'));
+      container = await step.do('Allocate sandbox', retry, async () => {
+        // Do not replay allocation after the account's 24-hour key retention.
+        if (Date.now() - startedAt > 23 * 60 * 60_000) throw new BuildError('build_interrupted');
+        return allocate(env, params);
+      });
+      // Clear this dedicated app directory; callers materialize the current files.
+      const reset = await runCommand(env, params, container, step, 'reset-source', `mkdir -p ${root} && find ${root} -mindepth 1 -maxdepth 1 ! -name node_modules ! -name package-lock.json -exec rm -rf -- {} +`, 30_000);
+      if (reset.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
+      return container;
+    }
     let files = JSON.parse(initial.app.source_json) as BuildFiles;
-    // Clear only this dedicated app directory. Each turn restores saved source,
-    // so files deleted from source cannot survive in an old sandbox.
-    const reset = await runCommand(env, params, container, step, 'reset-source', `mkdir -p ${root} && find ${root} -mindepth 1 -maxdepth 1 ! -name node_modules ! -name package-lock.json -exec rm -rf -- {} +`, 30_000);
-    if (reset.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
-    await materialize(env, params, container, files, step, 'restore');
     let inputTokens = 0, outputTokens = 0, logs = '', summary = 'Preview restarted from saved source.';
     const messages: BuildAIMessage[] = [{ role: 'system', content: buildSystemPrompt },
       { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
@@ -183,7 +189,16 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
         const result = await step.do(`AI ${round}`, noRetry, async () => {
           if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
           await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
-          return buildInference(env, messages, Math.min(8192, remaining));
+          const result = await buildInference(env, messages, Math.min(8192, remaining), async (text, calls) => {
+            if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
+            for (const [index, call] of calls.entries()) {
+              if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
+                { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
+            }
+          });
+          if (result.message.content) await saveBuildActivity(env, params, round * 10,
+            { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
+          return result;
         });
         inputTokens += result.inputTokens; outputTokens += result.outputTokens;
         messages.push(result.message);
@@ -193,7 +208,18 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
         if (result.message.tool_calls?.length) {
           for (let index = 0; index < result.message.tool_calls.length; index++) {
             const call = result.message.tool_calls[index];
+            const activity = { id: `tool-${round}-${index}`, type: 'tool' as const, text: buildToolLabel(call.function.name, call.function.arguments) };
+            await step.do(`Tool stage ${round}-${index}`, retry, async () => {
+              await stage(env, params, activity.text);
+              await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: 'running' });
+            });
+            if (call.function.name === 'run_command') {
+              await sandbox();
+              await step.do(`Command stage ${round}-${index}`, retry, async () => stage(env, params, activity.text));
+            }
             const output = await executeTool(env, params, container, files, call, step, `tool-${round}-${index}`, logs);
+            await step.do(`Tool complete ${round}-${index}`, retry, async () => saveBuildActivity(env, params, round * 10 + index + 1,
+              { ...activity, status: output.succeeded ? 'succeeded' : 'failed' }));
             files = output.files; logs = output.logs;
             messages.push({ role: 'tool', tool_call_id: call.id, content: output.output });
           }
@@ -205,10 +231,12 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
           continue;
         }
       }
-      await step.do(`Check stage ${round}`, retry, async () => stage(env, params, 'Installing and checking the app'));
-      await materialize(env, params, container, files, step, `check-${round}`);
-      const installed = await runCommand(env, params, container, step, `install-${round}`, install);
-      const built = installed.status === 'succeeded' ? await runCommand(env, params, container, step, `compile-${round}`, compile) : installed;
+      const ready = await sandbox();
+      await step.do(`Check stage ${round}`, retry, async () => stage(env, params, 'Installing dependencies'));
+      await materialize(env, params, ready, files, step, `check-${round}`);
+      const installed = await runCommand(env, params, ready, step, `install-${round}`, install);
+      await step.do(`Compile stage ${round}`, retry, async () => stage(env, params, 'Checking the app'));
+      const built = installed.status === 'succeeded' ? await runCommand(env, params, ready, step, `compile-${round}`, compile) : installed;
       logs = `${built.status}\n${built.stdout || ''}\n${built.stderr || ''}`.slice(-12_000);
       if (built.status === 'succeeded') { verified = true; break; }
       if (initial.turn.mode === 'preview') throw new BuildError('build_check_failed');
@@ -216,10 +244,11 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     }
     if (!verified) throw new BuildError('build_budget_exceeded');
     await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
-    const launched = await runCommand(env, params, container, step, 'start-preview', startPreview, 60_000);
+    const ready = await sandbox();
+    const launched = await runCommand(env, params, ready, step, 'start-preview', startPreview, 60_000);
     if (launched.status !== 'succeeded') throw new BuildError('preview_start_failed');
     const preview = await step.do('Create preview', noRetry, async () => {
-      const identity = new URLSearchParams({ id: container.id, createdAt: container.createdAt });
+      const identity = new URLSearchParams({ id: ready.id, createdAt: ready.createdAt });
       return json<BuildPreview>(await handleOwnedPreviewRequest(new Request(`https://api.mainbrella.com/containers/previews?${identity}`, {
         method: 'POST', headers: { Origin: 'https://mainbrella.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ port: 3000, ttlSeconds: 1800 }),
       }), env, params.userId));

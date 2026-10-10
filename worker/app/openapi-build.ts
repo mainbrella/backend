@@ -6,6 +6,7 @@ const params = z.object({ appId: z.uuid() });
 const headers = z.object({ Origin: z.string().optional() });
 const submissionHeaders = headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
 const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
+  activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['running', 'succeeded', 'failed']) })),
   stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), log: z.string(), model: z.string(), inputTokens: z.number().int(), outputTokens: z.number().int(),
   createdAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable() }).openapi('BuildTurn');
 const app = z.object({ id: z.uuid(), name: z.string(), prompt: z.string(), revision: z.number().int(), activeTurnId: z.string().nullable(),
@@ -25,6 +26,9 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   register(api, 'get', '/build/apps/{appId}', { ...common, operationId: 'getBuildApp', summary: 'Read an owned app and its build progress',
     description: 'Read-only. Includes retained conversation, workflow stages, token usage, saved revision and temporary preview. Expired preview URLs are omitted. Source and conversations remain accessible without paid access.',
     request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/events', { ...common, operationId: 'streamBuildApp', summary: 'Stream an owned app’s model output and build activity',
+    description: 'Session-authenticated, read-only SSE. Each app event contains the same JSON snapshot as getBuildApp, including incremental assistant text, tool activity and preview state. Reconnect after disconnect; retained activity is replayed without starting another build. Streams close when the build finishes or after 55 seconds.',
+    request: { params, headers }, responses: { 200: { description: 'Server-sent app snapshots.', content: { 'text/event-stream': { schema: { type: 'string' } } } }, ...failures } }, handler);
   register(api, 'patch', '/build/apps/{appId}', { ...common, operationId: 'renameBuildApp', summary: 'Rename an owned app', request: { params, headers, ...requestBody(buildRenameSchema) }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'delete', '/build/apps/{appId}', { ...common, operationId: 'deleteBuildApp', summary: 'Stop the exact editing container and delete an app',
     description: 'Rejects deletion during an active build. Deletes conversations and saved revisions. Cleanup remains available after funding expires.', request: { params, headers }, responses: { 200: jsonResponse(z.object({ deleted: z.literal(true) })), ...failures } }, handler);

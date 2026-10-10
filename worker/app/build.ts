@@ -8,17 +8,19 @@ import { previewsConfigured } from '../lib/preview-routing';
 import { BUILD_MODEL, BUILD_MAX_APPS, BUILD_DAILY_TURNS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema,
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
+import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
 
 export function buildConfigured(env: Env) {
   return env.BUILD_ENABLED === 'true' && Boolean(env.AI && env.BUILD_WORKFLOW && previewsConfigured(env));
 }
-function publicApp(row: BuildAppRow, turns?: BuildTurnRow[]) {
+function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = []) {
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;
   return { id: row.id, name: row.name, prompt: row.initial_prompt, revision: row.revision,
     activeTurnId: row.active_turn_id, container: row.container_json ? JSON.parse(row.container_json) as BuildContainer : null,
     preview: preview && preview.expiresAt > Date.now() ? preview : null, createdAt: row.created_at, updatedAt: row.updated_at,
     ...(turns ? { turns: turns.map(turn => ({ id: turn.id, prompt: turn.prompt, mode: turn.mode, status: turn.status,
       stage: turn.stage, summary: turn.summary, error: turn.error, log: turn.log, model: turn.model,
+      activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => item),
       inputTokens: turn.input_tokens, outputTokens: turn.output_tokens, createdAt: turn.created_at, finishedAt: turn.finished_at })) } : {}),
   };
 }
@@ -26,7 +28,10 @@ async function detail(env: Env, userId: string, id: string) {
   const row = await ownedBuildApp(env, userId, id);
   if (!row) throw new BuildError('app_not_found', 404);
   const { results } = await env.DB.prepare('SELECT * FROM build_turns WHERE app_id = ? AND user_id = ? ORDER BY created_at, id').bind(id, userId).all<BuildTurnRow>();
-  return { app: publicApp(row, results) };
+  const { results: activity } = await env.DB.prepare(`SELECT a.turn_id, a.id, a.type, a.text, a.status FROM build_activity a
+    JOIN build_turns t ON t.id = a.turn_id WHERE t.app_id = ? AND t.user_id = ? ORDER BY t.created_at, t.id, a.position`)
+    .bind(id, userId).all<BuildActivityRow>();
+  return { app: publicApp(row, results, activity) };
 }
 async function requireBuildAccess(env: Env, userId: string) {
   if (!buildConfigured(env)) throw new BuildError('build_unavailable');
@@ -48,6 +53,7 @@ export async function dispatchBuildTurn(env: Env, turn: BuildTurnRow) {
 }
 export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'app_id' | 'user_id'>, error: string) {
   await env.DB.batch([
+    env.DB.prepare("UPDATE build_activity SET status = 'failed' WHERE turn_id = ? AND status = 'running'").bind(turn.id),
     env.DB.prepare("UPDATE build_turns SET status = 'failed', stage = 'Build stopped', error = ?, finished_at = ? WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')")
       .bind(error, new Date().toISOString(), turn.id, turn.user_id),
     env.DB.prepare('UPDATE build_apps SET active_turn_id = NULL WHERE id = ? AND user_id = ? AND active_turn_id = ?').bind(turn.app_id, turn.user_id, turn.id),
@@ -83,9 +89,9 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
-  const match = /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export))?)?$/.exec(url.pathname);
+  const match = /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events))?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]) return authJson({ error: 'not_found' }, 404, cors);
-  const allowed = match[1] === 'config' || ['source', 'export'].includes(match[3]) ? ['GET']
+  const allowed = match[1] === 'config' || ['source', 'export', 'events'].includes(match[3]) ? ['GET']
     : match[3] ? ['POST'] : match[2] ? ['GET', 'PATCH', 'DELETE'] : ['GET', 'POST'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: `${allowed.join(', ')}, OPTIONS` });
   if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
@@ -104,6 +110,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
       if (request.method === 'GET') {
+        if (match[3] === 'events') return buildAppStream(request, () => detail(env, user.id, id), cors);
         if (match[3] === 'source') return authJson({ revision: app.revision, files: JSON.parse(app.source_json) }, 200, cors);
         if (match[3] === 'export') return new Response(buildSourceZip(JSON.parse(app.source_json)), { headers: { ...cors,
           'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="mainbrella-app.zip"',
