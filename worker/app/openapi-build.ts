@@ -21,9 +21,9 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   register(api, 'get', '/build/apps/{appId}/turns/{turnId}/diagnostics', { ...common, operationId: 'getBuildTurnDiagnostics', summary: 'Inspect an owned turn’s durable operation evidence',
     description: 'Read-only, session-authenticated. Assembles ordered logical operations and attempt IDs, deployment/schema versions, dispatch intent, stream evidence, provider references, bounded command output, immutable source snapshots and independent billing/cleanup outcomes. Unknown outcomes are not replayed. Detailed records are excluded from routine SSE snapshots.',
     request: { params: params.extend({ turnId: z.uuid() }), headers }, responses: { 200: jsonResponse(z.object({
-      schemaVersion: z.literal(1), turnId: z.uuid(), status: z.enum(['queued','running','succeeded','failed']), error: z.string().nullable(), log: z.string(), failureOperationId: z.string().nullable(),
+      schemaVersion: z.literal(1), turnId: z.uuid(), status: z.enum(['queued','running','succeeded','failed']), error: z.string().nullable(), errorExplanation: z.string().nullable(), log: z.string(), failureOperationId: z.string().nullable(),
       operations: z.array(z.object({ turn_id: z.uuid(), operation_id: z.string(), attempt_id: z.string(), schema_version: z.number().int(), deployment_version: z.string().nullable(),
-        kind: z.enum(['text','image','tool','command','source','billing','cleanup']), label: z.string(), status: z.enum(['proposed','skipped','blocked','succeeded','failed','unknown']),
+        kind: z.enum(['text','image','tool','command','source','billing','cleanup']), label: z.string(), status: z.enum(['proposed','skipped','blocked','succeeded','failed','unknown']), explanation: z.string().nullable(),
         dispatch_attempted: z.number().int().nullable(), created_at: z.number(), started_at: z.number().nullable(), updated_at: z.number(), finished_at: z.number().nullable(),
         evidence: z.record(z.string(), z.unknown()), result: z.unknown().nullable(), source: z.record(z.string(), z.string()).nullable() })),
       billing: z.array(z.object({ id: z.string(), user_id: z.string(), app_id: z.string(), turn_id: z.string(), model: z.string(), reserved_micro_usd: z.number(),

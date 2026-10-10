@@ -99,6 +99,7 @@ export async function buildOperationTimeline(env: Env, turnId: string) {
 export function operationExplanation(row: OperationRow): string | null {
   const evidence = JSON.parse(row.evidence_json);
   const failure = row.result_json ? JSON.parse(row.result_json).failure as BuildFailure | undefined : undefined;
+  if (row.operation_id.startsWith('limit-') && typeof evidence.reason === 'string') return evidence.reason;
   if (row.status === 'skipped') return 'Not run. The build stopped before this operation started.';
   if (row.status === 'proposed') return 'Proposed. Waiting for the model to finish its request.';
   if (row.kind === 'text' && evidence.finishReason === 'length') return `The model reached its ${evidence.tokenAllowance?.toLocaleString() ?? ''} token response limit before finishing. Incomplete tool requests were not run.`;

@@ -133,6 +133,45 @@ test('token exhaustion retains actual usage, explains why the build stopped and 
   assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${crypto.randomUUID()}/diagnostics`), f.env)).status, 404);
 });
 
+test('budget stops record the exact limit as the turn cause and explain it in diagnostics', async t => {
+  const scenarios = [
+    { limit: 'output-tokens', reason: /used 24,000 of 24,000 output tokens.*At least 1,024 tokens must remain/, makeAI: () => ({ calls: 0, run: async () => ({
+      choices: [{ finish_reason: 'stop', message: { content: 'Working on the app.' } }], usage: { prompt_tokens: 5, completion_tokens: 24_000 } }) }) },
+    { limit: 'input-tokens', reason: /used 240,000 input tokens, reaching its 240,000 token limit/, makeAI: () => ({ calls: 0, run: async () => ({
+      choices: [{ finish_reason: 'stop', message: { content: 'Working on the app.' } }], usage: { prompt_tokens: 240_000, completion_tokens: 5 } }) }) },
+    { limit: 'context-size', reason: /conversation reached .* bytes, above the 196,608 byte context limit/, makeAI: () => ({ calls: 0, run: async () => ({
+      choices: [{ finish_reason: 'stop', message: { content: 'Working on the app.' } }], usage: { prompt_tokens: 5, completion_tokens: 5 } }) }), context: true },
+    { limit: 'elapsed-time', reason: /ran for 31 minutes, above its 30 minute time limit/, makeAI: () => ({ calls: 0, run: async () => ({}) }), elapsed: true },
+    { limit: 'round-limit', reason: /used all 16 repair rounds without a successful verification/, makeAI: () => {
+      let round = 0;
+      return { calls: 0, run: async () => { const current = round++;
+        return { choices: [{ finish_reason: 'tool_calls', message: { content: 'Inspecting files.', tool_calls: [{ id: `list-${current}`, type: 'function',
+          function: { name: 'list_files', arguments: '{}' } }] } }], usage: { prompt_tokens: 5, completion_tokens: 5 } }; } };
+    } },
+  ];
+  for (const scenario of scenarios) await t.test(scenario.limit, async sub => {
+    const f = await fixture(sub); t.mock.method(console, 'error', () => {});
+    const ai = scenario.makeAI();
+    if (scenario.context) f.sqlite.prepare('UPDATE build_apps SET initial_prompt = ? WHERE id = ?').run('x'.repeat(200_000), f.appId);
+    f.env.AI = { async run(...args: any[]) { ai.calls++; return (ai.run as any).apply(ai, args); } } as unknown as Ai;
+    await runBuildAgent(f.env, f.params, immediateStep, Date.now() - (scenario.elapsed ? 31 * 60_000 : 0));
+    const snapshot = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+    const turn = snapshot.app.turns[0];
+    assert.equal(turn.error, 'build_budget_exceeded');
+    assert.equal(turn.failureOperationId, `limit-${scenario.limit}`);
+    assert.match(turn.errorExplanation, scenario.reason);
+    assert.ok(!JSON.stringify(snapshot).includes('evidence'));
+    const report = await (await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${f.turnId}/diagnostics`), f.env)).json() as any;
+    const limit = report.operations.find((op: any) => op.operation_id === `limit-${scenario.limit}`);
+    assert.equal(limit.kind, 'tool'); assert.equal(limit.status, 'blocked'); assert.match(limit.evidence.reason, scenario.reason);
+    assert.equal(limit.evidence.limitName, scenario.limit); assert.equal(typeof limit.evidence.limit, 'number'); assert.equal(typeof limit.evidence.observed, 'number');
+    assert.equal(limit.explanation, limit.evidence.reason); assert.equal(report.errorExplanation, limit.explanation);
+    assert.equal(report.failureOperationId, limit.operation_id);
+    if (scenario.elapsed || scenario.context) assert.equal(ai.calls, 0);
+    if (scenario.limit === 'round-limit') assert.equal(ai.calls, 16);
+  });
+});
+
 test('EOF, missing finish reasons and read exceptions retain distinct stream evidence', async () => {
   for (const [text, expected, reject] of [
     [delta({ content: 'partial' }), 'eof', true],
@@ -357,6 +396,7 @@ test('disconnecting the progress stream stops snapshot reads', async () => {
   await reader.cancel();
   assert.equal(reads, 1);
   assert.equal(buildToolLabel('write_file', '{"path":"src/App.tsx","content":"partial'), 'Write src/App.tsx');
+  assert.equal(buildToolLabel('run_command', '{"command":"npm run build"}'), 'Type-check and compile');
 });
 
 test('the agent streams and saves edits before allocating a sandbox, including file deletion', async t => {

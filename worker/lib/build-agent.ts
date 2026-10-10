@@ -197,6 +197,15 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
 
 export async function runBuildAgent(env: Env, params: BuildParams, step: Step, startedAt: number) {
   let currentOperation: string | null = null;
+  async function stopForLimit(limitName: string, limit: number, reason: string, observed: number, counters: Record<string, number>) {
+    const id = `limit-${limitName}`;
+    const error = new BuildError('build_budget_exceeded', 503, reason);
+    error.operationId = id;
+    const ref = { params, id };
+    await proposeBuildOperation(env, ref, 'tool', `Build stopped: ${reason}`, { limit, limitName, observed, reason, counters });
+    await recordBuildOperation(env, ref, { status: 'blocked', finished: true, result: { ok: false, failure: buildFailure(error, id) } });
+    throw error;
+  }
   async function settleUsage(label: string) {
     try { await step.do(label, retry, async () => settleReportedBuildUsage(env, params.turnId)); return null; }
     catch (error) { return buildFailure(error, label); }
@@ -232,11 +241,19 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     for (let round = 0; round < BUILD_MAX_ROUNDS; round++) {
       if (initial.turn.mode === 'build') {
         const remaining = BUILD_OUTPUT_BUDGET - outputTokens;
-        if (remaining < 1024 || inputTokens >= BUILD_INPUT_BUDGET || new TextEncoder().encode(JSON.stringify(messages)).length > 192 * 1024) throw new BuildError('build_budget_exceeded');
+        if (remaining < 1024) await stopForLimit('output-tokens', 1024, `The build used ${outputTokens.toLocaleString()} of ${BUILD_OUTPUT_BUDGET.toLocaleString()} output tokens, leaving ${remaining.toLocaleString()}. At least 1,024 tokens must remain to request another model response.`, remaining,
+          { outputTokens, inputTokens, rounds: round });
+        if (inputTokens >= BUILD_INPUT_BUDGET) await stopForLimit('input-tokens', BUILD_INPUT_BUDGET, `The build used ${inputTokens.toLocaleString()} input tokens, reaching its ${BUILD_INPUT_BUDGET.toLocaleString()} token limit.`, inputTokens,
+          { outputTokens, inputTokens, rounds: round });
+        const contextBytes = new TextEncoder().encode(JSON.stringify(messages)).length;
+        if (contextBytes > 192 * 1024) await stopForLimit('context-size', 192 * 1024, `The model conversation reached ${contextBytes.toLocaleString()} bytes, above the ${ (192 * 1024).toLocaleString()} byte context limit.`, contextBytes,
+          { outputTokens, inputTokens, rounds: round });
         currentOperation = `text-${round}`;
         const result = await step.do(`AI ${round}`, noRetry, async (): Promise<OperationResult<BuildAIResult>> => {
           try {
-            if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
+            const elapsedMs = Date.now() - startedAt;
+            if (elapsedMs > 30 * 60_000) await stopForLimit('elapsed-time', 30 * 60_000, `The build ran for ${Math.floor(elapsedMs / 60_000)} minutes, above its 30 minute time limit.`, elapsedMs,
+              { outputTokens, inputTokens, rounds: round, elapsedMs });
             await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
             const result = await buildInference(env, messages, Math.min(8192, remaining), async (text, calls) => {
               if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
@@ -311,7 +328,8 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       if (initial.turn.mode === 'preview') throw new BuildError('build_check_failed');
       messages.push({ role: 'user', content: `The platform build check failed. Inspect the source, fix these errors and try again:\n${logs}` });
     }
-    if (!verified) throw new BuildError('build_budget_exceeded');
+    if (!verified) await stopForLimit('round-limit', BUILD_MAX_ROUNDS, `The build used all ${BUILD_MAX_ROUNDS} repair rounds without a successful verification.`, BUILD_MAX_ROUNDS,
+      { outputTokens, inputTokens, rounds: BUILD_MAX_ROUNDS });
     await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
     const ready = await sandbox();
     currentOperation = 'start-preview';

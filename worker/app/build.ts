@@ -60,10 +60,11 @@ async function detail(env: Env, userId: string, id: string) {
     .bind(id).all<Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>>();
   const { results: costs } = await env.DB.prepare("SELECT turn_id, SUM(cost_micro_usd) AS cost FROM build_ai_usage WHERE app_id = ? AND user_id = ? AND status = 'settled' GROUP BY turn_id")
     .bind(id, userId).all<{ turn_id: string; cost: number }>();
-  const { results: operations } = await env.DB.prepare(`SELECT o.turn_id, o.operation_id, o.kind, o.status, o.started_at, o.finished_at,
+  const { results: operations } = await env.DB.prepare(`SELECT o.turn_id, o.operation_id, o.kind, o.label, o.status, o.started_at, o.finished_at,
     json_object('usage',json_extract(o.evidence_json,'$.usage'),'finishReason',json_extract(o.evidence_json,'$.finishReason'),
     'tokenAllowance',json_extract(o.evidence_json,'$.tokenAllowance'),'termination',json_extract(o.evidence_json,'$.termination'),
-    'doneSeen',json_extract(o.evidence_json,'$.doneSeen'),'exitCode',json_extract(o.evidence_json,'$.exitCode')) AS evidence_json,
+    'doneSeen',json_extract(o.evidence_json,'$.doneSeen'),'exitCode',json_extract(o.evidence_json,'$.exitCode'),
+    'reason',json_extract(o.evidence_json,'$.reason')) AS evidence_json,
     CASE WHEN json_extract(o.result_json,'$.ok') = 0 THEN o.result_json ELSE NULL END AS result_json
     FROM build_operations o JOIN build_turns t ON t.id = o.turn_id WHERE t.app_id = ? AND t.user_id = ?`)
     .bind(id, userId).all<OperationRow>();
@@ -163,7 +164,8 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
         const { results: billing } = await env.DB.prepare('SELECT * FROM build_ai_usage WHERE turn_id = ? AND user_id = ? ORDER BY created_at')
           .bind(turn.id, user.id).all();
         return authJson({ schemaVersion: 1, turnId: turn.id, status: turn.status, error: turn.error, log: turn.log, failureOperationId: turn.failure_operation_id ?? null,
-          operations: operations.map(({ evidence_json, result_json, source_json, ...op }) => ({ ...op, evidence: JSON.parse(evidence_json),
+          errorExplanation: operations.find(op => op.operation_id === turn.failure_operation_id) ? operationExplanation(operations.find(op => op.operation_id === turn.failure_operation_id)!) : null,
+          operations: operations.map(({ evidence_json, result_json, source_json, ...op }) => ({ ...op, explanation: operationExplanation({ ...op, evidence_json, result_json, source_json }), evidence: JSON.parse(evidence_json),
             result: result_json ? JSON.parse(result_json) : null, source: source_json ? JSON.parse(source_json) : null })), billing }, 200, cors);
       }
       if (match[3] === 'images') {
