@@ -17,6 +17,35 @@ fleet, including services awaiting recovery and the new service. Existing
 services use short funded leases. The 10,000-starts-per-UTC-month abuse limit
 remains; idempotent retries do not count twice.
 
+## Balance history
+
+Browser-cookie `GET /billing/history` explains lifetime original credit,
+current refund/dispute deductions and elapsed allocation consumption. It takes
+one `asOf` snapshot, uses fractional cents for resource charges, and returns
+the existing rounded balance separately. Reservations hold future runtime;
+they are not consumption. Startup and idle allocation are billed at the
+machine's weighted hourly rate. Storage, IPs and email have no separate prepaid
+charges. No Stripe lookup, provisioning, renewal or metering mutation happens
+on this read, so it remains usable during funding-provider outages.
+
+New allocations retain a durable UUID and exact runtime deltas alongside the
+existing lifetime wallet counter. Repeated settlement and production renewal
+cannot duplicate usage. Confirmed stop finalizes the resource row; reusing a
+slot creates another allocation. Keep the newest 256 completed allocations
+plus current leases. Older compacted resource detail and already settled usage
+from before tracking are explicitly `unattributedUsedCents`; lifetime funding,
+deductions and consumption remain intact. No database migration is needed.
+Existing running leases begin attribution at their first unsettled timestamp.
+
+All current leases are returned separately in `activeResources`, including
+expired leases awaiting a confirmed stop (marked inactive). Completed resource
+and funding lists paginate independently with `resourceCursor`, `fundingCursor`
+and `limit` (default 50, maximum 100); totals and current hourly rate cover the
+entire account. A compacted/unknown cursor returns 400 and callers restart its
+list. Snapshots may change between pages. Funding purchase dates are retained;
+refund/dispute deduction dates are not invented. This endpoint covers prepaid
+credit, not legacy monthly invoices. See `API.md` for the full response contract.
+
 ## Stripe setup
 
 Create a Mainbrella Compute Credit Product with a $5 USD **one-time** Price.

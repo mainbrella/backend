@@ -9,6 +9,14 @@ export const prepaidBalanceSchema = z.object({
   minimumProductionRuntimeMs: z.literal(86400000), autoRecharge: autoRechargeSettings.extend({ spentCents: z.number(), status: z.string() }),
 }).openapi('PrepaidBalance');
 const result = z.object({ balance: prepaidBalanceSchema });
+const resource = z.object({ id: z.string(), containerId: z.string(), name: z.string().nullable(), lifecycle: z.enum(['ad_hoc', 'production']),
+  size: z.enum(['lite', 'small', 'medium', 'large', 'xl']), startAt: z.number(), endAt: z.number().nullable(), runtimeMs: z.number(),
+  computeUnitHours: z.number(), usedCents: z.number(), reservedCents: z.number(), hourlyCents: z.number(), active: z.boolean() });
+const history = z.object({ asOf: z.number(), balance: prepaidBalanceSchema,
+  totals: z.object({ fundedCents: z.number(), revokedCents: z.number(), usedCents: z.number(), unattributedUsedCents: z.number() }),
+  currentHourlyCents: z.number(), activeResources: z.array(resource), resources: z.array(resource),
+  fundings: z.array(z.object({ id: z.string(), createdAt: z.number(), amountCents: z.number(), revokedCents: z.number(), reason: z.enum(['refund', 'dispute']).nullable() })),
+  nextResourceCursor: z.string().nullable(), nextFundingCursor: z.string().nullable(), historyTruncated: z.boolean(), retainedResourceLimit: z.literal(256) }).openapi('PrepaidHistory');
 
 export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/billing/config', {
@@ -19,6 +27,12 @@ export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHan
     operationId: 'getPrepaidBalance', tags: ['Billing'], summary: 'Get account funding, reserved runtime and monthly spending', security: cookieSecurity,
     description: 'Successful one-time card payments fund compute in advance. Funding carries forward. The spending cap and auto recharge authorization do not add funds. Balance can be negative after a refund or dispute.',
     responses: { 200: jsonResponse(result), ...errors(401, 403, 503) },
+  }, handler);
+  register(api, 'get', '/billing/history', {
+    operationId: 'getPrepaidHistory', tags: ['Billing'], summary: 'Explain prepaid funding and elapsed compute consumption by allocation', security: cookieSecurity,
+    description: 'Read-only wallet snapshot with epoch-millisecond asOf, exact fractional consumption cents and lifetime totals. Active allocations are always included separately; currentHourlyCents sums unexpired leases. Completed resources and fundings paginate independently newest-first with returned ID cursors; limit defaults to 50, maximum 100. Retains 256 completed allocations plus current leases. Earlier settled usage and compacted allocations remain exact in unattributedUsedCents; historyTruncated signals unavailable attribution. Resource startAt begins attributable runtime, potentially later than allocation start for older leases. Retained unresolved leases have endAt null and active false after their budget expires. Provisioning and idle time are billed; reservations hold future funds and are not consumption. Funding createdAt is purchase time; revokedCents and reason describe current refund/dispute deductions without invented reversal dates. No Stripe request, guest provisioning, lease renewal or billing mutation occurs. Legacy subscription invoices are not prepaid history.',
+    request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(), resourceCursor: z.string().min(1).max(200).optional(), fundingCursor: z.string().min(1).max(200).optional() }) },
+    responses: { 200: jsonResponse(history), ...errors(400, 401, 403, 503) },
   }, handler);
   register(api, 'post', '/billing/topups', {
     operationId: 'createPrepaidTopup', tags: ['Billing'], summary: 'Create or recover embedded Stripe Checkout for a one-time balance purchase', security: cookieSecurity,

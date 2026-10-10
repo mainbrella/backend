@@ -13,6 +13,18 @@ export interface PrepaidBalance {
   spendLimitCents: number; monthlyUsageCents: number; productionHourlyCents: number; fundedRuntimeMs: number | null;
   minimumProductionRuntimeMs: number; autoRecharge: AutoRecharge;
 }
+export interface PrepaidResourceUsage {
+  id: string; containerId: string; name: string | null; lifecycle: 'ad_hoc' | 'production'; size: string;
+  startAt: number; endAt: number | null; runtimeMs: number; computeUnitHours: number;
+  usedCents: number; reservedCents: number; hourlyCents: number; active: boolean;
+}
+export interface PrepaidHistory {
+  asOf: number; balance: PrepaidBalance;
+  totals: { fundedCents: number; revokedCents: number; usedCents: number; unattributedUsedCents: number };
+  currentHourlyCents: number; activeResources: PrepaidResourceUsage[]; resources: PrepaidResourceUsage[];
+  fundings: { id: string; createdAt: number; amountCents: number; revokedCents: number; reason: 'refund' | 'dispute' | null }[];
+  nextResourceCursor: string | null; nextFundingCursor: string | null; historyTruncated: boolean; retainedResourceLimit: 256;
+}
 export interface PrepaidRechargeEntry { identifier: string; userId?: string; customerId: string; amountCents: number; paymentIntentId?: string; createdAt: number }
 export interface RechargeResult { status: 'succeeded' | 'processing' | 'requires_action' | 'failed'; paymentIntentId?: string; funding?: Funding }
 interface Charge {
@@ -48,14 +60,14 @@ export async function prepaidAccount(env: BillingEnv, userId: string): Promise<P
 export async function prepaidAccountByCustomer(env: BillingEnv, customerId: string): Promise<PrepaidAccount | null> {
   return env.DB.prepare('SELECT user_id, stripe_customer_id, payment_method_id, latest_payment_intent_id FROM prepaid_accounts WHERE stripe_customer_id = ?').bind(customerId).first<PrepaidAccount>();
 }
-export async function accountBillingRequest(env: BillingEnv, userId: string, path: string, body?: unknown): Promise<{ balance: PrepaidBalance }> {
+export async function accountBillingRequest<T = { balance: PrepaidBalance }>(env: BillingEnv, userId: string, path: string, body?: unknown): Promise<T> {
   if (!env.CONTAINER_ACCOUNT) throw new Error('billing_unavailable');
   const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${userId}`));
   const response = await account.fetch(new Request(`https://internal${path}`, {
     method: body === undefined ? 'GET' : 'POST', headers: { 'x-mainbrella-user': userId, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
-  const result = await response.json() as { balance: PrepaidBalance; error?: string };
+  const result = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(result.error ?? 'billing_unavailable');
   return result;
 }

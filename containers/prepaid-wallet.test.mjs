@@ -30,6 +30,70 @@ test('short allocations accumulate exact lifetime cost without per-start or per-
   assert.equal(f.wallet.metrics(f.state).remaining, 500 * UNIT_MS_PER_CENT - 100);
 });
 
+test('history reconciles exact live runtime, renewals, settlement retries and reused slots', () => {
+  const f = fixture(), first = f.lease(60000, 'small');
+  first.name = 'Build machine'; first.lifecycle = 'production';
+  f.state.leases.small = first; f.wallet.track(f.state, first, 'small');
+  f.advance(10000); f.wallet.record(f.state, first, f.now());
+  f.wallet.record(f.state, first, f.now());
+  first.endAt += 60000; f.advance(5000);
+  const before = structuredClone(f.state), live = f.wallet.history(f.state);
+  assert.deepEqual(f.state, before); // A read does not settle or renew runtime.
+  assert.equal(live.activeResources[0].runtimeMs, 15000);
+  assert.equal(live.activeResources[0].usedCents, 15000 * 6 / UNIT_MS_PER_CENT);
+  assert.equal(live.currentHourlyCents, 12);
+  assert.equal(live.totals.unattributedUsedCents, 0);
+  assert.equal(live.balance.balanceCents, Math.floor(live.totals.fundedCents - live.totals.revokedCents - live.totals.usedCents));
+  f.wallet.record(f.state, first, f.now()); f.wallet.finish(f.state, first, f.now()); delete f.state.leases.small;
+  const second = f.lease(10000); f.state.leases.small = second; f.wallet.track(f.state, second, 'small');
+  f.advance(1000);
+  const history = f.wallet.history(f.state);
+  assert.notEqual(history.resources[0].id, history.activeResources[0].id);
+  assert.equal(history.resources[0].runtimeMs, 15000);
+  assert.equal(history.resources[0].endAt, first.startAt + 15000);
+  assert.equal(history.resources[0].reservedCents, 0);
+  assert.equal(history.activeResources[0].runtimeMs, 1000);
+  assert.equal(history.totals.usedCents, (15000 * 6 + 1000) / UNIT_MS_PER_CENT);
+});
+
+test('history never fabricates pretracking usage and preserves lifetime consumption after compaction', () => {
+  const f = fixture();
+  f.state.wallet.usedUnitMs = 100000;
+  const old = f.lease(10000); old.startAt -= 100000;
+  f.state.leases.small = old; f.advance(1000);
+  const legacy = f.wallet.history(f.state);
+  assert.equal(legacy.totals.unattributedUsedCents, 100000 / UNIT_MS_PER_CENT);
+  assert.equal(legacy.activeResources[0].startAt, old.meteredUntil);
+  assert.equal(legacy.activeResources[0].runtimeMs, 1000);
+  assert.equal(legacy.historyTruncated, true);
+  f.wallet.record(f.state, old, f.now()); f.wallet.finish(f.state, old, f.now()); delete f.state.leases.small;
+  for (let index = 0; index < 260; index++) {
+    const lease = f.lease(1); f.state.leases.small = lease; f.wallet.track(f.state, lease, 'small');
+    f.advance(1); f.wallet.record(f.state, lease, f.now()); f.wallet.finish(f.state, lease, f.now()); delete f.state.leases.small;
+  }
+  const history = f.wallet.history(f.state, { limit: 100 });
+  assert.equal(Object.keys(f.state.wallet.resources).length, 256);
+  assert.equal(history.resources.length, 100);
+  assert.equal(history.totals.usedCents, 101260 / UNIT_MS_PER_CENT);
+  assert.equal(history.totals.unattributedUsedCents, 101004 / UNIT_MS_PER_CENT);
+  const next = f.wallet.history(f.state, { limit: 100, resourceCursor: history.nextResourceCursor });
+  assert.equal(next.resources.length, 100);
+  assert.equal(new Set([...history.resources, ...next.resources].map(row => row.id)).size, 200);
+  assert.throws(() => f.wallet.history(f.state, { resourceCursor: 'missing' }), /invalid_history_cursor/);
+});
+
+test('funding history reports original credits and current deductions with purchase timestamps', () => {
+  const f = fixture();
+  f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 100 });
+  f.wallet.applyFunding(f.state, { ...f.payment, id: 'cs_free', createdAt: f.now() + 1, disputed: true });
+  const first = f.wallet.history(f.state, { limit: 1 });
+  assert.deepEqual(first.totals, { fundedCents: 1000, revokedCents: 600, usedCents: 0, unattributedUsedCents: 0 });
+  assert.deepEqual(first.fundings[0], { id: 'cs_free', createdAt: f.now() + 1, amountCents: 500, revokedCents: 500, reason: 'dispute' });
+  const second = f.wallet.history(f.state, { limit: 1, fundingCursor: first.nextFundingCursor });
+  assert.deepEqual(second.fundings[0], { id: 'pi_paid', createdAt: f.payment.createdAt, amountCents: 500, revokedCents: 100, reason: 'refund' });
+  assert.equal(second.nextFundingCursor, null);
+});
+
 test('out-of-order refund and dispute observations cannot restore reversed money', () => {
   const f = fixture();
   f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 250 });

@@ -1,22 +1,28 @@
 import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
 import { type BillingEnv } from '../lib/stripe';
 import { accountBillingRequest, completePrepaidCheckout, createPrepaidCheckout, enableRechargePaymentMethod, ensurePrepaidAccount,
-  MAX_TOPUP_CENTS, MIN_TOPUP_CENTS, prepaidAccount, prepaidBillingConfigured, stripeID, validTopupAmount } from '../lib/prepaid-billing';
+  MAX_TOPUP_CENTS, MIN_TOPUP_CENTS, prepaidAccount, prepaidBillingConfigured, stripeID, validTopupAmount, type PrepaidHistory } from '../lib/prepaid-billing';
 
 export async function handlePrepaidBillingRequest(request: Request, env: BillingEnv): Promise<Response> {
-  const path = new URL(request.url).pathname;
+  const url = new URL(request.url), path = url.pathname;
   const cors = authCorsHeaders(request);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (path === '/billing/config' && request.method === 'GET') return authJson({ configured: prepaidBillingConfigured(env) && Boolean(env.STRIPE_PUBLISHABLE_KEY), minTopupCents: MIN_TOPUP_CENTS, maxTopupCents: MAX_TOPUP_CENTS }, 200, cors);
-  if (!['/billing/balance', '/billing/topups', '/billing/topups/complete', '/billing/settings'].includes(path)) return authJson({ error: 'not_found' }, 404, cors);
-  if (request.method !== (path === '/billing/balance' ? 'GET' : 'POST')) return authJson({ error: 'method_not_allowed' }, 405, cors);
+  if (!['/billing/balance', '/billing/history', '/billing/topups', '/billing/topups/complete', '/billing/settings'].includes(path)) return authJson({ error: 'not_found' }, 404, cors);
+  if (request.method !== (path === '/billing/balance' || path === '/billing/history' ? 'GET' : 'POST')) return authJson({ error: 'method_not_allowed' }, 405, cors);
   if (request.method === 'POST' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
   let lock: { userId: string; token: string } | undefined;
   try {
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (path === '/billing/balance') return authJson(await accountBillingRequest(env, user.id, '/billing/balance'), 200, cors);
+    if (path === '/billing/history') {
+      const query = url.searchParams, limit = Number(query.get('limit') ?? 50);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100 || [...query.keys()].some(key => !['limit', 'resourceCursor', 'fundingCursor'].includes(key))
+        || ['resourceCursor', 'fundingCursor'].some(key => query.has(key) && (!query.get(key) || query.get(key)!.length > 200))) return authJson({ error: 'invalid_request' }, 400, cors);
+      return authJson(await accountBillingRequest<PrepaidHistory>(env, user.id, `/billing/history${url.search}`), 200, cors);
+    }
     const body = await readJSON(request, 4096);
     if (!body) return authJson({ error: 'invalid_request' }, 400, cors);
     if (!prepaidBillingConfigured(env)) return authJson({ error: 'billing_unavailable' }, 503, cors);
@@ -58,6 +64,7 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
     return authJson(result, 200, cors);
   } catch (error) {
     const code = error instanceof Error ? error.message : 'billing_unavailable';
+    if (code === 'invalid_history_cursor') return authJson({ error: code }, 400, cors);
     const forbidden = ['checkout_not_owned', 'payment_not_owned', 'request_not_owned'];
     const conflicts = ['topup_request_conflict', 'topup_already_complete', 'topup_expired', 'payment_pending', 'billing_reconciliation_required', 'spend_limit_below_committed_usage', 'spend_limit_below_committed', 'auto_recharge_pending'];
     if (forbidden.includes(code)) return authJson({ error: code }, 403, cors);

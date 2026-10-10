@@ -100,6 +100,39 @@ test('prepaid billing is routed, uses cookies, and requires trusted origins for 
   assert.equal(f.calls.length, 0);
 });
 
+test('history reads use the owned controller, validate pagination and work without Stripe configuration', async t => {
+  const f = await fixture(t);
+  const now = Date.UTC(2026, 9, 9), stored = new Map<string, any>();
+  const storage = { async get(key: string) { return structuredClone(stored.get(key)); },
+    async put(key: string, value: any) { stored.set(key, structuredClone(value)); },
+    async getAlarm() { return null; }, async setAlarm() {}, async deleteAlarm() {} };
+  const controller = new ContainerAccountController({ storage } as any, () => { throw new Error('history_must_not_allocate_compute'); }, () => now);
+  f.env.CONTAINER_ACCOUNT = { idFromName: (name: string) => name, get: (name: string) => {
+    assert.equal(name, `account:${TEST_USER}`); return { fetch: (request: Request) => controller.fetch(request) };
+  } } as any;
+  const funding = { id: 'pi_history', customerId: TEST_CUSTOMER, amountCents: 2000, refundedCents: 500, disputed: false, createdAt: now - 1000, kind: 'topup' };
+  assert.equal((await controller.fetch(new Request('https://internal/billing/funding', {
+    method: 'POST', headers: { 'x-mainbrella-user': TEST_USER }, body: JSON.stringify(funding),
+  }))).status, 200);
+  f.env.STRIPE_SECRET_KEY = ''; f.env.STRIPE_PREPAID_PRICE_ID = undefined;
+  const before = structuredClone(stored), response = await handleRequest(billingRequest('/billing/history?limit=1'), f.env);
+  assert.equal(response.status, 200);
+  const history = await response.json() as any;
+  assert.equal(history.asOf, now); assert.equal(history.balance.balanceCents, 1500);
+  assert.deepEqual(history.totals, { fundedCents: 2000, revokedCents: 500, usedCents: 0, unattributedUsedCents: 0 });
+  assert.deepEqual(history.fundings, [{ id: 'pi_history', createdAt: now - 1000, amountCents: 2000, revokedCents: 500, reason: 'refund' }]);
+  assert.deepEqual(stored, before); assert.equal(f.calls.length, 0);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  for (const query of ['limit=0', 'limit=101', 'limit=1.5', 'limit=no', 'fundingCursor=', 'userId=someone']) {
+    assert.equal((await handlePrepaidBillingRequest(billingRequest(`/billing/history?${query}`), f.env)).status, 400);
+  }
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/history?fundingCursor=missing'), f.env)).status, 400);
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/history', undefined, false), f.env)).status, 401);
+  assert.equal((await handlePrepaidBillingRequest(new Request('https://api.mainbrella.com/billing/history', { headers: { Authorization: 'Bearer browser_token' } }), f.env)).status, 401);
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/history', {}, true), f.env)).status, 405);
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/history', undefined, true, 'https://attacker.example'), f.env)).status, 403);
+});
+
 test('topups create payment Checkout with a single Product, validated amount and immutable request identity', async t => {
   const f = await fixture(t);
   f.sqlite.prepare('DELETE FROM prepaid_topups').run();

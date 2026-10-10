@@ -35,7 +35,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/trial": ["post"], "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
   "/subscription/usage": ["get", "post"], "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
-  '/billing/config': ['get'], '/billing/balance': ['get'], '/billing/topups': ['post'], '/billing/topups/complete': ['post'], '/billing/settings': ['post'],
+  '/billing/config': ['get'], '/billing/balance': ['get'], '/billing/history': ['get'], '/billing/topups': ['post'], '/billing/topups/complete': ['post'], '/billing/settings': ['post'],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
   "/containers/files": ["get", "put"],
@@ -173,6 +173,10 @@ test("OpenAPI 3.1 documents every current endpoint with unique operation IDs and
 test('prepaid schemas expose one-time funding, payment verification and consent-based auto recharge', async () => {
   const { paths, components } = await document();
   assert.deepEqual(paths['/billing/balance'].get.security, [{ cookieAuth: [] }]);
+  assert.deepEqual(paths['/billing/history'].get.security, [{ cookieAuth: [] }]);
+  assert.equal(paths['/billing/history'].get.operationId, 'getPrepaidHistory');
+  assert.match(paths['/billing/history'].get.description, /unattributedUsedCents/);
+  assert.equal(paths['/billing/history'].get.parameters.find((parameter: any) => parameter.name === 'limit').schema.maximum, 100);
   const purchase = paths['/billing/topups'].post;
   assert.deepEqual(purchase.security, [{ cookieAuth: [] }]);
   assert.match(purchase.summary, /embedded Stripe Checkout/);

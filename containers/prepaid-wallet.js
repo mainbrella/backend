@@ -5,6 +5,7 @@ import { USAGE_PRICING, validSpendLimit } from './usage-policy.js';
 // only happens when presenting cents, never when reserving or settling funds.
 export const UNIT_MS_PER_CENT = 3600000 / USAGE_PRICING.centsPerComputeUnitHour;
 export const MINIMUM_PRODUCTION_RUNTIME_MS = 86400000;
+export const RETAINED_RESOURCE_LIMIT = 256;
 export const prepaidState = state => Boolean(state.wallet || state.entitlement?.billing?.kind === 'prepaid');
 export function utcPeriod(at) {
   const date = new Date(at);
@@ -28,8 +29,8 @@ export class PrepaidWallet {
     }
     return state.wallet;
   }
-  metrics(state) {
-    const now = this.account.now(), wallet = state.wallet;
+  metrics(state, now = this.account.now()) {
+    const wallet = state.wallet;
     const { periodStart, periodEnd } = utcPeriod(now);
     const leases = prepaidLeases(state);
     const funded = Object.values(wallet?.fundings ?? {}).reduce((sum, funding) => sum + (funding.disputed ? 0 : funding.amountCents - funding.refundedCents), 0) * UNIT_MS_PER_CENT;
@@ -49,13 +50,83 @@ export class PrepaidWallet {
   record(state, lease, stoppedAt) {
     const wallet = this.ensure(state, lease.billing.customerId);
     const end = Math.max(lease.meteredUntil, Math.min(stoppedAt, lease.endAt));
-    wallet.usedUnitMs += (end - lease.meteredUntil) * machineSize(lease.size).computeUnits;
+    const runtimeMs = end - lease.meteredUntil;
+    const containerId = Object.entries(state.leases ?? {}).find(([, value]) => value === lease)?.[0];
+    const resource = this.track(state, lease, containerId);
+    if (resource) {
+      resource.runtimeMs += runtimeMs;
+      resource.unitMs += runtimeMs * machineSize(lease.size).computeUnits;
+      resource.name = lease.name ?? null;
+      resource.lifecycle = lease.lifecycle ?? 'ad_hoc';
+    }
+    wallet.usedUnitMs += runtimeMs * machineSize(lease.size).computeUnits;
     for (let at = lease.meteredUntil; at < end;) {
       const until = Math.min(end, utcPeriod(at).periodEnd), month = new Date(at).toISOString().slice(0, 7);
       wallet.monthlyUnitMs[month] = (wallet.monthlyUnitMs[month] ?? 0) + (until - at) * machineSize(lease.size).computeUnits;
       at = until;
     }
     lease.meteredUntil = end;
+  }
+  track(state, lease, containerId) {
+    if (!containerId || lease.billing?.kind !== 'prepaid') return null;
+    const wallet = this.ensure(state, lease.billing.customerId);
+    wallet.resources ??= {};
+    lease.resourceHistoryId ??= crypto.randomUUID();
+    // Never attribute previously settled wallet usage to a reconstructed lease.
+    return wallet.resources[lease.resourceHistoryId] ??= { id: lease.resourceHistoryId, containerId,
+      name: lease.name ?? null, lifecycle: lease.lifecycle ?? 'ad_hoc', size: lease.size,
+      startAt: lease.meteredUntil, endAt: null, runtimeMs: 0, unitMs: 0 };
+  }
+  finish(state, lease, stoppedAt) {
+    const resource = state.wallet?.resources?.[lease.resourceHistoryId];
+    if (!resource) return;
+    resource.endAt = Math.max(resource.startAt, lease.meteredUntil, Math.min(stoppedAt, lease.endAt));
+    const completed = Object.values(state.wallet.resources).filter(row => row.endAt !== null)
+      .sort((a, b) => b.startAt - a.startAt || b.id.localeCompare(a.id));
+    for (const row of completed.slice(RETAINED_RESOURCE_LIMIT)) {
+      delete state.wallet.resources[row.id];
+      state.wallet.resourceHistoryCompacted = true;
+    }
+  }
+  history(state, { limit = 50, resourceCursor = null, fundingCursor = null } = {}) {
+    const asOf = this.account.now(), m = this.metrics(state, asOf);
+    const leases = Object.entries(state.leases ?? {}).filter(([, lease]) => lease.billing?.kind === 'prepaid');
+    const toResource = (row, lease = null) => {
+      const size = machineSize(row.size), live = lease ? unitsBetween(lease, lease.meteredUntil, asOf) : 0;
+      return { id: row.id, containerId: row.containerId, name: lease?.name ?? row.name,
+        lifecycle: lease?.lifecycle ?? row.lifecycle, size: row.size, startAt: row.startAt, endAt: row.endAt,
+        runtimeMs: row.runtimeMs + live / size.computeUnits, computeUnitHours: (row.unitMs + live) / 3600000,
+        usedCents: (row.unitMs + live) / UNIT_MS_PER_CENT,
+        reservedCents: lease ? unitsBetween(lease, asOf, Infinity) / UNIT_MS_PER_CENT : 0,
+        hourlyCents: size.computeUnits * USAGE_PRICING.centsPerComputeUnitHour,
+        active: Boolean(lease && lease.endAt > asOf) };
+    };
+    const activeResources = leases.map(([containerId, lease]) => toResource(state.wallet?.resources?.[lease.resourceHistoryId]
+      ?? { id: `untracked:${containerId}:${lease.startAt}`, containerId, name: lease.name ?? null,
+        lifecycle: lease.lifecycle ?? 'ad_hoc', size: lease.size, startAt: lease.meteredUntil, endAt: null, runtimeMs: 0, unitMs: 0 }, lease));
+    const completed = Object.values(state.wallet?.resources ?? {}).filter(row => row.endAt !== null)
+      .sort((a, b) => b.startAt - a.startAt || b.id.localeCompare(a.id));
+    const fundings = Object.values(state.wallet?.fundings ?? {}).sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+      .map(row => ({ id: row.id, createdAt: row.createdAt, amountCents: row.amountCents,
+        revokedCents: row.disputed ? row.amountCents : row.refundedCents,
+        reason: row.disputed ? 'dispute' : row.refundedCents ? 'refund' : null }));
+    const page = (rows, cursor) => {
+      const start = cursor === null ? 0 : rows.findIndex(row => row.id === cursor) + 1;
+      if (cursor !== null && start === 0) throw new Error('invalid_history_cursor');
+      const values = rows.slice(start, start + limit);
+      return { values, next: start + limit < rows.length ? values.at(-1).id : null };
+    };
+    const resources = page(completed, resourceCursor), fundingPage = page(fundings, fundingCursor);
+    const usedCents = ((state.wallet?.usedUnitMs ?? 0) + m.live) / UNIT_MS_PER_CENT;
+    const attributedUnitMs = Object.values(state.wallet?.resources ?? {}).reduce((sum, row) => sum + row.unitMs, 0);
+    const unattributedUsedCents = Math.max(0, (state.wallet?.usedUnitMs ?? 0) - attributedUnitMs) / UNIT_MS_PER_CENT;
+    return { asOf, balance: this.status(state, asOf), totals: {
+      fundedCents: fundings.reduce((sum, row) => sum + row.amountCents, 0),
+      revokedCents: fundings.reduce((sum, row) => sum + row.revokedCents, 0), usedCents, unattributedUsedCents },
+      currentHourlyCents: activeResources.filter(row => row.active).reduce((sum, row) => sum + row.hourlyCents, 0),
+      activeResources, resources: resources.values.map(row => toResource(row)), fundings: fundingPage.values,
+      nextResourceCursor: resources.next, nextFundingCursor: fundingPage.next,
+      historyTruncated: Boolean(state.wallet?.resourceHistoryCompacted || unattributedUsedCents > 0), retainedResourceLimit: RETAINED_RESOURCE_LIMIT };
   }
   applyFunding(state, funding) {
     if (!funding || !/^(?:pi|cs)_[A-Za-z0-9_]+$/.test(funding.id) || funding.kind !== 'topup'
@@ -71,10 +142,10 @@ export class PrepaidWallet {
   productionUnits(state) {
     return Object.values(state.production ?? {}).reduce((sum, desired) => sum + machineSize(desired.selection.size).computeUnits, 0);
   }
-  productionFunding(state) {
-    const m = this.metrics(state);
+  productionFunding(state, now = this.account.now()) {
+    const m = this.metrics(state, now);
     const productionReserved = prepaidLeases(state).filter(lease => lease.lifecycle === 'production')
-      .reduce((sum, lease) => sum + unitsBetween(lease, this.account.now(), Infinity), 0);
+      .reduce((sum, lease) => sum + unitsBetween(lease, now, Infinity), 0);
     return Math.max(0, m.remaining + productionReserved);
   }
   canLaunchProduction(state, size) {
@@ -86,13 +157,13 @@ export class PrepaidWallet {
     return !state.wallet?.fundingRevoked && this.productionFunding(state) >= needed
       && (state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - adHocReserved >= needed;
   }
-  status(state) {
-    const m = this.metrics(state), settings = state.wallet?.autoRecharge ?? { enabled: false, amountCents: 500, monthlyLimitCents: 500, status: 'disabled' };
+  status(state, now = this.account.now()) {
+    const m = this.metrics(state, now), settings = state.wallet?.autoRecharge ?? { enabled: false, amountCents: 500, monthlyLimitCents: 500, status: 'disabled' };
     const units = this.productionUnits(state);
     return { balanceCents: Math.floor(m.balance / UNIT_MS_PER_CENT), availableBalanceCents: Math.floor(Math.max(0, m.remaining) / UNIT_MS_PER_CENT),
       reservedBalanceCents: Math.ceil(m.reserved / UNIT_MS_PER_CENT), currency: 'usd', spendLimitCents: state.spendLimitCents ?? 500,
       monthlyUsageCents: Math.ceil(m.monthly / UNIT_MS_PER_CENT), productionHourlyCents: units * USAGE_PRICING.centsPerComputeUnitHour,
-      fundedRuntimeMs: units ? Math.floor(this.productionFunding(state) / units) : null,
+      fundedRuntimeMs: units ? Math.floor(this.productionFunding(state, now) / units) : null,
       minimumProductionRuntimeMs: MINIMUM_PRODUCTION_RUNTIME_MS,
       autoRecharge: { ...settings, spentCents: state.wallet?.rechargeSpending?.[m.month] ?? 0 } };
   }

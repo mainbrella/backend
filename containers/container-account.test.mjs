@@ -83,6 +83,33 @@ test('prepaid balance reads never provision and an empty wallet cannot start com
   assert.equal([...f.machines.values()].reduce((sum, machine) => sum + machine.ctx.container.starts, 0), 0);
 });
 
+test('prepaid history survives production renewal, restart, stop and slot reuse without mutating reads', async () => {
+  const f = fixture('prepaid');
+  const empty = await f.billingRequest(undefined, '/billing/history');
+  assert.equal(empty.status, 200); assert.deepEqual(empty.data.activeResources, []); assert.equal(f.machines.size, 0);
+  await fund(f); await walletSettings(f, { spendLimitCents: 5000 });
+  assert.equal((await f.read('POST', undefined, {}, { ...production, name: 'API service' })).status, 200);
+  f.setTime(f.now() + 60000); await f.alarm(); f.restart();
+  f.setTime(f.now() + 30000);
+  const stored = await f.ctx.storage.get('containerAccount');
+  const first = (await f.billingRequest(undefined, '/billing/history')).data;
+  assert.deepEqual(await f.ctx.storage.get('containerAccount'), stored);
+  assert.equal(first.activeResources.length, 1); assert.equal(first.activeResources[0].runtimeMs, 90000);
+  assert.equal(first.activeResources[0].name, 'API service'); assert.equal(first.currentHourlyCents, 2);
+  assert.equal((await f.read('DELETE', 'small')).status, 200);
+  assert.equal((await f.read('POST', undefined, {}, { size: 'small', name: 'Build job' })).status, 200);
+  f.setTime(f.now() + 1000); f.restart();
+  const history = (await f.billingRequest(undefined, '/billing/history')).data;
+  assert.equal(history.resources[0].runtimeMs, 90000);
+  assert.equal(history.resources[0].name, 'API service');
+  assert.equal(history.activeResources[0].name, 'Build job');
+  assert.notEqual(history.activeResources[0].id, first.activeResources[0].id);
+  assert.equal(history.totals.usedCents, 96000 / 1800000);
+  assert.equal(history.totals.unattributedUsedCents, 0);
+  assert.equal((await f.billingRequest(undefined, '/billing/history?limit=101')).status, 400);
+  assert.equal((await f.billingRequest(undefined, '/billing/history?resourceCursor=missing')).status, 400);
+});
+
 test('prepaid production requires 24 hours for the full desired fleet and shared concurrent funding', async () => {
   const f = fixture('prepaid');
   await fund(f, 500);

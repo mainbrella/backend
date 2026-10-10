@@ -13,12 +13,13 @@ export class AccountBilling {
     state.billingPeriods ??= {};
     return state.billingPeriods[billingPeriodKey(billing)] ??= { ...billing, unitMs: 0, resourceCharges: {} };
   }
-  attach(state, lease) {
+  attach(state, lease, containerId) {
     if (state.entitlement.plan !== 'usage') return;
     if (state.entitlement.billing?.kind === 'prepaid') {
       this.wallet.ensure(state, state.entitlement.billing.customerId);
       lease.billing = { ...state.entitlement.billing };
       lease.meteredUntil = lease.startAt;
+      this.wallet.track(state, lease, containerId);
       return;
     }
     const period = this.period(state);

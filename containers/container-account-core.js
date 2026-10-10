@@ -82,6 +82,7 @@ export class ContainerAccountController {
     const lease = state.leases[id];
     if (!lease) return;
     this.billing.record(state, lease, stoppedAt);
+    if (lease.billing?.kind === 'prepaid') this.billing.wallet.finish(state, lease, stoppedAt);
     const elapsed = Math.max(0, Math.min(lease.endAt, stoppedAt) - lease.startAt);
     const refund = lease.unitMs - elapsed * machineSize(lease.size).computeUnits;
     state.computeUsage[lease.month] = Math.max(0, (state.computeUsage[lease.month] ?? 0) - refund);
@@ -108,7 +109,7 @@ export class ContainerAccountController {
     const unitMs = (endAt - startAt) * size.computeUnits;
     state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
     state.leases[id] = { size: size.id, startAt, endAt, month, unitMs };
-    this.billing.attach(state, state.leases[id]);
+    this.billing.attach(state, state.leases[id], id);
     return endAt;
   }
   async stopIndependently(state, ids, entitlement) {
@@ -314,7 +315,7 @@ export class ContainerAccountController {
   async prepaidRequest(request, path) {
     const userId = request.headers.get('x-mainbrella-user');
     if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return this.respond({ error: 'not_authenticated' }, 401);
-    const read = path === '/billing/balance';
+    const read = path === '/billing/balance' || path === '/billing/history';
     if (request.method !== (read ? 'GET' : 'POST')) return this.respond({ error: 'method_not_allowed' }, 405);
     const load = async () => {
       const stored = await this.ctx.storage.get(KEY);
@@ -325,7 +326,13 @@ export class ContainerAccountController {
     try {
       // Entitlement refresh can call this same DO while an alarm holds the
       // mutation lock. A balance read neither acquires it nor provisions guests.
-      if (read) return this.respond({ balance: this.billing.wallet.status(await load()) });
+      if (read) {
+        const state = await load();
+        if (path === '/billing/balance') return this.respond({ balance: this.billing.wallet.status(state) });
+        const query = new URL(request.url).searchParams, limit = Number(query.get('limit') ?? 50);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100 || [...query.keys()].some(key => !['limit', 'resourceCursor', 'fundingCursor'].includes(key))) throw new Error('invalid_request');
+        return this.respond(this.billing.wallet.history(state, { limit, resourceCursor: query.get('resourceCursor'), fundingCursor: query.get('fundingCursor') }));
+      }
       return await this.serialized(async () => {
         const state = await load(), body = await request.json();
         if (path === '/billing/settings') this.billing.wallet.settings(state, body);
@@ -346,12 +353,12 @@ export class ContainerAccountController {
       });
     } catch (error) {
       const status = error.message === 'account_mismatch' ? 403 : error.message === 'spend_limit_below_committed_usage' || error.message === 'payment_conflict' ? 409 : 400;
-      return this.respond({ error: ['account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge'].includes(error.message) ? error.message : 'invalid_request' }, status);
+      return this.respond({ error: ['account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge','invalid_history_cursor'].includes(error.message) ? error.message : 'invalid_request' }, status);
     }
   }
   async fetch(request) {
     const url = new URL(request.url);
-    if (['/billing/balance', '/billing/funding', '/billing/settings'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
+    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       return this.serialized(async () => {
@@ -485,7 +492,7 @@ export class ContainerAccountController {
             state.leases[slot].lifecycle = 'production';
             this.production.remember(state, slot, { ...selection, size: size.id });
           }
-          this.billing.attach(state, state.leases[slot]);
+          this.billing.attach(state, state.leases[slot], slot);
           state.pending[slot] = this.now();
           const reservationId = ++state.nextReservationId;
           state.reservations[slot] = reservationId;
