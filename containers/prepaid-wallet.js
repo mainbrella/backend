@@ -58,7 +58,7 @@ export class PrepaidWallet {
     lease.meteredUntil = end;
   }
   applyFunding(state, funding) {
-    if (!funding || !/^pi_[A-Za-z0-9_]+$/.test(funding.id) || funding.kind !== 'topup'
+    if (!funding || !/^(?:pi|cs)_[A-Za-z0-9_]+$/.test(funding.id) || funding.kind !== 'topup'
       || !Number.isSafeInteger(funding.amountCents) || funding.amountCents < 500 || funding.amountCents > 100000
       || !Number.isSafeInteger(funding.refundedCents) || funding.refundedCents < 0 || funding.refundedCents > funding.amountCents
       || typeof funding.disputed !== 'boolean' || !Number.isSafeInteger(funding.createdAt) || funding.createdAt <= 0) throw new Error('invalid_payment');

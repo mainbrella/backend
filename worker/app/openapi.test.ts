@@ -179,12 +179,16 @@ test('prepaid schemas expose one-time funding, payment verification and consent-
   assert.match(purchase.description, /publishable key/);
   assert.deepEqual(Object.keys(purchase.responses['200'].content['application/json'].schema.properties).sort(), ['client_secret', 'publishable_key', 'sessionId'].sort());
   assert.match(purchase.description, /No subscription is created/);
+  assert.match(purchase.description, /Stripe promotion codes/);
+  assert.match(purchase.description, /selected amountCents remains the compute balance purchased/);
+  assert.match(purchase.description, /no-payment-required/);
   assert.match(purchase.description, /client-supplied credit amounts never authorize/i);
   const body = purchase.requestBody.content['application/json'].schema;
   assert.equal(body.properties.amountCents.minimum, 500);
   assert.equal(body.properties.amountCents.maximum, 100000);
   assert.equal(body.properties.requestId.format, 'uuid');
   assert.match(paths['/billing/topups/complete'].post.description, /Pending payments do not increase/);
+  assert.match(paths['/billing/topups/complete'].post.description, /Refunds revoke the corresponding proportion/);
   assert.match(paths['/billing/settings'].post.description, /explicitly authorizes/);
   assert.ok(components.schemas.PrepaidBalance.properties.autoRecharge);
   assert.ok(components.schemas.PrepaidBalance.properties.availableBalanceCents);

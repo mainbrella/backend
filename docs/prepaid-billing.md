@@ -1,7 +1,9 @@
 # Prepaid compute billing
 
-New purchases are one-time payments of $5–$1,000 USD. Every dollar paid adds
-one dollar of balance, with identical compute rates and account limits.
+New purchases add $5–$1,000 USD of compute balance through one-time Checkout.
+Stripe promotion codes discount the price without reducing the selected
+compute balance. Without a discount, every dollar paid adds one dollar of
+balance, with identical compute rates and account limits.
 Thirty-six $5 payments equal $180; two hundred equal $1,000. Credit carries
 forward. There is no new monthly subscription, start fee, or bulk bonus.
 
@@ -32,6 +34,15 @@ mount the Checkout form; the secret key still creates sessions and verifies
 payments on the server. New purchases are unavailable until both keys and the
 reference Price are configured. Balance, completion verification and billing
 settings remain available without the publishable key.
+Checkout enables Stripe promotion codes backed by Stripe coupons. Create these
+codes in the matching test/live Stripe Dashboard; product-restricted coupons
+must include the Compute Credit Product. The existing Mainbrella trial-coupon
+system is separate. For example, a 50% code on a $20 top-up charges $10 and adds
+$20 of compute balance. The server verifies Stripe's live subtotal and discount
+against the saved purchase, and checks the actual captured card payment.
+A 100% discount credits only a completed `no_payment_required` Checkout, using
+its session ID instead of a PaymentIntent ID. Automatic recharge uses its
+explicitly authorized amount and does not apply promotion codes.
 Configure `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` separately for each
 mode. Send signed events to `/subscription/webhook`, including
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
@@ -39,6 +50,8 @@ mode. Send signed events to `/subscription/webhook`, including
 Keep legacy subscription/invoice event delivery while legacy subscriptions
 exist. A browser return alone cannot add funds: the server verifies live
 payment and charge ownership, currency, amount, capture, and refund state.
+Refunds revoke the corresponding proportion of compute credit, rounded up to
+the next cent; a full refund or dispute revokes the full purchase credit.
 
 Automatic recharge is disabled by default. Enabling it explicitly consents
 to storing a verified card and charging a chosen amount within an independent

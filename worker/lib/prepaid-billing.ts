@@ -27,8 +27,9 @@ interface PaymentIntent {
 }
 export interface PrepaidCheckout {
   id: string; url: string | null; mode: string; status: string; payment_status: string; currency: string;
-  amount_total: number; customer: string; client_reference_id: string; payment_intent: string | null;
-  metadata: Record<string, string>; ui_mode?: string; client_secret?: string;
+  amount_total: number; amount_subtotal: number; total_details: { amount_discount: number; amount_tax: number; amount_shipping: number };
+  customer: string; client_reference_id: string; payment_intent: string | null;
+  metadata: Record<string, string>; ui_mode?: string; client_secret?: string; allow_promotion_codes?: boolean;
 }
 interface Topup { request_id: string; user_id: string; stripe_customer_id: string; amount_cents: number; checkout_session_id: string | null; created_at: number }
 interface ReferencePrice { id: string; active: boolean; type: string; currency: string; unit_amount: number; recurring: unknown; product: { id: string; active: boolean } }
@@ -90,7 +91,10 @@ function fundingFromIntent(intent: PaymentIntent, account: PrepaidAccount): Fund
   if (!ownedIntent(intent, account)) throw new Error('payment_not_owned');
   if (intent.status !== 'succeeded') return null;
   const charge = intent.latest_charge;
-  if (intent.currency !== 'usd' || !validTopupAmount(intent.amount) || intent.amount_received !== intent.amount
+  const validAmount = intent.metadata.mainbrella_kind === 'prepaid_topup'
+    ? Number.isSafeInteger(intent.amount) && intent.amount > 0 && intent.amount <= MAX_TOPUP_CENTS
+    : validTopupAmount(intent.amount);
+  if (intent.currency !== 'usd' || !validAmount || intent.amount_received !== intent.amount
     || !Number.isSafeInteger(intent.created) || !charge || charge.customer !== account.stripe_customer_id
     || charge.payment_intent !== intent.id || charge.currency !== 'usd' || charge.amount !== intent.amount
     || charge.payment_method_details?.type !== 'card'
@@ -106,13 +110,43 @@ export async function verifyPrepaidPayment(env: BillingEnv, account: PrepaidAcco
   if (intent.id !== paymentIntentId) throw new Error('invalid_payment');
   return { funding: fundingFromIntent(intent, account), intent };
 }
-export async function applyPrepaidPayment(env: BillingEnv, account: PrepaidAccount, paymentIntentId: string): Promise<{ balance: PrepaidBalance } | null> {
+function verifyOwnedCheckout(session: PrepaidCheckout, account: PrepaidAccount, topup: Topup): void {
+  const discount = session.total_details?.amount_discount;
+  if (!stripeID(session.id, 'cs') || topup.user_id !== account.user_id || topup.stripe_customer_id !== account.stripe_customer_id
+    || (topup.checkout_session_id && topup.checkout_session_id !== session.id)
+    || session.customer !== account.stripe_customer_id || session.client_reference_id !== account.user_id
+    || session.mode !== 'payment' || session.currency !== 'usd' || session.metadata?.mainbrella_request_id !== topup.request_id
+    || !validTopupAmount(topup.amount_cents) || session.amount_subtotal !== topup.amount_cents
+    || !Number.isSafeInteger(discount) || discount < 0 || discount > topup.amount_cents
+    || session.total_details.amount_tax !== 0 || session.total_details.amount_shipping !== 0
+    || session.amount_total !== topup.amount_cents - discount) throw new Error('checkout_not_owned');
+}
+
+export async function applyPrepaidPayment(env: BillingEnv, account: PrepaidAccount, paymentIntentId: string, checkout?: PrepaidCheckout): Promise<{ balance: PrepaidBalance } | null> {
   const { funding, intent } = await verifyPrepaidPayment(env, account, paymentIntentId);
   if (!funding) return null;
   if (intent.metadata.mainbrella_kind === 'prepaid_topup') {
     const topup = await env.DB.prepare('SELECT request_id,user_id,stripe_customer_id,amount_cents,checkout_session_id,created_at FROM prepaid_topups WHERE request_id = ?')
       .bind(intent.metadata.mainbrella_request_id ?? '').first<Topup>();
-    if (!topup || topup.user_id !== account.user_id || topup.stripe_customer_id !== account.stripe_customer_id || topup.amount_cents !== funding.amountCents) throw new Error('payment_not_owned');
+    if (!topup || topup.user_id !== account.user_id || topup.stripe_customer_id !== account.stripe_customer_id) throw new Error('payment_not_owned');
+    let session = checkout;
+    if (!session && topup.checkout_session_id) session = await stripeRequest<PrepaidCheckout>(env, `/checkout/sessions/${encodeURIComponent(topup.checkout_session_id)}`);
+    if (!session) {
+      // PaymentIntent events can arrive before a lost Checkout creation response
+      // has been recovered. Find the live Session by its payment identity.
+      const params = new URLSearchParams({ payment_intent: intent.id, limit: '2' });
+      const page = await stripeRequest<{ data: PrepaidCheckout[]; has_more: boolean }>(env, `/checkout/sessions?${params}`);
+      if (page.has_more || page.data.length !== 1) throw new Error('billing_reconciliation_required');
+      session = page.data[0];
+    }
+    verifyOwnedCheckout(session, account, topup);
+    if (session.payment_intent !== intent.id || session.amount_total !== funding.amountCents) throw new Error('payment_not_owned');
+    if (session.status !== 'complete' || session.payment_status !== 'paid') throw new Error('payment_pending');
+    // Stripe verifies the discount; the immutable purchase amount is the compute
+    // credit. Refunds revoke the same proportion of that credit, rounded up.
+    funding.refundedCents = Math.ceil(funding.refundedCents * topup.amount_cents / funding.amountCents);
+    funding.amountCents = topup.amount_cents;
+    await env.DB.prepare('UPDATE prepaid_topups SET checkout_session_id = ? WHERE request_id = ?').bind(session.id, topup.request_id).run();
   }
   const result = await accountBillingRequest(env, account.user_id, '/billing/funding', funding);
   if (!funding.refundedCents && !funding.disputed) {
@@ -159,7 +193,7 @@ export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAcc
     if (Date.now() - entry.created_at >= 23 * 3600000) throw new Error('billing_reconciliation_required');
     const { balance } = await accountBillingRequest(env, account.user_id, '/billing/balance');
     const price = await prepaidReferencePrice(env);
-    const fields = new URLSearchParams({ mode: 'payment', ui_mode: 'custom', customer: account.stripe_customer_id,
+    const fields = new URLSearchParams({ mode: 'payment', ui_mode: 'custom', allow_promotion_codes: 'true', customer: account.stripe_customer_id,
       client_reference_id: account.user_id, 'payment_method_types[0]': 'card',
       'line_items[0][quantity]': '1',
       'metadata[mainbrella_request_id]': requestId, 'metadata[mainbrella_user_id]': account.user_id,
@@ -176,15 +210,13 @@ export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAcc
     if (balance.autoRecharge.enabled) fields.set('payment_intent_data[setup_future_usage]', 'off_session');
     session = await stripeRequest<PrepaidCheckout>(env, '/checkout/sessions', fields, `mainbrella-prepaid-topup-${requestId}`);
   }
-  if (!stripeID(session.id, 'cs') || session.customer !== account.stripe_customer_id || session.client_reference_id !== account.user_id
-    || session.mode !== 'payment' || session.currency !== 'usd' || session.amount_total !== amountCents
-    || session.metadata?.mainbrella_request_id !== requestId) throw new Error('checkout_not_owned');
+  verifyOwnedCheckout(session, account, entry);
   await env.DB.prepare('UPDATE prepaid_topups SET checkout_session_id = ? WHERE request_id = ?').bind(session.id, requestId).run();
   if (session.status === 'complete') throw new Error('topup_already_complete');
   if (session.status !== 'open') throw new Error('topup_expired');
-  if (session.ui_mode !== 'custom') {
-    // A previously created hosted session cannot be mounted in Elements. End
-    // it before telling the client to start a new, separately identified topup.
+  if (session.ui_mode !== 'custom' || session.allow_promotion_codes !== true) {
+    // Old hosted or promotion-disabled sessions need replacement. End them
+    // before the client starts a new, separately identified purchase.
     const expired = await stripeRequest<PrepaidCheckout>(env, `/checkout/sessions/${encodeURIComponent(session.id)}/expire`, new URLSearchParams());
     if (expired.id !== session.id || expired.status !== 'expired') throw new Error('billing_unavailable');
     throw new Error('topup_expired');
@@ -199,15 +231,22 @@ export async function completePrepaidCheckout(env: BillingEnv, account: PrepaidA
   // A webhook can recover the session ID when creation's Stripe response was lost.
   const request = receipt ?? await env.DB.prepare('SELECT request_id,user_id,stripe_customer_id,amount_cents,checkout_session_id,created_at FROM prepaid_topups WHERE request_id = ?')
     .bind(session.metadata?.mainbrella_request_id ?? '').first<Topup>();
-  if (!request || request.user_id !== account.user_id || request.stripe_customer_id !== account.stripe_customer_id
-    || session.id !== sessionId || session.mode !== 'payment' || session.customer !== account.stripe_customer_id
-    || session.client_reference_id !== account.user_id || session.metadata?.mainbrella_request_id !== request.request_id
-    || session.currency !== 'usd' || session.amount_total !== request.amount_cents) throw new Error('checkout_not_owned');
+  if (!request || session.id !== sessionId) throw new Error('checkout_not_owned');
+  verifyOwnedCheckout(session, account, request);
   if (session.status === 'expired') throw new Error('topup_expired');
-  if (session.status !== 'complete' || session.payment_status !== 'paid' || !session.payment_intent) throw new Error('payment_pending');
-  const verified = await verifyPrepaidPayment(env, account, session.payment_intent);
-  if (verified.intent.metadata?.mainbrella_request_id !== request.request_id) throw new Error('payment_not_owned');
-  const result = await applyPrepaidPayment(env, account, session.payment_intent);
+  if (session.status !== 'complete') throw new Error('payment_pending');
+  if (session.amount_total === 0 && session.payment_status === 'no_payment_required' && session.payment_intent === null) {
+    // Stripe creates no PaymentIntent for a 100% discount. A completed live
+    // Session is the funding identity, shared by browser and webhook retries.
+    const result = await accountBillingRequest(env, account.user_id, '/billing/funding', {
+      id: session.id, customerId: account.stripe_customer_id, amountCents: request.amount_cents,
+      refundedCents: 0, disputed: false, createdAt: request.created_at, kind: 'topup',
+    } satisfies Funding);
+    await env.DB.prepare('UPDATE prepaid_topups SET checkout_session_id = ? WHERE request_id = ?').bind(session.id, request.request_id).run();
+    return result;
+  }
+  if (session.payment_status !== 'paid' || !session.payment_intent) throw new Error('payment_pending');
+  const result = await applyPrepaidPayment(env, account, session.payment_intent, session);
   if (!result) throw new Error('payment_pending');
   await env.DB.prepare('UPDATE prepaid_topups SET checkout_session_id = ? WHERE request_id = ?').bind(session.id, request.request_id).run();
   return result;

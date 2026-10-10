@@ -22,13 +22,13 @@ export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHan
   }, handler);
   register(api, 'post', '/billing/topups', {
     operationId: 'createPrepaidTopup', tags: ['Billing'], summary: 'Create or recover embedded Stripe Checkout for a one-time balance purchase', security: cookieSecurity,
-    description: 'Requires browser cookie, trusted Origin and configured Stripe publishable key. Send a fresh UUID per purchase and retain it until Checkout returns; repeating the same UUID recovers the same purchase and cannot change its amount. Payment is verified before crediting. No subscription is created. Each dollar paid adds one dollar of balance, with the same compute prices and account limits for every purchase amount. Client-supplied credit amounts never authorize funding.',
+    description: 'Requires browser cookie, trusted Origin and configured Stripe publishable key. Send a fresh UUID per purchase and retain it until Checkout returns; repeating the same UUID recovers the same purchase and cannot change its amount. Stripe promotion codes may discount the price while the selected amountCents remains the compute balance purchased. The server verifies the live Checkout subtotal, discount and payment before crediting, including completed no-payment-required orders for 100% discounts. No subscription is created. Compute prices and account limits are the same for every purchase amount. Client-supplied credit amounts never authorize funding.',
     request: { headers: z.object({ Origin: z.string() }), ...requestBody(z.object({ amountCents: amount, requestId: z.uuid() })) },
     responses: { 200: jsonResponse(z.object({ client_secret: z.string(), publishable_key: z.string(), sessionId: z.string() })), ...errors(400, 401, 403, 409, 503) },
   }, handler);
   register(api, 'post', '/billing/topups/complete', {
     operationId: 'completePrepaidTopup', tags: ['Billing'], summary: 'Verify owned Checkout and apply confirmed prepaid funding once', security: cookieSecurity,
-    description: 'Requires browser cookie and trusted Origin. The Checkout redirect does not prove payment. Current PaymentIntent, charge, currency, capture, ownership and refund/dispute status are verified on the server. Pending payments do not increase the balance.',
+    description: 'Requires browser cookie and trusted Origin. The Checkout redirect does not prove payment. Live Checkout subtotal, Stripe discount, ownership and completion are verified. Nonzero totals additionally require a verified PaymentIntent and captured card charge with matching currency, amount and refund/dispute state. Refunds revoke the corresponding proportion of purchased compute credit, rounded up; disputes revoke the full credit. Pending payments do not increase the balance.',
     request: { headers: z.object({ Origin: z.string() }), ...requestBody(z.object({ sessionId: z.string().regex(/^cs_[A-Za-z0-9_]+$/) })) },
     responses: { 200: jsonResponse(result), ...errors(400, 401, 403, 409, 503) },
   }, handler);
