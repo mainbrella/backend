@@ -19,13 +19,26 @@ export async function handleAccountingRequest(request: Request, env: BillingEnv)
     if (user.email?.trim().toLowerCase() !== ADMIN_EMAIL) return authJson({ error: 'forbidden' }, 403, cors);
     if (path === '/admin/accounting/ledger') {
       const query = url.searchParams;
-      if ([...query.keys()].some(key => !['after', 'throughSequence', 'limit', 'format'].includes(key))) throw new Error('invalid_request');
+      if ([...query.keys()].some(key => !['after', 'throughSequence', 'limit', 'format', 'order'].includes(key))) throw new Error('invalid_request');
       const after = Number(query.get('after') ?? 0), limit = Number(query.get('limit') ?? 1000);
       const throughSequence = query.has('throughSequence') ? Number(query.get('throughSequence')) : await ledgerWatermark(env);
       const format = query.get('format') ?? 'json';
+      const order = query.get('order') ?? 'asc';
       if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(throughSequence) || throughSequence < after
-        || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000 || !['json', 'ndjson'].includes(format)) throw new Error('invalid_request');
-      const page = await env.DB.prepare('SELECT * FROM accounting_ledger WHERE sequence > ? AND sequence <= ? ORDER BY sequence LIMIT ?').bind(after, throughSequence, limit + 1).all<LedgerRow>();
+        || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000 || !['json', 'ndjson'].includes(format)
+        || !['asc', 'desc'].includes(order)) throw new Error('invalid_request');
+      let page: { results: LedgerRow[] };
+      if (order === 'desc' && after > 0) {
+        const anchor = await env.DB.prepare('SELECT sequence, recorded_at FROM accounting_ledger WHERE sequence = ?').bind(after).first<Pick<LedgerRow, 'sequence' | 'recorded_at'>>();
+        if (!anchor || anchor.sequence > throughSequence) throw new Error('invalid_request');
+        page = await env.DB.prepare(`SELECT * FROM accounting_ledger WHERE sequence <= ?
+          AND (recorded_at < ? OR (recorded_at = ? AND sequence < ?))
+          ORDER BY recorded_at DESC, sequence DESC LIMIT ?`).bind(throughSequence, anchor.recorded_at, anchor.recorded_at, after, limit + 1).all<LedgerRow>();
+      } else if (order === 'desc') {
+        page = await env.DB.prepare('SELECT * FROM accounting_ledger WHERE sequence <= ? ORDER BY recorded_at DESC, sequence DESC LIMIT ?').bind(throughSequence, limit + 1).all<LedgerRow>();
+      } else {
+        page = await env.DB.prepare('SELECT * FROM accounting_ledger WHERE sequence > ? AND sequence <= ? ORDER BY sequence LIMIT ?').bind(after, throughSequence, limit + 1).all<LedgerRow>();
+      }
       const entries = page.results.slice(0, limit).map(({ payload, ...row }) => ({ ...row, data: JSON.parse(payload) }));
       const next = page.results.length > limit ? entries.at(-1)!.sequence : null;
       if (format === 'ndjson') return new Response(entries.map(entry => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''), { headers: {

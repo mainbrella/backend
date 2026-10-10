@@ -166,6 +166,39 @@ test('admin exports use cookies, stable sequence pages and downloadable exact ev
   assert.equal((await handleRequest(new Request('https://api.mainbrella.com/admin/accounting/ledger', { headers: { Authorization: 'Bearer browser_token' } }), f.env)).status, 401);
 });
 
+test('ledger creation-time pages sort recorded timestamps, break ties by sequence, and retain their snapshot', async t => {
+  const f = await billingFixture(t, 'usage', false);
+  f.sqlite.prepare('UPDATE users SET email = ? WHERE id = ?').run('oneone@gmail.com', TEST_USER);
+  const timestamps = [100, 300, 200, 300, 400, 200, 500];
+  let timestampIndex = 0;
+  t.mock.method(Date, 'now', () => timestamps[timestampIndex++] ?? 600);
+  const empty = await handleRequest(billingRequest('/admin/accounting/ledger?order=desc'), f.env);
+  assert.deepEqual((await empty.json() as any).entries, []);
+  const values = [1, 2, 3, 4, 5, 6];
+  for (const value of values) {
+    await appendAccountingEvent(f.env, { key: `created:${value}`, userId: TEST_USER, type: 'refund', occurredAt: received, data: { value } });
+  }
+
+  const firstResponse = await handleRequest(billingRequest('/admin/accounting/ledger?order=desc&limit=2'), f.env);
+  const first = await firstResponse.json() as any;
+  assert.equal(first.throughSequence, 6);
+  assert.deepEqual(first.entries.map((entry: LedgerRow) => [entry.sequence, entry.recorded_at]), [[5, 400], [4, 300]]);
+  assert.equal(first.nextCursor, 4);
+
+  await appendAccountingEvent(f.env, { key: 'created:late', userId: TEST_USER, type: 'refund', occurredAt: received, data: { value: 7 } });
+  const secondResponse = await handleRequest(billingRequest(`/admin/accounting/ledger?order=desc&after=${first.nextCursor}&throughSequence=${first.throughSequence}&limit=2`), f.env);
+  const second = await secondResponse.json() as any;
+  assert.deepEqual(second.entries.map((entry: LedgerRow) => [entry.sequence, entry.recorded_at]), [[2, 300], [6, 200]]);
+  assert.equal(second.nextCursor, 6);
+
+  const thirdResponse = await handleRequest(billingRequest(`/admin/accounting/ledger?order=desc&after=${second.nextCursor}&throughSequence=${first.throughSequence}&limit=2`), f.env);
+  const third = await thirdResponse.json() as any;
+  assert.deepEqual(third.entries.map((entry: LedgerRow) => [entry.sequence, entry.recorded_at]), [[3, 200], [1, 100]]);
+  assert.equal(third.nextCursor, null);
+  assert.equal((await handleRequest(billingRequest('/admin/accounting/ledger?order=sideways'), f.env)).status, 400);
+  assert.equal((await handleRequest(billingRequest('/admin/accounting/ledger?order=desc&after=7&throughSequence=6'), f.env)).status, 400);
+});
+
 test('monthly close revisions and CPA policy records are immutable, and no policy is silently selected', async t => {
   const f = await billingFixture(t, 'usage', false);
   t.mock.method(Date, 'now', () => checkpointAt);

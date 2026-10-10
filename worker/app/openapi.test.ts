@@ -67,7 +67,11 @@ test('accounting schemas describe protected exports, immutable revisions and exp
       assert.ok(operation.responses[403]);
     }
   }
-  assert.ok(paths['/admin/accounting/ledger'].get.responses[200].content['application/x-ndjson']);
+  const ledger = paths['/admin/accounting/ledger'].get;
+  assert.ok(ledger.responses[200].content['application/x-ndjson']);
+  const order = ledger.parameters.find((parameter: any) => parameter.name === 'order');
+  assert.deepEqual(order.schema.enum, ['asc', 'desc']);
+  assert.match(ledger.description, /recorded_at descending, then sequence descending/);
   assert.match(paths['/admin/accounting/closes'].post.description, /null until a CPA-approved policy/);
   assert.match(paths['/admin/accounting/policies'].post.description, /does not create refund rights/);
   assert.ok(components.schemas.AccountingCloseReport.properties.customerComputeCredits);
