@@ -28,6 +28,7 @@ import { handleWorkspacesRequest } from './workspaces';
 import { handleWorkspaceExportRequest } from './workspace-export';
 import { handlePrivateServicesRequest } from './private-services';
 import { handleAcquisitionRequest } from './acquisition';
+import { handleBuildRequest } from './build';
 
 async function handleLegacyRequest(
   request: Request,
@@ -35,6 +36,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/') || url.pathname === '/admin/acquisition/leads' || url.pathname === '/admin/acquisition/events') return handleAcquisitionRequest(request, env);
   if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);

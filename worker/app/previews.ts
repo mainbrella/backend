@@ -32,6 +32,22 @@ export async function handlePreviewRequest(request: Request, env: Env): Promise<
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+  try {
+    const user = await containerUser(env, request);
+    if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    return handleOwnedPreviewRequest(request, env, user.id);
+  } catch (error) {
+    const failure = containerError(error, 'previews_unavailable');
+    return authJson({ error: failure.error }, failure.status, cors);
+  }
+}
+
+// Internal workflows supply a server-resolved owner; no browser credentials are
+// stored in a long-running job. This function is not registered as an API route.
+export async function handleOwnedPreviewRequest(request: Request, env: Env, userId: string): Promise<Response> {
+  const cors = authCorsHeaders(request);
+  if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
     return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, POST, DELETE, OPTIONS' });
   }
@@ -50,8 +66,6 @@ export async function handlePreviewRequest(request: Request, env: Env): Promise<
   if (!validPreviewGeneration(createdAt)) return authJson({ error: 'invalid_generation' }, 400, cors);
   if (request.method === 'DELETE' && !validPreviewId(previewId)) return authJson({ error: 'invalid_request' }, 400, cors);
   try {
-    const user = await containerUser(env, request);
-    if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     // Disabling issuance must not prevent owners from inspecting/revoking grants
     // left by lost responses or already attached transports.
     if (request.method === 'POST' && !previewsConfigured(env)) return authJson({ error: 'previews_unavailable' }, 503, cors);
@@ -66,13 +80,13 @@ export async function handlePreviewRequest(request: Request, env: Env): Promise<
       if (!validPreviewOptions(body)) return authJson({ error: 'invalid_request' }, 400, cors);
       options = body;
     }
-    const running = await runningContainer(env, user.id, id);
+    const running = await runningContainer(env, userId, id);
     const expiresAt = running.container ? Date.parse(running.container.expiresAt) : NaN;
     if (!running.stub || running.container?.createdAt !== createdAt || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
       return authJson({ error: 'container_not_running' }, 409, cors);
     }
     const stub = running.stub;
-    const name = machineName(user.id, id);
+    const name = machineName(userId, id);
     const database = env.PREVIEW_ROUTES!;
     const internal = (method: string, grantId?: string) => {
       const target = new URL('https://internal/previews');
