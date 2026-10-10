@@ -6,7 +6,7 @@ import { buildStorageFixture } from './build-storage-test-helpers';
 
 export async function buildBillingFixture(env: Env, sqlite: DatabaseSync, userId: string) {
   const storage = buildStorageFixture(env);
-  for (const name of ['020_accounting_ledger.sql', '026_build_ai_billing.sql'])
+  for (const name of ['020_accounting_ledger.sql', '026_build_ai_billing.sql', '031_r2_billing.sql'])
     sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   const stored = new Map<string, unknown>(), billingCalls: ReturnType<Request['clone']>[] = [];
   const ctx = { storage: {

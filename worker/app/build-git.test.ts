@@ -10,9 +10,10 @@ import { buildBillingFixture } from './build-billing-test-helpers';
 import { handleBuildRequest } from './build';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
-import { BUILD_GIT_ROOT, buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
+import { BUILD_GIT_ROOT, buildGitVersion, exportBuildGit, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
 import { buildImagePath } from '../lib/build-images';
 import { readBuildSource, readBuildText } from '../lib/build-storage';
+import { cleanupStorageOrphans } from '../lib/r2-maintenance';
 
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t);
@@ -213,6 +214,31 @@ test('R2 versions export valid Git history with lockfiles and referenced images,
   assert.ok(!version!.lockfile!.includes('lockfileVersion'));
   assert.ok(!paths.includes(`public${buildImagePath(unusedImageId)}`));
   assert.ok(!paths.includes('.env')); assert.ok(!paths.includes('untracked.txt'));
+});
+
+test('ancestor versions share the newest full-history bundle and still export and hydrate their original commit after cleanup', async t => {
+  const f = await fixture(t); f.env.R2_BILLING_MODE = 'meter';
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), { ...buildStarter, 'src/old.ts': 'export const old = true;' }, true);
+  const oldBundle = first.bundle_key;
+  const next = f.startTurn();
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/new.ts': 'export const next = true;' }, true);
+  assert.equal((await buildGitVersion(f.env, f.params.appId, first.id))!.bundle_key, second.bundle_key);
+  assert.notEqual(oldBundle, second.bundle_key);
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id=NULL WHERE id=?').run(f.params.appId);
+  f.sqlite.prepare('UPDATE r2_objects SET updated_at=?').run(Date.now() - 2 * 86400000);
+  await cleanupStorageOrphans(f.env);
+  assert.equal(f.objects.has(oldBundle), false);
+  assert.ok(f.objects.has(second.bundle_key));
+  const response = await exportBuildGit(f.env, USER_ONE, f.params.appId, first, {});
+  assert.equal(response.status, 200);
+  const bundle = join(f.disk, 'ancestor.bundle'), clone = join(f.disk, 'ancestor');
+  writeFileSync(bundle, new Uint8Array(await response.arrayBuffer()));
+  git(['clone', '--quiet', '-b', 'main', bundle, clone], f.disk);
+  git(['fsck', '--full'], clone);
+  assert.equal(git(['rev-parse', 'HEAD'], clone), first.commit_id);
+  assert.equal(readFileSync(join(clone, 'src/old.ts'), 'utf8'), 'export const old = true;');
+  await hydrateBuildGit(f.env, f.params, f.runtime, first, f.turn(f.params));
+  assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
 });
 
 test('lost D1 save acknowledgements retry the persistence callback without duplicating versions or moving the parent', async t => {

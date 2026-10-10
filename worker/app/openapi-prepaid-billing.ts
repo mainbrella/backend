@@ -1,3 +1,4 @@
+import { storageSummarySchema, storagePricingSchema } from './openapi-storage-billing';
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
@@ -12,8 +13,8 @@ const result = z.object({ balance: prepaidBalanceSchema });
 const resource = z.object({ id: z.string(), containerId: z.string(), name: z.string().nullable(), lifecycle: z.enum(['ad_hoc', 'production']),
   size: z.enum(['lite', 'small', 'medium', 'large', 'xl']), startAt: z.number(), endAt: z.number().nullable(), runtimeMs: z.number(),
   computeUnitHours: z.number(), usedCents: z.number(), reservedCents: z.number(), hourlyCents: z.number(), active: z.boolean() });
-const history = z.object({ asOf: z.number(), balance: prepaidBalanceSchema,
-  totals: z.object({ fundedCents: z.number(), revokedCents: z.number(), usedCents: z.number(), unattributedUsedCents: z.number(), inferenceUsedCents: z.number() }),
+const history = z.object({ storage: storageSummarySchema.optional(), asOf: z.number(), balance: prepaidBalanceSchema,
+  totals: z.object({ fundedCents: z.number(), revokedCents: z.number(), usedCents: z.number(), unattributedUsedCents: z.number(), inferenceUsedCents: z.number(), storageUsedCents: z.number() }),
   currentHourlyCents: z.number(), activeResources: z.array(resource), resources: z.array(resource),
   fundings: z.array(z.object({ id: z.string(), createdAt: z.number(), amountCents: z.number(), revokedCents: z.number(), reason: z.enum(['refund', 'dispute']).nullable() })),
   nextResourceCursor: z.string().nullable(), nextFundingCursor: z.string().nullable(), historyTruncated: z.boolean(), retainedResourceLimit: z.literal(256) }).openapi('PrepaidHistory');
@@ -21,7 +22,7 @@ const history = z.object({ asOf: z.number(), balance: prepaidBalanceSchema,
 export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/billing/config', {
     operationId: 'getPrepaidBillingConfig', tags: ['Billing'], summary: 'Get prepaid funding availability and purchase limits',
-    responses: { 200: jsonResponse(z.object({ configured: z.boolean(), minTopupCents: z.literal(500), maxTopupCents: z.literal(100000) })), ...errors(403) },
+    responses: { 200: jsonResponse(z.object({ storage: storagePricingSchema.optional(), configured: z.boolean(), minTopupCents: z.literal(500), maxTopupCents: z.literal(100000) })), ...errors(403) },
   }, handler);
   register(api, 'get', '/billing/balance', {
     operationId: 'getPrepaidBalance', tags: ['Billing'], summary: 'Get account funding, reserved runtime and monthly spending', security: cookieSecurity,

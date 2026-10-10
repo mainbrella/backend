@@ -49,6 +49,23 @@ test('a free promotion creates compute rights with no consideration or liability
   assert.equal(report.taxableAdvancePaymentsByReceiptYear[0].considerationMicroUsd, '0');
 });
 
+test('storage nano-USD and negative invoice adjustments reconcile exact wallet credit and deferred revenue', () => {
+  const rows = evidence({ used: 0 });
+  rows.splice(rows.length - 1, 0,
+    row(4, 'storage', received + 1000, { costNanoUsd: 1000000432 }),
+    row(6, 'storage_adjustment', received + 2000, { costNanoUsd: -432 }));
+  const checkpoint = rows.at(-1)!;
+  checkpoint.sequence = 7;
+  checkpoint.payload = JSON.stringify({ ...JSON.parse(checkpoint.payload), usedStorageNanoUsd: 1000000000 });
+  const report = buildAccountingClose('2026-12', rows, policy);
+  assert.deepEqual(report.issues, []);
+  assert.equal(report.customerComputeCredits.outstandingCreditCents, 1900);
+  assert.equal(report.customerComputeCredits.consumedUnitMs, '180000000');
+  assert.equal(report.deferredRevenue.earnedMicroUsd, '500000');
+  checkpoint.payload = JSON.stringify({ ...JSON.parse(checkpoint.payload), usedStorageNanoUsd: 999999999 });
+  assert.ok(buildAccountingClose('2026-12', rows, policy).issues.includes(`wallet_storage_usage_mismatch:${TEST_USER}`));
+});
+
 test('tax inclusion stays unconfirmed until a CPA policy is selected; 451(c) includes the remainder in the next year', () => {
   const rows = evidence();
   const unconfirmed = buildAccountingClose('2026-12', rows, null);

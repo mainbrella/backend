@@ -1,3 +1,4 @@
+import { registerStorageBillingRoutes } from './openapi-storage-billing';
 import { registerRepoLaunchRoutes } from "./openapi-repo-launches";
 import { registerGithubImportRoutes } from './openapi-github-import';
 import { fromHono } from "chanfana";
@@ -75,6 +76,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerProjectHostingRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);
   registerPrepaidBillingRoutes(api, handler);
+  registerStorageBillingRoutes(api, handler);
   registerContainerRoutes(api, handler);
   registerCommandRoutes(api, handler);
   registerFileRoutes(api, handler);

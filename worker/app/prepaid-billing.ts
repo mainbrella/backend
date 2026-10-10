@@ -1,3 +1,5 @@
+import { storageBillingSummary } from '../lib/r2-billing';
+import { storageMetered, storagePricing } from '../lib/r2-storage';
 import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
 import { type BillingEnv } from '../lib/stripe';
 import { accountBillingRequest, completePrepaidCheckout, createPrepaidCheckout, enableRechargePaymentMethod, ensurePrepaidAccount,
@@ -8,7 +10,7 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
   const cors = authCorsHeaders(request);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-  if (path === '/billing/config' && request.method === 'GET') return authJson({ configured: prepaidBillingConfigured(env) && Boolean(env.STRIPE_PUBLISHABLE_KEY), minTopupCents: MIN_TOPUP_CENTS, maxTopupCents: MAX_TOPUP_CENTS }, 200, cors);
+  if (path === '/billing/config' && request.method === 'GET') return authJson({ configured: prepaidBillingConfigured(env) && Boolean(env.STRIPE_PUBLISHABLE_KEY), minTopupCents: MIN_TOPUP_CENTS, maxTopupCents: MAX_TOPUP_CENTS, ...(storageMetered(env) ? { storage: storagePricing(env) } : {}) }, 200, cors);
   if (!['/billing/balance', '/billing/history', '/billing/topups', '/billing/topups/complete', '/billing/settings'].includes(path)) return authJson({ error: 'not_found' }, 404, cors);
   if (request.method !== (path === '/billing/balance' || path === '/billing/history' ? 'GET' : 'POST')) return authJson({ error: 'method_not_allowed' }, 405, cors);
   if (request.method === 'POST' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
@@ -21,7 +23,8 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
       const query = url.searchParams, limit = Number(query.get('limit') ?? 50);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100 || [...query.keys()].some(key => !['limit', 'resourceCursor', 'fundingCursor'].includes(key))
         || ['resourceCursor', 'fundingCursor'].some(key => query.has(key) && (!query.get(key) || query.get(key)!.length > 200))) return authJson({ error: 'invalid_request' }, 400, cors);
-      return authJson(await accountBillingRequest<PrepaidHistory>(env, user.id, `/billing/history${url.search}`), 200, cors);
+      const history = await accountBillingRequest<PrepaidHistory>(env, user.id, `/billing/history${url.search}`);
+      return authJson({ ...history, ...(storageMetered(env) ? { storage: await storageBillingSummary(env, user.id) } : {}) }, 200, cors);
     }
     const body = await readJSON(request, 4096);
     if (!body) return authJson({ error: 'invalid_request' }, 400, cors);

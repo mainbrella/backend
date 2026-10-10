@@ -2,7 +2,7 @@ import type { BillingEnv } from './stripe';
 
 export interface TaxLocation { country: string | null; state: string | null; postalCode: string | null; city: string | null; source: 'checkout' | 'charge' | 'unknown' }
 export interface AccountingEvent {
-  key: string; userId: string; type: 'funding' | 'refund' | 'stripe_balance' | 'funding_state' | 'compute' | 'inference' | 'legacy_usage' | 'wallet_checkpoint';
+  key: string; userId: string; type: 'funding' | 'refund' | 'stripe_balance' | 'funding_state' | 'compute' | 'inference' | 'storage' | 'storage_adjustment' | 'legacy_usage' | 'wallet_checkpoint';
   occurredAt: number; data: Record<string, unknown>;
 }
 export interface LedgerRow { sequence: number; event_key: string; user_id: string; event_type: AccountingEvent['type']; occurred_at: number; recorded_at: number; payload: string }

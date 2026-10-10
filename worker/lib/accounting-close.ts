@@ -2,7 +2,8 @@ import { accountBillingRequest, applyPrepaidPayment, completePrepaidCheckout, ty
 import { ledgerRows, ledgerWatermark, type LedgerRow } from './accounting-ledger';
 import type { BillingEnv } from './stripe';
 
-const UNIT_MS_PER_CENT = 1800000n; // Current wallet rate: 2 cents / CU-hour.
+const UNIT_SCALE = 100n; // Preserve storage nano-USD (0.18 weighted ms) exactly.
+const UNIT_MS_PER_CENT = 1800000n * UNIT_SCALE; // Current wallet rate: 2 cents / CU-hour.
 const MICRO_USD_PER_CENT = 10000n;
 export interface AccountingPolicy { id: string; method: 'cash_receipts' | 'section_451c'; receipt_timezone: string; approved_by: string; evidence_reference: string }
 export function monthBounds(month: string): { start: number; end: number } {
@@ -28,6 +29,8 @@ function taxYearStart(year: number, timezone: string): number {
   }
   return guess;
 }
+const unitString = (value: bigint) => value % UNIT_SCALE === 0n ? (value / UNIT_SCALE).toString()
+  : `${value < 0n ? '-' : ''}${(value < 0n ? -value : value) / UNIT_SCALE}.${((value < 0n ? -value : value) % UNIT_SCALE).toString().padStart(2, '0')}`;
 const max = (a: bigint, b: bigint) => a > b ? a : b;
 const min = (a: bigint, b: bigint) => a < b ? a : b;
 
@@ -68,6 +71,8 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
     }
     const checkpointUsed = evidence.filter(r => ['compute', 'inference', 'legacy_usage'].includes(r.event_type))
       .reduce((sum, r) => sum + (r.event_type === 'inference' ? BigInt(JSON.parse(r.payload).costMicroUsd) * 180n : BigInt(JSON.parse(r.payload).unitMs)), 0n);
+    const storageUsed = evidence.filter(r => ['storage', 'storage_adjustment'].includes(r.event_type)).reduce((sum, r) => sum + BigInt(JSON.parse(r.payload).costNanoUsd), 0n);
+    if (storageUsed !== BigInt(d.usedStorageNanoUsd ?? 0)) issues.add(`wallet_storage_usage_mismatch:${userId}`);
     if (checkpointUsed !== BigInt(d.usedUnitMs)) issues.add(`wallet_usage_mismatch:${userId}`);
     for (const funding of d.fundings) {
       if (allFunding.get(funding.id) !== funding.creditCents) issues.add(`wallet_funding_missing_or_mismatched:${funding.id}`);
@@ -83,7 +88,7 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       if (expectedCredit !== refundedCredit) issues.add(`refund_credit_not_reconciled:${funding.fundingId}`);
     }
   }
-  for (const userId of new Set(rows.filter(r => ['funding', 'compute', 'inference'].includes(r.event_type)).map(r => r.user_id))) {
+  for (const userId of new Set(rows.filter(r => ['funding', 'compute', 'inference', 'storage', 'storage_adjustment'].includes(r.event_type)).map(r => r.user_id))) {
     if (!checkpoints.has(userId)) issues.add(`wallet_checkpoint_missing:${userId}`);
   }
   // Split source intervals at receipts, revocations, the close boundary and
@@ -133,18 +138,20 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       const revoked = BigInt(d.revokedCents) * UNIT_MS_PER_CENT;
       creditRevoked += max(0n, revoked - lot.revoked); lot.revoked = max(revoked, lot.revoked);
       lot.disputed ||= d.disputed;
-    } else if (['compute', 'inference', 'legacy_usage'].includes(row.event_type)) {
-      let consumed = row.event_type === 'inference' ? BigInt(d.costMicroUsd) * 180n : BigInt(d.unitMs);
+    } else if (['compute', 'inference', 'storage', 'storage_adjustment', 'legacy_usage'].includes(row.event_type)) {
+      let consumed = row.event_type === 'inference' ? BigInt(d.costMicroUsd) * 180n * UNIT_SCALE
+        : ['storage', 'storage_adjustment'].includes(row.event_type) ? BigInt(d.costNanoUsd) * 18n : BigInt(d.unitMs) * UNIT_SCALE;
       if (row.event_type === 'compute') {
-        if (d.unitMsPerCent !== Number(UNIT_MS_PER_CENT)) issues.add(`unrecognized_compute_rate:${row.event_key}`);
+        if (d.unitMsPerCent !== Number(UNIT_MS_PER_CENT / UNIT_SCALE)) issues.add(`unrecognized_compute_rate:${row.event_key}`);
         // Intervals spanning a cutoff are prorated using integer CU-ms. The
         // wallet splits UTC months; later checkpoints may end past this cutoff.
         if (d.endAt > end) consumed = consumed * BigInt(end - d.startAt) / BigInt(d.endAt - d.startAt);
       } else if (row.event_type === 'legacy_usage') legacyUsed += consumed;
       used += consumed;
       let remaining = consumed;
-      for (const lot of userLots.get(row.user_id) ?? []) {
-        const take = min(remaining, max(0n, lot.units - lot.revoked - lot.consumed));
+      const accountLots = userLots.get(row.user_id) ?? [];
+      for (const lot of remaining < 0n ? [...accountLots].reverse() : accountLots) {
+        const take = remaining < 0n ? -min(-remaining, lot.consumed) : min(remaining, max(0n, lot.units - lot.revoked - lot.consumed));
         const previous = lot.earned;
         lot.consumed += take; lot.earned = lot.consideration * lot.consumed / lot.units;
         const earned = lot.earned - previous;
@@ -202,8 +209,8 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
     status: issues.size ? 'needs_review' : 'reconciled', issues: [...issues].sort(),
     policyId: policy?.id ?? null, taxMethod: policy?.method ?? 'unconfirmed', receiptTimezone: timezone,
     allocationMethod: 'FIFO; actual consideration allocated proportionally to original compute credit; no breakage recognition',
-    customerComputeCredits: { fundedUnitMs: creditFunded.toString(), revokedUnitMs: creditRevoked.toString(), consumedUnitMs: used.toString(),
-      outstandingUnitMs: credits.toString(), outstandingCreditCents: Number(credits) / Number(UNIT_MS_PER_CENT), historicalUnattributedUnitMs: legacyUsed.toString(),
+    customerComputeCredits: { fundedUnitMs: unitString(creditFunded), revokedUnitMs: unitString(creditRevoked), consumedUnitMs: unitString(used),
+      outstandingUnitMs: unitString(credits), outstandingCreditCents: Number(credits) / Number(UNIT_MS_PER_CENT), historicalUnattributedUnitMs: unitString(legacyUsed),
       walletAccountsReconciled: checkpoints.size, sourceReconciliation: [...issues].some(i => /^(wallet_|ledger_funding|historical_usage|credit_without)/.test(i)) ? 'failed' : 'passed' },
     deferredRevenue: { considerationMicroUsd: consideration.toString(), earnedMicroUsd: earned.toString(), monthlyEarnedMicroUsd: monthlyEarned.toString(),
       refundsMicroUsd: refundAdjustments.toString(), chargebacksMicroUsd: chargebackAdjustments.toString(), contraRevenueMicroUsd: contraRevenue.toString(),

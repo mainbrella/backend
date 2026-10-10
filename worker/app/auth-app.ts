@@ -1,3 +1,4 @@
+import { deleteStoredObjects, PLATFORM_STORAGE } from '../lib/r2-storage';
 import { authJson, hashToken, publicUser, randomToken, readJSON, type AuthUser, type StringHeaders } from "./auth-core";
 import { deletionProvider, revokeDeletionProvider } from "./provider-revocation";
 
@@ -99,6 +100,8 @@ export async function handleAppDelete(request: Request, env: Env, headers: Strin
      UNION SELECT image_path FROM herd_direct_messages WHERE sender_id = ? AND image_path IS NOT NULL`,
   ).bind(user.id, user.id).all<{ image_path: string }>();
   await env.DB.batch([
+    env.DB.prepare(`INSERT INTO build_git_deletions(app_id,user_id,created_at)
+      SELECT id,user_id,? FROM build_apps WHERE user_id=? ON CONFLICT(app_id) DO NOTHING`).bind(new Date().toISOString(), user.id),
     env.DB.prepare("DELETE FROM subherd_neigh_replies WHERE user_id = ?").bind(user.id),
     env.DB.prepare("DELETE FROM subherd_neighs WHERE user_id = ?").bind(user.id),
     env.DB.prepare("UPDATE subherds SET created_by = NULL WHERE created_by = ?").bind(user.id),
@@ -130,7 +133,7 @@ export async function handleAppDelete(request: Request, env: Env, headers: Strin
   ]);
   const bucket = env.BUCKET;
   if (bucket) {
-    await Promise.all(photos.results.map((row) => bucket.delete(`herd_media/${row.image_path}`)));
+    await deleteStoredObjects(env, PLATFORM_STORAGE, photos.results.map(row => `herd_media/${row.image_path}`));
   }
   return authJson({ deleted: true }, 200, headers);
 }

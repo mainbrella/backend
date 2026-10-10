@@ -38,7 +38,9 @@ if (input.parent) {
     }
   } finally { fs.closeSync(fd); }
   git(['clone','--quiet','--branch','main',bundle,repo], base);
-  if (git(['rev-parse','HEAD']).stdout.trim() !== input.parent.commitId) throw new Error('Invalid repository head');
+  if (git(['rev-parse','HEAD']).stdout.trim() !== (input.parent.bundleHead || input.parent.commitId)) throw new Error('Invalid repository head');
+  git(['merge-base','--is-ancestor',input.parent.commitId,'HEAD']);
+  git(['reset','--hard',input.parent.commitId]);
 } else git(['init','--quiet','--initial-branch=main']);
 if (input.action === 'hydrate') {
   installGit();

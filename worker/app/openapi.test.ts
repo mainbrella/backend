@@ -45,6 +45,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/trial": ["post"], "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
   "/subscription/usage": ["get", "post"], "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
+  '/billing/storage': ['get'], '/admin/accounting/storage-invoices': ['get', 'post'],
   '/billing/config': ['get'], '/billing/balance': ['get'], '/billing/history': ['get'], '/billing/topups': ['post'], '/billing/topups/complete': ['post'], '/billing/settings': ['post'],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
@@ -80,7 +81,7 @@ test('accounting schemas describe protected exports, immutable revisions and exp
   const ledger = paths['/admin/accounting/ledger'].get;
   assert.ok(ledger.responses[200].content['application/x-ndjson']);
   assert.deepEqual(ledger.responses[200].content['application/json'].schema.properties.entries.items.properties.event_type.enum,
-    ['funding', 'refund', 'stripe_balance', 'funding_state', 'compute', 'inference', 'legacy_usage', 'wallet_checkpoint']);
+    ['funding', 'refund', 'stripe_balance', 'funding_state', 'compute', 'inference', 'storage', 'storage_adjustment', 'legacy_usage', 'wallet_checkpoint']);
   assert.match(ledger.description, /data\.costMicroUsd/);
   const order = ledger.parameters.find((parameter: any) => parameter.name === 'order');
   assert.deepEqual(order.schema.enum, ['asc', 'desc']);

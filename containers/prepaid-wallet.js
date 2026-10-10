@@ -8,6 +8,7 @@ export const MINIMUM_PRODUCTION_RUNTIME_MS = 86400000;
 export const RETAINED_RESOURCE_LIMIT = 256;
 export const COMPUTE_LEDGER_INTERVAL_MS = 15 * 60_000;
 const INFERENCE_UNITS_PER_MICRO_USD = UNIT_MS_PER_CENT / 10000;
+const STORAGE_UNITS_PER_NANO_USD = UNIT_MS_PER_CENT / 10000000;
 export const prepaidState = state => Boolean(state.wallet || state.entitlement?.billing?.kind === 'prepaid');
 export function utcPeriod(at) {
   const date = new Date(at);
@@ -118,14 +119,62 @@ export class PrepaidWallet {
     const live = leases.reduce((sum, lease) => sum + unitsBetween(lease, lease.meteredUntil, now), 0);
     const inferenceReserved = Object.values(wallet?.inference ?? {}).filter(row => row.costMicroUsd === null)
       .reduce((sum, row) => sum + row.reservedMicroUsd, 0) * INFERENCE_UNITS_PER_MICRO_USD;
-    const reserved = leases.reduce((sum, lease) => sum + unitsBetween(lease, now, Infinity), 0) + inferenceReserved;
+    const storageReserved = (wallet?.storageHold?.remainingNanoUsd ?? 0) * STORAGE_UNITS_PER_NANO_USD;
+    const storageUsed = (wallet?.usedStorageNanoUsd ?? 0) * STORAGE_UNITS_PER_NANO_USD;
+    const reserved = leases.reduce((sum, lease) => sum + unitsBetween(lease, now, Infinity), 0) + inferenceReserved + storageReserved;
     const month = new Date(now).toISOString().slice(0, 7);
     const inferenceUsed = (wallet?.usedInferenceMicroUsd ?? 0) * INFERENCE_UNITS_PER_MICRO_USD;
     const monthlyInference = (wallet?.monthlyInferenceMicroUsd?.[month] ?? 0) * INFERENCE_UNITS_PER_MICRO_USD;
-    const monthly = (wallet?.monthlyUnitMs?.[month] ?? 0) + monthlyInference + leases.reduce((sum, lease) => sum + unitsBetween(lease, periodStart, now), 0);
-    const monthReserved = leases.reduce((sum, lease) => sum + unitsBetween(lease, Math.max(now, periodStart), periodEnd), 0) + inferenceReserved;
-    const balance = funded - (wallet?.usedUnitMs ?? 0) - inferenceUsed - live;
-    return { funded, live, reserved, balance, remaining: balance - reserved, monthly, monthReserved, monthlyInference, inferenceUsed, inferenceReserved, month, periodStart, periodEnd };
+    const monthlyStorage = (wallet?.monthlyStorageNanoUsd?.[month] ?? 0) * STORAGE_UNITS_PER_NANO_USD;
+    const monthly = (wallet?.monthlyUnitMs?.[month] ?? 0) + monthlyInference + monthlyStorage + leases.reduce((sum, lease) => sum + unitsBetween(lease, periodStart, now), 0);
+    const monthReserved = leases.reduce((sum, lease) => sum + unitsBetween(lease, Math.max(now, periodStart), periodEnd), 0) + inferenceReserved + storageReserved;
+    const balance = funded - (wallet?.usedUnitMs ?? 0) - inferenceUsed - storageUsed - live;
+    return { funded, live, reserved, balance, remaining: balance - reserved, monthly, monthReserved, monthlyInference, inferenceUsed, inferenceReserved, storageUsed, storageReserved, month, periodStart, periodEnd };
+  }
+  storage(state, input) {
+    const integer = value => Number.isSafeInteger(value) && value >= 0;
+    if (!input || !['reserve', 'settle', 'status'].includes(input.action)) throw new Error('invalid_request');
+    const wallet = state.wallet;
+    if (input.action === 'status') return { fundedThrough: wallet?.storageHold?.fundedThrough ?? null, writesBlocked: Boolean(wallet?.storageHold?.writesBlocked), hasWallet: Boolean(wallet) };
+    if (!wallet) throw new Error('insufficient_balance');
+    const now = this.account.now();
+    if (input.action === 'reserve') {
+      if (!integer(input.bytes) || !integer(input.retentionNanoUsd) || input.retentionDays !== 7) throw new Error('invalid_request');
+      const previous = wallet.storageHold;
+      if (!input.bytes) { delete wallet.storageHold; return { fundedThrough: null, writesBlocked: false }; }
+      if (previous && previous.bytes === input.bytes && !previous.writesBlocked && previous.fundedThrough > now + 6 * 86400000
+        && previous.remainingNanoUsd >= input.retentionNanoUsd) return this.storage(state, { action: 'status' });
+      const m = this.metrics(state), required = input.retentionNanoUsd * STORAGE_UNITS_PER_NANO_USD;
+      const funded = !wallet.fundingRevoked && m.remaining + m.storageReserved >= required
+        && (state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - m.monthReserved + m.storageReserved >= required;
+      if (!funded) {
+        // Keep the original paid deadline and remaining hold. A failed renewal
+        // must never start another unfunded seven-day grace period.
+        if (previous) previous.writesBlocked = true;
+        return { fundedThrough: previous?.fundedThrough ?? null, writesBlocked: true };
+      }
+      wallet.storageHold = { bytes: input.bytes, remainingNanoUsd: input.retentionNanoUsd, fundedThrough: now + 7 * 86400000, writesBlocked: false };
+      return this.storage(state, { action: 'status' });
+    }
+    if (typeof input.id !== 'string' || !/^r2:[A-Za-z0-9:_-]{1,240}$/.test(input.id) || !Number.isSafeInteger(input.costNanoUsd)
+      || !integer(input.occurredAt) || input.occurredAt > now || !input.evidence || typeof input.evidence !== 'object') throw new Error('invalid_request');
+    const receipts = wallet.storageReceipts ??= {};
+    const evidence = JSON.stringify(input.evidence), previous = receipts[input.id];
+    if (previous) {
+      if (previous.costNanoUsd !== input.costNanoUsd || previous.occurredAt !== input.occurredAt || previous.evidence !== evidence) throw new Error('storage_receipt_conflict');
+      return this.storage(state, { action: 'status' });
+    }
+    const total = (wallet.usedStorageNanoUsd ?? 0) + input.costNanoUsd;
+    if (!Number.isSafeInteger(total) || total < 0) throw new Error('invalid_request');
+    receipts[input.id] = { costNanoUsd: input.costNanoUsd, occurredAt: input.occurredAt, evidence };
+    wallet.usedStorageNanoUsd = total;
+    wallet.monthlyStorageNanoUsd ??= {};
+    const month = input.evidence.month ?? new Date(input.occurredAt).toISOString().slice(0, 7);
+    wallet.monthlyStorageNanoUsd[month] = (wallet.monthlyStorageNanoUsd[month] ?? 0) + input.costNanoUsd;
+    if (wallet.storageHold) wallet.storageHold.remainingNanoUsd = Math.max(0, wallet.storageHold.remainingNanoUsd - Math.max(0, input.costNanoUsd));
+    this.queue(state, { key: input.id, type: input.evidence.adjustment ? 'storage_adjustment' : 'storage', occurredAt: input.occurredAt,
+      data: { ...input.evidence, costNanoUsd: input.costNanoUsd } });
+    return this.storage(state, { action: 'status' });
   }
   inference(state, input) {
     const integer = value => Number.isSafeInteger(value) && value >= 0;
@@ -246,13 +295,14 @@ export class PrepaidWallet {
       return { values, next: start + limit < rows.length ? values.at(-1).id : null };
     };
     const resources = page(completed, resourceCursor), fundingPage = page(fundings, fundingCursor);
-    const usedCents = ((state.wallet?.usedUnitMs ?? 0) + m.live + m.inferenceUsed) / UNIT_MS_PER_CENT;
+    const usedCents = ((state.wallet?.usedUnitMs ?? 0) + m.live + m.inferenceUsed + m.storageUsed) / UNIT_MS_PER_CENT;
     const attributedUnitMs = Object.values(state.wallet?.resources ?? {}).reduce((sum, row) => sum + row.unitMs, 0);
     const unattributedUsedCents = Math.max(0, (state.wallet?.usedUnitMs ?? 0) - attributedUnitMs) / UNIT_MS_PER_CENT;
     return { asOf, balance: this.status(state, asOf), totals: {
       fundedCents: fundings.reduce((sum, row) => sum + row.amountCents, 0),
       revokedCents: fundings.reduce((sum, row) => sum + row.revokedCents, 0), usedCents, unattributedUsedCents,
-      inferenceUsedCents: (state.wallet?.usedInferenceMicroUsd ?? 0) / 10000 },
+      inferenceUsedCents: (state.wallet?.usedInferenceMicroUsd ?? 0) / 10000,
+      storageUsedCents: (state.wallet?.usedStorageNanoUsd ?? 0) / 10000000 },
       currentHourlyCents: activeResources.filter(row => row.active).reduce((sum, row) => sum + row.hourlyCents, 0),
       activeResources, resources: resources.values.map(row => toResource(row)), fundings: fundingPage.values,
       nextResourceCursor: resources.next, nextFundingCursor: fundingPage.next,
@@ -291,7 +341,7 @@ export class PrepaidWallet {
     const adHocReserved = prepaidLeases(state).filter(lease => lease.lifecycle !== 'production')
       .reduce((sum, lease) => sum + unitsBetween(lease, this.account.now(), Infinity), 0);
     return !state.wallet?.fundingRevoked && this.productionFunding(state) >= needed
-      && (state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - adHocReserved - m.inferenceReserved >= needed;
+      && (state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - adHocReserved - m.inferenceReserved - m.storageReserved >= needed;
   }
   status(state, now = this.account.now()) {
     const m = this.metrics(state, now), settings = state.wallet?.autoRecharge ?? { enabled: false, amountCents: 500, monthlyLimitCents: 500, status: 'disabled' };

@@ -304,7 +304,7 @@ export class ContainerAccountController {
       limits: state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS,
       usage: { month, starts: state.usage[month] ?? 0,
         computeUnitHours: prepaid ? (prepaid.monthly - prepaid.monthlyInference) / 3600000 : Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
-        reservedComputeUnitHours: (prepaid ? prepaid.monthReserved - prepaid.inferenceReserved : reservedUnitMs) / 3600000,
+        reservedComputeUnitHours: (prepaid ? prepaid.monthReserved - prepaid.inferenceReserved - prepaid.storageReserved : reservedUnitMs) / 3600000,
         availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
         concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers, imageCatalog: state.imageCatalog ?? [] };
   }
@@ -344,9 +344,15 @@ export class ContainerAccountController {
           const fundings = Object.values(state.wallet?.fundings ?? {}).map(row => ({ id: row.id, creditCents: row.amountCents, revokedCents: row.disputed ? row.amountCents : row.refundedCents }));
           const usedUnitMs = (state.wallet?.usedUnitMs ?? 0) + (state.wallet?.usedInferenceMicroUsd ?? 0) * 180;
           this.billing.wallet.queue(state, { key: `wallet_checkpoint:${crypto.randomUUID()}`, type: 'wallet_checkpoint', occurredAt: asOf,
-            data: { asOf, usedUnitMs, fundings } });
+            data: { asOf, usedUnitMs, usedStorageNanoUsd: state.wallet?.usedStorageNanoUsd ?? 0, fundings } });
           await this.saveState(state);
           return this.respond({ asOf, usedUnitMs, fundings, pendingEvents: Object.keys(state.wallet?.accounting?.pending ?? {}).length });
+        }
+        if (path === '/billing/storage') {
+          if (body.action === 'reserve') await this.billing.wallet.maybeRecharge(state);
+          const result = this.billing.wallet.storage(state, body);
+          await this.saveState(state);
+          return this.respond(result);
         }
         if (path === '/billing/inference') {
           this.billing.wallet.inference(state, body);
@@ -370,13 +376,13 @@ export class ContainerAccountController {
         return this.respond({ balance: this.billing.wallet.status(state) });
       });
     } catch (error) {
-      const status = ['insufficient_balance', 'spend_limit_exceeded'].includes(error.message) ? 402 : error.message === 'account_mismatch' ? 403 : ['spend_limit_below_committed_usage', 'payment_conflict', 'build_billing_reconciliation_required'].includes(error.message) ? 409 : 400;
-      return this.respond({ error: ['insufficient_balance','spend_limit_exceeded','build_billing_reconciliation_required','account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge','invalid_history_cursor'].includes(error.message) ? error.message : 'invalid_request' }, status);
+      const status = ['insufficient_balance', 'spend_limit_exceeded'].includes(error.message) ? 402 : error.message === 'account_mismatch' ? 403 : ['spend_limit_below_committed_usage', 'payment_conflict', 'build_billing_reconciliation_required', 'storage_receipt_conflict'].includes(error.message) ? 409 : 400;
+      return this.respond({ error: ['insufficient_balance','spend_limit_exceeded','storage_receipt_conflict','build_billing_reconciliation_required','account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge','invalid_history_cursor'].includes(error.message) ? error.message : 'invalid_request' }, status);
     }
   }
   async fetch(request) {
     const url = new URL(request.url);
-    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint', '/billing/inference'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
+    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint', '/billing/inference', '/billing/storage'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       return this.serialized(async () => {

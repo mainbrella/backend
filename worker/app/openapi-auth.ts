@@ -47,7 +47,7 @@ export function registerAuthRoutes(api: OpenAPIApi, handler: LegacyHandler): voi
   }, handler);
   register(api, "delete", "/auth/app/me", {
     operationId: "deleteNativeAccount", tags: ["Authentication"], summary: "Delete the native app account", security: nativeSecurity,
-    description: "Linked providers require fresh provider credentials before deletion.",
+    description: "Linked providers require fresh provider credentials before deletion. Git R2 cleanup is queued durably in the same database transaction before deleting the account; retained financial evidence survives account deletion.",
     request: requestBody(z.object({ google_id_token: z.string().optional(), google_access_token: z.string().optional(),
       apple_identity_token: z.string().optional(), apple_nonce: z.string().optional(), apple_authorization_code: z.string().optional() }), false),
     responses: { 200: jsonResponse(z.object({ deleted: z.boolean() })), ...errors(401, 403, 409, 502, 503) },

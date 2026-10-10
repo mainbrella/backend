@@ -22,8 +22,9 @@ export function buildStorageFixture(env: Env) {
     },
     async list({ prefix, limit = 1000 }: R2ListOptions = {}) {
       const keys = [...objects.keys()].filter(key => key.startsWith(prefix ?? '')).sort();
-      return { objects: keys.slice(0, limit).map(key => ({ key })), truncated: keys.length > limit };
+      return { objects: keys.slice(0, limit).map(key => ({ key, size: objects.get(key)!.length })), truncated: keys.length > limit };
     },
+    async head(key: string) { const bytes = objects.get(key); return bytes ? { key, size: bytes.length } : null; },
     async delete(keys: string | string[]) { for (const key of typeof keys === 'string' ? [keys] : keys) objects.delete(key); },
   } as unknown as R2Bucket;
   return { objects, puts, reads };

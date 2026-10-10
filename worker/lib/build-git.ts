@@ -1,3 +1,4 @@
+import { putStoredObject, getStoredObject, listStoredObjects, deleteStoredObjects, storageMetered, acquireStorageLock, releaseStorageLock } from './r2-storage';
 import { BuildError, ownedBuildApp, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
 import { buildImageBytes, buildImagePath, savedBuildImages, buildImageEntries } from './build-images';
 import { buildGitProgram } from './build-git-program';
@@ -10,7 +11,7 @@ export type BuildGitVersion = {
   source_json: string; lockfile: string | null; assets_json: string; message: string; verified: number; created_at: string;
 };
 type Part = { key: string; size: number; sha256: string };
-type Bundle = { schemaVersion: 1; commitId: string; size: number; parts: Part[] };
+type Bundle = { schemaVersion: 1; commitId: string; bundleHead?: string; size: number; parts: Part[] };
 export type BuildGitRuntime = {
   run(label: string, command: string): Promise<{ status: string; stdout: string; stderr: string }>;
   write(path: string, content: string | Uint8Array<ArrayBuffer>): Promise<void>;
@@ -24,16 +25,20 @@ export const publicGitVersion = (version: BuildGitVersion) => ({ id: version.id,
 
 async function readBundle(env: Env, userId: string, appId: string, version: BuildGitVersion): Promise<Bundle> {
   if (!env.BUCKET || !version.bundle_key.startsWith(prefix(userId, appId))) throw new BuildError('build_git_unavailable');
-  const object = await env.BUCKET.get(version.bundle_key);
+  // A previous full-history bundle may have been compacted after this caller
+  // loaded its version row. Resolve the current immutable backing bundle.
+  const current = await buildGitVersion(env, appId, version.id);
+  if (!current) throw new BuildError('build_git_unavailable');
+  const object = await getStoredObject(env, { userId, appId }, current.bundle_key);
   if (!object) throw new BuildError('build_git_unavailable');
   const bundle = await object.json<Bundle>();
-  if (bundle.schemaVersion !== 1 || bundle.commitId !== version.commit_id || !/^[a-f0-9]{40}$/.test(bundle.commitId)
+  if (bundle.schemaVersion !== 1 || !/^[a-f0-9]{40}$/.test(bundle.commitId) || !/^[a-f0-9]{40}$/.test(version.commit_id)
     || !Number.isSafeInteger(bundle.size) || bundle.size < 1 || bundle.size > 128 * 1024 * 1024
     || !Array.isArray(bundle.parts) || !bundle.parts.length || bundle.parts.length > 128
     || bundle.parts.some(part => !part.key.startsWith(prefix(userId, appId)) || !/^[a-f0-9]{64}$/.test(part.sha256)
       || !Number.isSafeInteger(part.size) || part.size < 1 || part.size > 1024 * 1024)
     || bundle.parts.reduce((total, part) => total + part.size, 0) !== bundle.size) throw new BuildError('build_git_unavailable');
-  return bundle;
+  return { ...bundle, bundleHead: bundle.commitId, commitId: version.commit_id };
 }
 async function prepare(env: Env, params: BuildParams, runtime: BuildGitRuntime, parent: BuildGitVersion | null, label: string) {
   const result = await runtime.run(`${label}-directories`, `mkdir -p ${BUILD_GIT_ROOT}/parts ${BUILD_GIT_ROOT}/snapshot /workspace/app`);
@@ -41,7 +46,7 @@ async function prepare(env: Env, params: BuildParams, runtime: BuildGitRuntime, 
   await runtime.write(`${BUILD_GIT_ROOT}/git.cjs`, buildGitProgram);
   const bundle = parent ? await readBundle(env, params.userId, params.appId, parent) : null;
   for (const [index, part] of (bundle?.parts ?? []).entries()) {
-    const object = await env.BUCKET!.get(part.key);
+    const object = await getStoredObject(env, params, part.key);
     if (!object || object.size !== part.size) throw new BuildError('build_git_unavailable');
     await runtime.write(`${BUILD_GIT_ROOT}/parts/${index}`, new Uint8Array(await object.arrayBuffer()));
   }
@@ -95,7 +100,7 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
     // may have committed before its response was lost, so reconcile on every attempt.
     if (await buildGitVersion(env, params.appId, params.turnId)) return;
     const source = await storeBuildSource(env, params, files);
-    const storedLockfile = lockfile === null ? null : await storeBuildText(env, params, lockfile);
+    const storedLockfile = lockfile === null ? null : await storeBuildText(env, params, lockfile, 'source');
     for (const [path, content] of Object.entries(snapshot)) if (path === '.gitignore' || content instanceof Uint8Array)
       await storeBuildObject(env, params, typeof content === 'string' ? new TextEncoder().encode(content) : content, path === '.gitignore' ? 'text/plain; charset=utf-8' : 'image/jpeg');
     const parts: Part[] = [];
@@ -106,11 +111,11 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
       const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
       if (bytes.byteLength !== part.size || hash !== part.sha256) throw new BuildError('build_git_unavailable');
       const key = `${prefix(params.userId, params.appId)}parts/${hash}`;
-      await env.BUCKET!.put(key, bytes, { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
+      await putStoredObject(env, params, key, bytes, 'history', { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
       parts.push({ ...part, key });
     }
     const bundleKey = `${prefix(params.userId, params.appId)}bundles/${output.commitId}.json`;
-    await env.BUCKET!.put(bundleKey, JSON.stringify({ schemaVersion: 1, commitId: output.commitId, size: output.size, parts } satisfies Bundle),
+    await putStoredObject(env, params, bundleKey, JSON.stringify({ schemaVersion: 1, commitId: output.commitId, size: output.size, parts } satisfies Bundle), 'history',
       { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
     // Publish the database head only after all immutable R2 objects exist.
     await env.DB.batch([
@@ -119,6 +124,13 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
         source, storedLockfile, JSON.stringify(assets.map(image => image.id)), message, verified ? 1 : 0, turn.created_at),
       env.DB.prepare('UPDATE build_apps SET git_version_id = ? WHERE id = ? AND user_id = ? AND active_turn_id = ? AND git_version_id IS ?')
         .bind(params.turnId, params.appId, params.userId, params.turnId, app.git_version_id ?? null),
+      // The newly verified full bundle contains every ancestor. Retain each
+      // version's source snapshot and commit, but share its backing history.
+      // Orphan GC later removes the superseded manifests and unique parts.
+      env.DB.prepare(`WITH RECURSIVE ancestors(id) AS (SELECT ? UNION
+        SELECT v.parent_version_id FROM build_git_versions v JOIN ancestors a ON v.id=a.id WHERE v.parent_version_id IS NOT NULL)
+        UPDATE build_git_versions SET bundle_key=? WHERE app_id=? AND id IN(SELECT id FROM ancestors)`)
+        .bind(params.turnId, bundleKey, params.appId),
     ]);
   });
   return (await buildGitVersion(env, params.appId, params.turnId))!;
@@ -138,9 +150,21 @@ export async function exportBuildGit(env: Env, userId: string, appId: string, ve
   let index = 0;
   const body = new ReadableStream<Uint8Array>({ async pull(controller) {
     if (index === bundle.parts.length) { controller.close(); return; }
-    const part = bundle.parts[index++], object = await env.BUCKET!.get(part.key);
+    const part = bundle.parts[index++], object = await getStoredObject(env, { userId, appId }, part.key);
     if (!object || object.size !== part.size) { controller.error(new Error('Repository unavailable')); return; }
-    controller.enqueue(new Uint8Array(await object.arrayBuffer()));
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (hash !== part.sha256) { controller.error(new Error('Repository unavailable')); return; }
+    if (index === 1 && bundle.bundleHead !== bundle.commitId) {
+      // Git bundle headers advertise refs separately from their object pack.
+      // Repoint main to this retained ancestor; both hashes are 40 bytes, so
+      // the pack bytes, offsets, and Content-Length remain unchanged.
+      const header = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 4096)));
+      const ref = `${bundle.bundleHead} refs/heads/main\n`, offset = header.indexOf(ref), end = header.indexOf('\n\n');
+      if (offset < 0 || end < 0 || offset > end) { controller.error(new Error('Repository unavailable')); return; }
+      bytes.set(new TextEncoder().encode(bundle.commitId), offset);
+    }
+    controller.enqueue(bytes);
   } });
   return new Response(body, { headers: { ...headers, 'Content-Type': 'application/octet-stream', 'Content-Length': String(bundle.size),
     'Content-Disposition': 'attachment; filename="mainbrella-app.bundle"', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -148,12 +172,15 @@ export async function exportBuildGit(env: Env, userId: string, appId: string, ve
 export async function deleteBuildGit(env: Env, userId: string, appId: string) {
   if (!env.BUCKET) return;
   const taskPrefix = prefix(userId, appId);
+  const token = storageMetered(env) ? await acquireStorageLock(env, appId) : null;
+  try {
   // Delete and list from the beginning again so deletion does not invalidate a cursor.
   for (;;) {
-    const objects = await env.BUCKET.list({ prefix: taskPrefix, limit: 1000 });
+    const objects = await listStoredObjects(env, { userId, appId }, { prefix: taskPrefix, limit: 1000 });
     if (!objects.objects.length) return;
-    await env.BUCKET.delete(objects.objects.map(object => object.key));
+    await deleteStoredObjects(env, { userId, appId }, objects.objects.map(object => object.key));
   }
+  } finally { if (token) await releaseStorageLock(env, appId, token); }
 }
 export async function cleanupDeletedBuildGit(env: Env) {
   if (!env.BUCKET) return;

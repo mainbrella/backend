@@ -1,4 +1,5 @@
 import { BuildError, type BuildFiles } from './build-contract';
+import { putStoredObject, getStoredObject, type StoragePurpose } from './r2-storage';
 
 export type BuildStorageOwner = { userId: string; appId: string };
 export type BuildObjectRef = { $r2: string; size: number; sha256: string };
@@ -18,17 +19,20 @@ export function buildObjectRef(value: unknown): BuildObjectRef | null {
 function checkRef(owner: BuildStorageOwner, ref: BuildObjectRef) {
   if (ref.$r2 !== `${buildStoragePrefix(owner)}objects/${ref.sha256}`) throw new BuildError('build_source_unavailable');
 }
-export async function storeBuildObject(env: Env, owner: BuildStorageOwner, bytes: Uint8Array<ArrayBuffer>, contentType = 'text/plain; charset=utf-8'): Promise<BuildObjectRef> {
+export async function storeBuildObject(env: Env, owner: BuildStorageOwner, bytes: Uint8Array<ArrayBuffer>, contentType = 'text/plain; charset=utf-8', purpose: StoragePurpose = contentType.startsWith('image/') ? 'assets' : 'source'): Promise<BuildObjectRef> {
   if (!env.BUCKET) throw new BuildError('build_source_unavailable');
   const sha256 = await buildContentHash(bytes), ref = { $r2: `${buildStoragePrefix(owner)}objects/${sha256}`, size: bytes.length, sha256 };
   try {
-    await env.BUCKET.put(ref.$r2, bytes, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } });
-  } catch { throw new BuildError('build_source_unavailable'); }
+    await putStoredObject(env, owner, ref.$r2, bytes, purpose, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } });
+  } catch (error) {
+    if (error instanceof Error && /storage_(funding_required|limit_exceeded)|insufficient_balance|spend_limit_exceeded/.test(error.message)) throw new BuildError(error.message.includes('storage_limit') ? 'storage_limit_exceeded' : 'storage_funding_required', 402);
+    throw new BuildError('build_source_unavailable');
+  }
   return ref;
 }
 export async function getBuildObject(env: Env, owner: BuildStorageOwner, ref: BuildObjectRef) {
   checkRef(owner, ref);
-  const object = await env.BUCKET?.get(ref.$r2);
+  const object = env.BUCKET ? await getStoredObject(env, owner, ref.$r2) : null;
   if (!object || object.size !== ref.size) throw new BuildError('build_source_unavailable');
   return object;
 }
@@ -37,8 +41,8 @@ export async function readBuildObject(env: Env, owner: BuildStorageOwner, ref: B
   if (await buildContentHash(bytes) !== ref.sha256) throw new BuildError('build_source_unavailable');
   return bytes;
 }
-export async function storeBuildText(env: Env, owner: BuildStorageOwner, text: string) {
-  return JSON.stringify(await storeBuildObject(env, owner, encoder.encode(text)));
+export async function storeBuildText(env: Env, owner: BuildStorageOwner, text: string, purpose: StoragePurpose = 'diagnostics') {
+  return JSON.stringify(await storeBuildObject(env, owner, encoder.encode(text), 'text/plain; charset=utf-8', purpose));
 }
 export async function readBuildText(env: Env, owner: BuildStorageOwner, stored: string) {
   let parsed: unknown;

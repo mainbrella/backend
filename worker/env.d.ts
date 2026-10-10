@@ -38,6 +38,10 @@ interface Env {
   IMAGE_BUILD_SECRET?: string;
   SUPABASE_URL?: string;
   BUCKET?: R2Bucket;
+  R2_BILLING_MODE?: 'off' | 'meter' | 'charge';
+  R2_CHARGE_FROM?: string;
+  R2_MARKUP_BPS?: string;
+  R2_ACCOUNT_MAX_BYTES?: string;
   ANONYMOUS_SIGNUP_LIMIT?: RateLimit;
   ACQUISITION_ENABLED?: string;
   ACQUISITION_SUBMISSION_LIMIT?: RateLimit;

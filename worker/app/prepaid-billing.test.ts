@@ -129,7 +129,7 @@ test('history reads use the owned controller, validate pagination and work witho
   assert.equal(response.status, 200);
   const history = await response.json() as any;
   assert.equal(history.asOf, now); assert.equal(history.balance.balanceCents, 1500);
-  assert.deepEqual(history.totals, { fundedCents: 2000, revokedCents: 500, usedCents: 0, unattributedUsedCents: 0 });
+  assert.deepEqual(history.totals, { fundedCents: 2000, revokedCents: 500, usedCents: 0, unattributedUsedCents: 0, inferenceUsedCents: 0, storageUsedCents: 0 });
   assert.deepEqual(history.fundings, [{ id: 'pi_history', createdAt: now - 1000, amountCents: 2000, revokedCents: 500, reason: 'refund' }]);
   assert.deepEqual(stored, before); assert.equal(f.calls.length, 0);
   assert.equal(response.headers.get('Cache-Control'), 'no-store');

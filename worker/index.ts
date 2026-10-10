@@ -1,3 +1,5 @@
+import { runStorageBilling } from './lib/r2-billing';
+import { inventoryStoragePage, cleanupStorageOrphans, expireUnfundedStorage } from './lib/r2-maintenance';
 import { handleRequest } from "./app/router";
 import { AppState } from "./durable-objects/app-state";
 import { collectStatus } from './app/status';
@@ -18,6 +20,12 @@ export default {
     return handleRequest(request, env, ctx);
   },
   scheduled(_event, env, ctx) {
+    ctx.waitUntil((async () => {
+      await inventoryStoragePage(env);
+      await runStorageBilling(env);
+      await expireUnfundedStorage(env);
+      await cleanupStorageOrphans(env);
+    })().catch(() => { console.error('storage_reconciliation_failed'); }));
     ctx.waitUntil(reconcileBuildTurns(env).catch(() => { console.error('build_reconciliation_failed'); }));
     ctx.waitUntil(collectStatus(env).catch(() => { console.error('status_collection_failed'); }));
     if (env.ACQUISITION_ENABLED === 'true') {

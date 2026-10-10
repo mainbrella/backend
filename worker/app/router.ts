@@ -1,3 +1,4 @@
+import { handleStorageBillingRequest } from './storage-billing';
 import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleGithubImportRequest } from './github-import';
 import { handleAPIKeysRequest } from "./api-keys";
@@ -40,6 +41,7 @@ async function handleLegacyRequest(
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/') || url.pathname === '/admin/acquisition/leads' || url.pathname === '/admin/acquisition/events') return handleAcquisitionRequest(request, env);
+  if (url.pathname === '/billing/storage' || url.pathname === '/admin/accounting/storage-invoices') return handleStorageBillingRequest(request, env);
   if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
