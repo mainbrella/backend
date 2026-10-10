@@ -7,7 +7,7 @@ export const USAGE_PRICING = Object.freeze({
 export const validSpendLimit = value => Number.isSafeInteger(value)
   && value >= USAGE_PRICING.minimumCents && value <= USAGE_PRICING.maxSpendLimitCents;
 export const validBillingPeriod = value => Boolean(value && /^cus_[A-Za-z0-9]+$/.test(value.customerId)
-  && /^sub_[A-Za-z0-9]+$/.test(value.subscriptionId)
+  && (value.kind === 'prepaid' || /^sub_[A-Za-z0-9]+$/.test(value.subscriptionId))
   && Number.isSafeInteger(value.periodStart) && Number.isSafeInteger(value.periodEnd)
   && value.periodStart > 0 && value.periodEnd > value.periodStart);
-export const billingPeriodKey = period => `${period.subscriptionId}:${period.periodStart}`;
+export const billingPeriodKey = period => `${period.kind === 'prepaid' ? `prepaid:${period.customerId}` : period.subscriptionId}:${period.periodStart}`;

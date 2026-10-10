@@ -1,5 +1,6 @@
 import { activeTrial, type Trial } from './trial-coupons';
 import { billingSubscription, planPrices, stripeRequest, subscriptionPlan, type BillingEnv, type Plan, type StripeSubscription } from "./stripe";
+import { accountBillingRequest, prepaidAccount } from './prepaid-billing';
 
 export interface Entitlement { plan: Plan | null; active: boolean; validUntil: number | null; checkedAt?: number; billing?: import('../../containers/usage-policy.js').BillingPeriod }
 export interface BillingRecord { stripe_customer_id: string; checkout_session_id: string | null }
@@ -110,8 +111,24 @@ export async function syncSubscriptionRecord(env: BillingEnv, userId: string, su
       subscription?.cancel_at_period_end ? 1 : 0, subscription?.items.data.find(item => plan && item.price.id === planPrices(env)[plan])?.current_period_end ?? null, userId).run();
 }
 
-export async function resolveBillingState(env: BillingEnv, userId: string): Promise<BillingState> {
+export async function resolveBillingState(env: BillingEnv, userId: string, includeLegacySubscription = false): Promise<BillingState> {
   const checkedAt = Date.now();
+  const prepaid = await prepaidAccount(env, userId);
+  if (prepaid) {
+    // Read the stored account ledger without reconciliation: the controller
+    // calls this resolver during reconciliation, so it must not recurse.
+    const { balance } = await accountBillingRequest(env, userId, '/billing/balance');
+    const now = new Date(checkedAt);
+    const periodStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    const periodEnd = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+    const active = Number.isFinite(balance.balanceCents) && balance.balanceCents > 0;
+    const record = includeLegacySubscription ? await env.DB.prepare('SELECT stripe_customer_id,checkout_session_id FROM pro_billing WHERE user_id = ?').bind(userId).first<BillingRecord>() : null;
+    const subscription = record ? await billingSubscription(env, record.stripe_customer_id) : null;
+    if (record) await syncSubscriptionRecord(env, userId, subscription);
+    return { record, subscription, trial: null, entitlement: { plan: active ? 'usage' : null, active,
+      validUntil: active ? checkedAt + 86400000 : null, checkedAt,
+      billing: { kind: 'prepaid', customerId: prepaid.stripe_customer_id, periodStart, periodEnd } } };
+  }
   const record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
     .bind(userId).first<BillingRecord>();
   const subscription = record ? await billingSubscription(env, record.stripe_customer_id) : null;

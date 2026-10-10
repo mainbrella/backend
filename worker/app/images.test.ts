@@ -18,7 +18,7 @@ const account = '2b7a9be82bb64187230703b024e25157';
 async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity']) {
+  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity', '019_prepaid_billing']) {
     db.exec(readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8'));
   }
   db.prepare("INSERT INTO users (id, email) VALUES ('owner', 'owner@test.com'), ('other', 'other@test.com')").run();

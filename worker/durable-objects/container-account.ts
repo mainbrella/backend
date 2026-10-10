@@ -1,5 +1,6 @@
 import { resolveEntitlement } from '../lib/entitlements';
 import { invoiceResourceUsage } from '../lib/usage-billing';
+import { prepaidRecharge } from '../lib/prepaid-billing';
 import { DurableObject } from 'cloudflare:workers';
 import { ContainerAccountController, machineName } from '../../containers/container-account-core.js';
 import { PrivateServicesController } from '../../containers/private-services.js';
@@ -13,7 +14,7 @@ export class ContainerAccount extends DurableObject<Env> {
       if (!env.USER_CONTAINER) throw new Error('missing_container_binding');
       return env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(machineName(userId, id)));
     };
-    this.controller = new ContainerAccountController(ctx, machineFor, undefined, event => invoiceResourceUsage(env, event), userId => resolveEntitlement(env, userId));
+    this.controller = new ContainerAccountController(ctx, machineFor, undefined, event => invoiceResourceUsage(env, event), userId => resolveEntitlement(env, userId), entry => prepaidRecharge(env, entry));
     this.privateServices = new PrivateServicesController(ctx, machineFor);
   }
   fetch(request: Request): Promise<Response> {

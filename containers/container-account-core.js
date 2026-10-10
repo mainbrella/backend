@@ -6,6 +6,7 @@ import { readFileBytes } from './file-contract.js';
 import { AccountWorkspaces } from './workspaces.js';
 import { AccountBilling } from './account-billing.js';
 import { validSpendLimit } from './usage-policy.js';
+import { prepaidState, utcPeriod } from './prepaid-wallet.js';
 
 const KEY = 'containerAccount';
 const CREATION_PREFIX = 'creation:';
@@ -18,12 +19,12 @@ export const machineName = (userId, id) => id === 'small' ? `user:${userId}` : `
 // One serialized account owner reserves every start before provisioning a slot.
 // It survives restarts and plan/customer/subscription changes without resetting usage.
 export class ContainerAccountController {
-  constructor(ctx, machineFor, now = () => Date.now(), invoiceUsage, refreshEntitlement) {
+  constructor(ctx, machineFor, now = () => Date.now(), invoiceUsage, refreshEntitlement, recharge) {
     Object.assign(this, { ctx, machineFor, now, refreshEntitlement });
     this.production = new AccountProduction(this);
     this.tail = Promise.resolve();
     this.workspaces = new AccountWorkspaces(this);
-    this.billing = new AccountBilling(this, invoiceUsage);
+    this.billing = new AccountBilling(this, invoiceUsage, recharge);
   }
   async serialized(fn) {
     const previous = this.tail;
@@ -102,7 +103,7 @@ export class ContainerAccountController {
     const limits = PLAN_LIMITS[state.entitlement.plan];
     const remaining = state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state)
       : limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
-    endAt = Math.min(endAt, state.entitlement.plan === 'usage' ? state.entitlement.billing?.periodEnd ?? startAt : Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+    endAt = Math.min(endAt, state.entitlement.plan === 'usage' ? state.entitlement.billing?.kind === 'prepaid' ? Infinity : state.entitlement.billing?.periodEnd ?? startAt : Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
       startAt + Math.max(0, Math.floor(remaining / size.computeUnits)));
     const unitMs = (endAt - startAt) * size.computeUnits;
     state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
@@ -160,6 +161,7 @@ export class ContainerAccountController {
       alarmAt = Math.min(alarmAt ?? Infinity, this.now() + 60_000);
     }
     if (Object.keys(state.production ?? {}).length) alarmAt = Math.min(alarmAt ?? Infinity, this.now() + PRODUCTION_POLL_MS);
+    if (state.wallet?.pendingRecharge) alarmAt = Math.min(alarmAt ?? Infinity, this.now() + 60000);
     if (state.nextCreationExpiry) alarmAt = Math.min(alarmAt ?? Infinity, state.nextCreationExpiry);
     const workspaceAlarm = await this.workspaces.nextAlarm();
     if (Number.isFinite(workspaceAlarm)) alarmAt = Math.min(alarmAt ?? Infinity, workspaceAlarm);
@@ -167,6 +169,19 @@ export class ContainerAccountController {
     else await this.ctx.storage.deleteAlarm();
   }
   async reconcile(state, entitlement, recoverProduction = true) {
+    if (prepaidState(state)) {
+      await this.billing.wallet.maybeRecharge(state);
+      if (state.wallet?.fundingRevoked) {
+        state.entitlement = { active: false, plan: null, validUntil: null, checkedAt: Math.max(this.now(), (state.entitlement?.checkedAt ?? 0) + (state.entitlement?.active ? 1 : 0)) };
+        await this.saveState(state, true);
+        const failed = await this.stopIndependently(state, state.slots, state.entitlement);
+        state.slots = [...new Set([...failed, ...Object.keys(state.production ?? {})])];
+        if (!failed.length && this.billing.wallet.metrics(state).remaining >= 0) delete state.wallet.fundingRevoked;
+        await this.saveState(state, failed.length > 0);
+        if (failed.length) throw new Error('container_reconciliation_failed');
+      }
+      entitlement = this.prepaidEntitlement(state);
+    }
     if ((state.entitlement?.checkedAt ?? 0) > (entitlement.checkedAt ?? 0)
       || (state.entitlement?.checkedAt === entitlement.checkedAt && !state.entitlement.active && entitlement.active)) entitlement = state.entitlement;
     if (!validEntitlement(entitlement, this.now())) entitlement = { active: false, plan: null, validUntil: null, checkedAt: entitlement.checkedAt };
@@ -281,16 +296,62 @@ export class ContainerAccountController {
       .reduce((sum, lease) => sum + Math.max(0, lease.endAt - Math.max(this.now(), lease.startAt)) * machineSize(lease.size).computeUnits, 0);
     const committedUnitMs = state.computeUsage[month] ?? 0;
     const billing = this.billing.status(state);
+    const prepaid = prepaidState(state) ? this.billing.wallet.metrics(state) : null;
     return { billing, sizes: MACHINE_SIZES, plan: state.entitlement.plan, active: state.entitlement.active,
       limits: state.entitlement.active ? PLAN_LIMITS[state.entitlement.plan] : NO_PLAN_LIMITS,
       usage: { month, starts: state.usage[month] ?? 0,
-        computeUnitHours: Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
-        reservedComputeUnitHours: reservedUnitMs / 3600000,
+        computeUnitHours: prepaid ? prepaid.monthly / 3600000 : Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
+        reservedComputeUnitHours: (prepaid ? prepaid.monthReserved : reservedUnitMs) / 3600000,
         availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
         concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers, imageCatalog: state.imageCatalog ?? [] };
   }
+  prepaidEntitlement(state) {
+    const active = Boolean(state.wallet && !state.wallet.fundingRevoked && this.billing.wallet.metrics(state).balance > 0);
+    return { active, plan: active ? 'usage' : null, validUntil: active ? this.now() + 86400000 : null,
+      checkedAt: Math.max(this.now(), (state.entitlement?.checkedAt ?? 0) + (active !== state.entitlement?.active ? 1 : 0)),
+      ...(state.wallet ? { billing: { kind: 'prepaid', customerId: state.wallet.customerId, ...utcPeriod(this.now()) } } : {}) };
+  }
+  async prepaidRequest(request, path) {
+    const userId = request.headers.get('x-mainbrella-user');
+    if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return this.respond({ error: 'not_authenticated' }, 401);
+    const read = path === '/billing/balance';
+    if (request.method !== (read ? 'GET' : 'POST')) return this.respond({ error: 'method_not_allowed' }, 405);
+    const load = async () => {
+      const stored = await this.ctx.storage.get(KEY);
+      if (stored && stored.userId !== userId) throw new Error('account_mismatch');
+      return stored ?? { userId, slots: [], usage: {}, computeUsage: {}, leases: {}, pending: {}, reservations: {}, nextReservationId: 0,
+        entitlement: { active: false, plan: null, validUntil: null, checkedAt: this.now() } };
+    };
+    try {
+      // Entitlement refresh can call this same DO while an alarm holds the
+      // mutation lock. A balance read neither acquires it nor provisions guests.
+      if (read) return this.respond({ balance: this.billing.wallet.status(await load()) });
+      return await this.serialized(async () => {
+        const state = await load(), body = await request.json();
+        if (path === '/billing/settings') this.billing.wallet.settings(state, body);
+        else if (this.billing.wallet.applyFunding(state, body)) state.wallet.fundingRevoked = true;
+        state.entitlement = this.prepaidEntitlement(state);
+        // Revocations survive interruption before any pending boot is fenced.
+        await this.saveState(state, true);
+        if (state.wallet?.fundingRevoked && state.slots.length) {
+          const ids = [...state.slots];
+          const failed = await this.stopIndependently(state, ids, { active: false, plan: null, validUntil: null, checkedAt: state.entitlement.checkedAt });
+          for (const id of ids) if (!failed.includes(id)) delete state.pending[id];
+          state.slots = [...new Set([...failed, ...Object.keys(state.production ?? {})])];
+          if (!failed.length && this.billing.wallet.metrics(state).remaining >= 0) delete state.wallet.fundingRevoked;
+        } else if (state.wallet?.fundingRevoked && this.billing.wallet.metrics(state).remaining >= 0) delete state.wallet.fundingRevoked;
+        state.entitlement = this.prepaidEntitlement(state);
+        await this.saveState(state, Boolean(state.wallet?.fundingRevoked));
+        return this.respond({ balance: this.billing.wallet.status(state) });
+      });
+    } catch (error) {
+      const status = error.message === 'account_mismatch' ? 403 : error.message === 'spend_limit_below_committed_usage' || error.message === 'payment_conflict' ? 409 : 400;
+      return this.respond({ error: ['account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge'].includes(error.message) ? error.message : 'invalid_request' }, status);
+    }
+  }
   async fetch(request) {
     const url = new URL(request.url);
+    if (['/billing/balance', '/billing/funding', '/billing/settings'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       return this.serialized(async () => {
@@ -356,7 +417,7 @@ export class ContainerAccountController {
           if (selection?.lifecycle === 'production' && entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
           if (selection?.lifecycle === 'production' && selection?.workspaceId) return this.respond({ error: 'invalid_request' }, 400);
           if (entitlement.plan === 'usage') {
-            if (!entitlement.billing || !this.billing.invoiceUsage) return this.respond({ error: 'billing_unavailable' }, 503);
+            if (!entitlement.billing || entitlement.billing.kind !== 'prepaid' && !this.billing.invoiceUsage) return this.respond({ error: 'billing_unavailable' }, 503);
             this.billing.checkPending(state);
           }
           if (!validEntitlement(entitlement, this.now())) {
@@ -386,10 +447,14 @@ export class ContainerAccountController {
           const month = new Date(this.now()).toISOString().slice(0, 7);
           if ((state.usage[month] ?? 0) >= limits.maxStartsPerMonth) return this.respond({ error: 'container_quota_exceeded' }, 429);
           const startAt = this.now();
+          if (selection?.lifecycle === 'production' && prepaidState(state)) {
+            await this.billing.wallet.maybeRecharge(state, size.computeUnits);
+            if (!this.billing.wallet.canLaunchProduction(state, size)) return this.respond({ error: 'insufficient_production_balance' }, 402);
+          }
           const monthEnd = Date.UTC(new Date(startAt).getUTCFullYear(), new Date(startAt).getUTCMonth() + 1, 1);
           const remaining = state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state)
             : limits.maxComputeUnitHours * 3600000 - (state.computeUsage[month] ?? 0);
-          const endAt = Math.min(startAt + (selection?.lifecycle === 'production' ? PRODUCTION_LEASE_MS : limits.maxSessionMs), entitlement.validUntil, entitlement.plan === 'usage' ? entitlement.billing.periodEnd : monthEnd,
+          const endAt = Math.min(startAt + (selection?.lifecycle === 'production' ? PRODUCTION_LEASE_MS : limits.maxSessionMs), entitlement.validUntil, entitlement.plan === 'usage' ? entitlement.billing.kind === 'prepaid' ? Infinity : entitlement.billing.periodEnd : monthEnd,
             startAt + Math.floor(remaining / size.computeUnits));
           if (endAt <= startAt || (entitlement.plan === 'usage' && endAt - startAt < 1000)) return this.respond({ error: entitlement.plan === 'usage' ? 'spend_limit_reached' : 'compute_allowance_exhausted' }, 429);
           const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));

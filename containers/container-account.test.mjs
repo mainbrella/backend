@@ -21,9 +21,10 @@ class Storage {
   async setAlarm(at) { this.alarmAt = at; }
   async deleteAlarm() { this.alarmAt = null; }
 }
-function fixture(initialPlan = 'builder', refresh = false) {
+function fixture(initialPlan = 'builder', refresh = false, recharge) {
   let now = Date.UTC(2026, 9, 5, 12);
-  let plan = initialPlan;
+  const prepaid = initialPlan === 'prepaid';
+  let plan = prepaid ? 'usage' : initialPlan;
   const invoices = [];
   const invoiceUsage = async entry => { invoices.push(structuredClone(entry)); return 'ii_usage'; };
   let periodStart = Date.UTC(2026, 9, 5, 12);
@@ -47,25 +48,123 @@ function fixture(initialPlan = 'builder', refresh = false) {
     return machines.get(key);
   };
   const refreshEntitlement = refresh ? async () => ({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } }) : undefined;
-  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement);
+  const billing = () => prepaid ? { kind: 'prepaid', customerId: 'cus_owner', periodStart: Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1), periodEnd: Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth() + 1, 1) }
+    : { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil };
+  let account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge);
   const request = (method = 'GET', id, overrides = {}, body) => {
     const url = new URL('https://internal/containers');
     if (id) url.searchParams.set('id', id);
     return account.fetch(new Request(url, { method, headers: { 'x-mainbrella-user': 'owner',
-      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, ...(plan === 'usage' ? { billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } } : {}) }), ...overrides }, ...(body ? { body: JSON.stringify(body) } : {}) }));
+      ...entitlementHeaders({ active: paid, plan: paid ? plan : null, validUntil: paid ? validUntil : null, checkedAt: now, ...(plan === 'usage' ? { billing: billing() } : {}) }), ...overrides }, ...(body ? { body: JSON.stringify(body) } : {}) }));
   };
   const read = async (...args) => { const response = await request(...args); return { status: response.status, data: await response.json() }; };
   const billingRequest = async (body, path = '/billing') => {
     const headers = { 'x-mainbrella-user': 'owner', ...entitlementHeaders({ active: paid, plan, validUntil, checkedAt: now,
-      billing: { customerId: 'cus_owner', subscriptionId: 'sub_owner', periodStart, periodEnd: validUntil } }) };
+      billing: billing() }) };
     const response = await account.fetch(new Request(`https://internal${path}`, { method: body ? 'POST' : 'GET', headers,
       ...(body ? { body: JSON.stringify(body) } : {}) }));
     return { status: response.status, data: await response.json() };
   };
   return { ctx, machines, invoices, billingRequest, machineFor, request, read, setPlan(value) { plan = value; }, setPaid(value) { paid = value; },
     setTime(value) { now = value; }, setValidUntil(value) { validUntil = value; }, setPeriodStart(value) { periodStart = value; }, now: () => now,
-    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement); }, alarm: () => account.alarm() };
+    restart() { account = new ContainerAccountController(ctx, machineFor, () => now, invoiceUsage, refreshEntitlement, recharge); }, alarm: () => account.alarm() };
 }
+
+const funding = (f, amountCents = 500, overrides = {}) => ({ id: 'pi_funded', customerId: 'cus_owner', amountCents, refundedCents: 0, disputed: false, kind: 'topup', createdAt: f.now(), ...overrides });
+const fund = (f, amount = 500, overrides = {}) => f.billingRequest(funding(f, amount, overrides), '/billing/funding');
+const walletSettings = (f, input) => f.billingRequest({ customerId: 'cus_owner', ...input }, '/billing/settings');
+const production = { lifecycle: 'production', startupCommand: 'npm start', size: 'lite' };
+
+test('prepaid balance reads never provision and an empty wallet cannot start compute', async () => {
+  const f = fixture('prepaid');
+  assert.equal((await f.billingRequest(undefined, '/billing/balance')).data.balance.balanceCents, 0);
+  assert.equal(f.machines.size, 0);
+  assert.equal((await f.read('POST')).status, 402);
+  assert.equal([...f.machines.values()].reduce((sum, machine) => sum + machine.ctx.container.starts, 0), 0);
+});
+
+test('prepaid production requires 24 hours for the full desired fleet and shared concurrent funding', async () => {
+  const f = fixture('prepaid');
+  await fund(f, 500);
+  await walletSettings(f, { spendLimitCents: 100000 });
+  // Lite uses one compute unit: each day's allocation costs 48 cents.
+  const results = await Promise.all(Array.from({ length: 11 }, () => f.read('POST', undefined, {}, production)));
+  assert.equal(results.filter(result => result.status === 200).length, 10);
+  assert.equal(results.find(result => result.status === 402).data.error, 'insufficient_production_balance');
+  const balance = (await f.billingRequest(undefined, '/billing/balance')).data.balance;
+  assert.ok(balance.availableBalanceCents >= 0);
+  assert.equal(balance.productionHourlyCents, 20);
+});
+
+test('prepaid usage and reserved funds carry across month rollover and eviction without invoices', async () => {
+  const f = fixture('prepaid');
+  f.setTime(Date.UTC(2026, 9, 31, 23, 58));
+  await fund(f, 500); await walletSettings(f, { spendLimitCents: 5000 });
+  assert.equal((await f.read('POST', undefined, {}, production)).status, 200);
+  f.setTime(f.now() + 60000); await f.alarm();
+  const before = (await f.ctx.storage.get('containerAccount')).leases.small.endAt;
+  assert.ok(before > Date.UTC(2026, 10, 1));
+  f.setTime(Date.UTC(2026, 10, 1, 0, 2)); f.restart(); await f.alarm();
+  const state = await f.ctx.storage.get('containerAccount');
+  assert.ok(state.wallet.usedUnitMs > 0);
+  assert.ok(state.wallet.monthlyUnitMs['2026-10'] > 0);
+  assert.ok(state.wallet.monthlyUnitMs['2026-11'] > 0);
+  assert.equal(state.wallet.usedUnitMs, 4 * 60000);
+  const data = (await f.read()).data;
+  assert.ok(data.usage.computeUnitHours > 0);
+  assert.ok(data.usage.reservedComputeUnitHours > 0);
+  assert.equal(data.usage.computeUnitHours, data.billing.computeUnitHours);
+  assert.equal(f.invoices.length, 0);
+  assert.equal((await f.billingRequest(undefined, '/billing/balance')).data.balance.balanceCents, 499);
+});
+
+test('refunds revoke funded leases and delayed success cannot restore refunded credit', async () => {
+  const f = fixture('prepaid'), payment = funding(f);
+  await f.billingRequest(payment, '/billing/funding');
+  await f.read('POST', undefined, {}, production);
+  f.setTime(f.now() + 60000);
+  const result = await f.billingRequest({ ...payment, refundedCents: 500 }, '/billing/funding');
+  assert.equal(result.status, 200); assert.ok(result.data.balance.balanceCents < 0);
+  assert.equal(f.machineFor('owner', 'small').ctx.container.running, false);
+  const replay = await f.billingRequest(payment, '/billing/funding');
+  assert.equal(replay.data.balance.balanceCents, result.data.balance.balanceCents);
+  f.restart(); await f.alarm();
+  assert.equal(f.machineFor('owner', 'small').ctx.container.starts, 1);
+  await fund(f, 500, { id: 'pi_new' }); await f.alarm();
+  assert.equal(f.machineFor('owner', 'small').ctx.container.running, true);
+});
+
+test('switching a running legacy service to prepaid replaces its lease with funded wallet runtime', async () => {
+  const f = fixture('usage');
+  assert.equal((await f.read('POST', undefined, {}, production)).status, 200);
+  f.setTime(f.now() + 60000);
+  await fund(f);
+  assert.equal(f.machineFor('owner', 'small').ctx.container.running, false);
+  await f.alarm();
+  const migrated = await f.ctx.storage.get('containerAccount');
+  assert.equal(migrated.leases.small.billing.kind, 'prepaid');
+  assert.equal(migrated.wallet.usedUnitMs, 0);
+  f.setTime(f.now() + 60000); await f.alarm();
+  assert.equal((await f.ctx.storage.get('containerAccount')).wallet.usedUnitMs, 60000);
+});
+
+test('ambiguous automatic recharge retries its durable identity and funds only a verified success', async () => {
+  const calls = [];
+  let f;
+  f = fixture('prepaid', false, async entry => {
+    calls.push(structuredClone(entry));
+    if (calls.length === 1) throw new Error('lost Stripe response');
+    return { status: 'succeeded', paymentIntentId: 'pi_recharge', funding: funding(f, 500, { id: 'pi_recharge' }) };
+  });
+  await fund(f);
+  await walletSettings(f, { spendLimitCents: 5000, autoRecharge: { enabled: true, amountCents: 500, monthlyLimitCents: 1000 } });
+  await f.read('POST');
+  assert.equal(calls.length, 1);
+  assert.equal((await f.billingRequest(undefined, '/billing/balance')).data.balance.autoRecharge.spentCents, 0);
+  f.restart(); f.setTime(f.now() + 60000); await f.alarm();
+  assert.equal(calls.length, 2); assert.equal(calls[0].identifier, calls[1].identifier);
+  assert.equal((await f.billingRequest(undefined, '/billing/balance')).data.balance.autoRecharge.spentCents, 500);
+});
 
 test('internet-off creation is immutable, idempotent and propagates the provider switch through the trusted runtime', async () => {
   const f = fixture(), headers = { 'Idempotency-Key': 'offline-generation' };

@@ -14,7 +14,7 @@ const subscriptionState = z.object({
 export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, "get", "/subscription/config", {
     operationId: "getSubscriptionConfig", tags: ["Subscriptions"], summary: "Get public plans and billing availability",
-    responses: { 200: jsonResponse(z.object({ google_client_id: z.string().optional(), configured: z.boolean(), usage_configured: z.boolean(), usage_pricing: usagePricingSchema,
+    responses: { 200: jsonResponse(z.object({ google_client_id: z.string().optional(), configured: z.boolean(), usage_configured: z.boolean(), prepaid_configured: z.boolean(), billing_model: z.enum(['prepaid','legacy']), usage_pricing: usagePricingSchema,
       plans: z.record(planSchema, z.object({ name: z.string(), price: z.number(), limits: limitsSchema,
         machine: z.object({ instance: z.string(), cpuVcpu: z.number(), memoryMiB: z.number(), diskGB: z.number() }),
         sizes: z.array(machineSizeSchema),
@@ -49,7 +49,7 @@ export function registerSubscriptionRoutes(api: OpenAPIApi, handler: LegacyHandl
   for (const mutation of mutations) {
     register(api, "post", `/subscription/${mutation.path}`, {
       operationId: mutation.id, tags: ["Subscriptions"], summary: mutation.summary, security: cookieSecurity,
-      description: "Requires a browser session cookie and trusted Origin. Bearer automation credentials do not authorize billing mutations. Legacy plans use separate hard-coded Stripe prices in local development; usage billing requires explicitly configured test-mode recurring price. New purchases use the usage plan. Legacy subscriptions can switch to usage at renewal.",
+      description: "Requires a browser session cookie and trusted Origin. Bearer automation credentials do not authorize billing mutations. Legacy plans use separate hard-coded Stripe prices in local development; legacy usage billing requires explicitly configured test-mode recurring price. When prepaid funding is configured, new recurring Checkout, plan changes, upgrades and resumption return 409 prepaid_billing_required. Use /billing/topups for one-time funds. Legacy reads, completed payment reconciliation, invoice/payment-method portal and cancellation remain available.",
       request: { headers: z.object({ Origin: z.string() }), ...requestBody(mutation.body) },
       responses: { 200: jsonResponse(mutation.result), ...errors(400, 401, 402, 403, 409, 503) },
     }, handler);

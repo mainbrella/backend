@@ -13,7 +13,7 @@ export class AccountProduction {
     const lease = state.leases[id];
     if (!state.production?.[id] || !lease || lease.endAt <= this.account.now() || state.entitlement.plan !== 'usage') return;
     const size = machineSize(lease.size);
-    const endAt = Math.min(this.account.now() + PRODUCTION_LEASE_MS, state.entitlement.validUntil, lease.billing.periodEnd,
+    const endAt = Math.min(this.account.now() + PRODUCTION_LEASE_MS, state.entitlement.validUntil, lease.billing.kind === 'prepaid' ? Infinity : lease.billing.periodEnd,
       lease.endAt + Math.floor(this.account.billing.remainingUnitMs(state) / size.computeUnits));
     if (endAt <= lease.endAt) return;
     const extra = (endAt - lease.endAt) * size.computeUnits;

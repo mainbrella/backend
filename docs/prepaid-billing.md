@@ -1,0 +1,60 @@
+# Prepaid compute billing
+
+New purchases are one-time payments of $5–$1,000 USD. Every dollar paid adds
+one dollar of balance, with identical compute rates and account limits.
+Thirty-six $5 payments equal $180; two hundred equal $1,000. Credit carries
+forward. There is no new monthly subscription, start fee, or bulk bonus.
+
+The account controller reserves paid runtime before starting or renewing a
+machine. Compute includes startup and idle allocation at $0.02 per weighted
+compute-unit hour. Unused reservation is released only after a confirmed stop.
+Lifetime consumption survives UTC month boundaries and controller eviction.
+The independent monthly spending cap defaults to $5. Production admission
+requires enough wallet funds and cap room for 24 hours of the entire desired
+fleet, including services awaiting recovery and the new service. Existing
+services use short funded leases. The 10,000-starts-per-UTC-month abuse limit
+remains; idempotent retries do not count twice.
+
+## Stripe setup
+
+Create a Mainbrella Compute Credit Product with a $5 USD **one-time** Price.
+Configure `STRIPE_PREPAID_PRICE_ID`, matching the Stripe secret key's mode:
+
+- Local test: `price_1UOnn1GgJdfq06olbpFSrIMd` in backend `.env`.
+- Production: `price_1UOno4GSUs8K8zgHhtAJjabl` in `wrangler.jsonc` vars.
+
+Checkout validates the active reference Price and Product. A $5 purchase uses
+the reference Price; other amounts use inline pricing on the same Product.
+No additional recurring or per-amount Stripe Prices are needed. Hosted
+Checkout handles card entry; this flow does not require a publishable key.
+Configure `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` separately for each
+mode. Send signed events to `/subscription/webhook`, including
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`payment_intent.succeeded`, `charge.refunded`, and `charge.dispute.created`.
+Keep legacy subscription/invoice event delivery while legacy subscriptions
+exist. A browser return alone cannot add funds: the server verifies live
+payment and charge ownership, currency, amount, capture, and refund state.
+
+Automatic recharge is disabled by default. Enabling it explicitly consents
+to storing a verified card and charging a chosen amount within an independent
+monthly recharge limit. Durable attempt identifiers precede external writes.
+Unknown/processing payments do not fund runtime and retain their identity
+for recovery. Actionable or failed off-session intents must be confirmed
+canceled before an attempt can be replaced. A new manual top-up and explicit
+settings change can restore automatic recharge after failure.
+
+## Rollout and verification
+
+Apply migration `019_prepaid_billing.sql` along with any earlier unapplied
+migrations before deploying. Deploy the API and account/container runtime
+changes with the frontend. Existing monthly purchases are disabled when
+prepaid configuration is present; owned legacy subscriptions remain readable
+and cancellable through the legacy API or support.
+
+Before enabling live purchases, verify a test-mode top-up, duplicate completion
+and webhook delivery, a partial/full refund, and failed automatic recharge.
+Observe that each payment is credited once and failed payments never extend
+compute. Refunds/disputes remove funding and fence affected pending/running
+leases. Local automated tests cover concurrent starts, rollover, eviction,
+revocation, and durable recharge recovery; no live payment or deployment is
+part of the implementation checks.

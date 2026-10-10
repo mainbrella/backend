@@ -1,12 +1,13 @@
 import { USAGE_PRICING, billingPeriodKey, validBillingPeriod } from './usage-policy.js';
 import { machineSize } from './plan-policy.js';
+import { PrepaidWallet, prepaidState } from './prepaid-wallet.js';
 
 // Future storage, IP and email services add ledger charges in integer cents,
 // with their own deduplication keys. Apply the included credit once to the sum.
 export const resourceUsageCents = period => Math.round(Math.max(0, period.unitMs) / 3600000 * USAGE_PRICING.centsPerComputeUnitHour)
   + Object.values(period.resourceCharges ?? {}).reduce((sum, cents) => sum + cents, 0);
 export class AccountBilling {
-  constructor(account, invoiceUsage) { this.account = account; this.invoiceUsage = invoiceUsage; }
+  constructor(account, invoiceUsage, recharge) { this.account = account; this.invoiceUsage = invoiceUsage; this.wallet = new PrepaidWallet(account, recharge); }
   period(state, billing = state.entitlement?.billing) {
     if (!validBillingPeriod(billing)) return null;
     state.billingPeriods ??= {};
@@ -14,6 +15,12 @@ export class AccountBilling {
   }
   attach(state, lease) {
     if (state.entitlement.plan !== 'usage') return;
+    if (state.entitlement.billing?.kind === 'prepaid') {
+      this.wallet.ensure(state, state.entitlement.billing.customerId);
+      lease.billing = { ...state.entitlement.billing };
+      lease.meteredUntil = lease.startAt;
+      return;
+    }
     const period = this.period(state);
     if (!period || !this.invoiceUsage) throw new Error('billing_unavailable');
     lease.billing = { customerId: period.customerId, subscriptionId: period.subscriptionId,
@@ -22,6 +29,7 @@ export class AccountBilling {
   }
   record(state, lease, stoppedAt) {
     if (!lease?.billing) return;
+    if (lease.billing.kind === 'prepaid') return this.wallet.record(state, lease, stoppedAt);
     const end = Math.max(lease.meteredUntil, Math.min(stoppedAt, lease.endAt, lease.billing.periodEnd));
     const period = this.period(state, lease.billing);
     period.unitMs += (end - lease.meteredUntil) * machineSize(lease.size).computeUnits;
@@ -35,10 +43,19 @@ export class AccountBilling {
       .reduce((sum, lease) => sum + Math.max(0, lease.endAt - lease.meteredUntil) * machineSize(lease.size).computeUnits, 0);
   }
   remainingUnitMs(state) {
+    if (prepaidState(state)) return this.wallet.remainingUnitMs(state);
     const cap = state.spendLimitCents ?? USAGE_PRICING.defaultSpendLimitCents;
     return Math.max(0, (cap - Object.values(this.period(state)?.resourceCharges ?? {}).reduce((sum, cents) => sum + cents, 0)) / USAGE_PRICING.centsPerComputeUnitHour * 3600000 - this.committedUnitMs(state));
   }
   status(state) {
+    if (prepaidState(state)) {
+      const m = this.wallet.metrics(state), balance = this.wallet.status(state);
+      const percent = balance.monthlyUsageCents / balance.spendLimitCents * 100;
+      return { ...balance, periodStart: m.periodStart, periodEnd: m.periodEnd, computeUnitHours: m.monthly / 3600000,
+        estimatedCents: balance.monthlyUsageCents, minimumCents: 0, committedCents: Math.ceil((m.monthly + m.monthReserved) / 1800000),
+        alert: percent >= 100 ? 100 : percent >= 80 ? 80 : percent >= 50 ? 50 : null,
+        overagesEnabled: false, invoicingPending: false };
+    }
     if (state.entitlement.plan !== 'usage') return null;
     const period = this.period(state);
     if (!period) return null;
@@ -62,6 +79,7 @@ export class AccountBilling {
   async invoice(state, context) {
     if (!/^in_[A-Za-z0-9_]+$/.test(context.invoiceId) || !Number.isSafeInteger(context.cutoff)) throw new Error('invalid_invoice');
     for (const period of Object.values(state.billingPeriods ?? {})) {
+      if (period.kind === 'prepaid') continue;
       if (period.customerId !== context.customerId || period.subscriptionId !== context.subscriptionId
         || (period.periodEnd > context.cutoff && !(context.final && period.periodStart < context.cutoff)) || period.invoiced) continue;
       // A pending boot can briefly outlive the paid deadline in account state.

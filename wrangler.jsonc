@@ -17,6 +17,7 @@
 		]
 	},
 	"vars": {
+		"STRIPE_PREPAID_PRICE_ID": "price_1UOno4GSUs8K8zgHhtAJjabl",
 		"ACTIVITY_WEBSOCKET_ENABLED": "true",
 		"PREVIEWS_ENABLED": "true",
 		"PROJECT_HOSTING_ENABLED": "true",

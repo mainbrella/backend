@@ -2,6 +2,7 @@ import { invoiceAccountUsage, invoiceCanceledUsage } from '../lib/usage-billing'
 import { authJson } from "./auth-core";
 import { resolveEntitlement, type Entitlement } from "../lib/entitlements";
 import { stripeRequest, type BillingEnv } from "../lib/stripe";
+import { applyPrepaidPayment, completePrepaidCheckout, prepaidAccountByCustomer, stripeID } from '../lib/prepaid-billing';
 
 export type EntitlementChanged = (userId: string, entitlement: Entitlement) => Promise<void>;
 
@@ -30,20 +31,38 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
     || !await verifyStripeSignature(body, request.headers.get("Stripe-Signature"), env.STRIPE_WEBHOOK_SECRET)) {
     return authJson({ error: "invalid_signature" }, 400, {});
   }
-  let event: { id: string; type: string; data: { object: { id?: string; customer?: string | { id: string }; charge?: string } } };
+  let event: { id: string; type: string; data: { object: { id?: string; customer?: string | { id: string }; charge?: string; payment_intent?: string } } };
   try {
     event = JSON.parse(body);
     if (!/^evt_[A-Za-z0-9_]+$/.test(event.id) || typeof event.type !== "string" || !event.data?.object) throw new Error();
   } catch { return authJson({ error: "invalid_webhook" }, 400, {}); }
   if (!event.type.startsWith("customer.subscription.") && !event.type.startsWith("subscription_schedule.")
     && !event.type.startsWith("invoice.") && !event.type.startsWith("checkout.session.")
-    && !event.type.startsWith("charge.")) return authJson({ received: true }, 200, {});
+    && !event.type.startsWith("charge.") && !event.type.startsWith('payment_intent.') && !event.type.startsWith('refund.')) return authJson({ received: true }, 200, {});
   try {
     const receipt = await env.DB.prepare("SELECT event_id FROM billing_webhook_events WHERE event_id = ?").bind(event.id).first();
     if (receipt) return authJson({ received: true }, 200, {});
     let customer = typeof event.data.object.customer === "string" ? event.data.object.customer : event.data.object.customer?.id;
-    if (!customer && event.type.startsWith("charge.dispute.") && typeof event.data.object.charge === "string") {
-      customer = (await stripeRequest<{ customer: string }>(env, `/charges/${encodeURIComponent(event.data.object.charge)}`)).customer;
+    let paymentIntentId = event.data.object.payment_intent;
+    const chargeId = event.type.startsWith('charge.dispute.') || event.type.startsWith('refund.') ? event.data.object.charge
+      : event.type.startsWith('charge.') ? event.data.object.id : undefined;
+    if (stripeID(chargeId, 'ch')) {
+      const charge = await stripeRequest<{ customer: string; payment_intent?: string }>(env, `/charges/${encodeURIComponent(chargeId)}`);
+      customer = charge.customer;
+      paymentIntentId = charge.payment_intent;
+    }
+    const prepaid = customer ? await prepaidAccountByCustomer(env, customer) : null;
+    if (prepaid) {
+      if (event.type.startsWith('checkout.session.') && stripeID(event.data.object.id, 'cs')) {
+        try { await completePrepaidCheckout(env, prepaid, event.data.object.id); }
+        catch (error) { if (!(error instanceof Error) || !['payment_pending', 'topup_expired'].includes(error.message)) throw error; }
+      } else {
+        if (event.type.startsWith('payment_intent.')) paymentIntentId = event.data.object.id;
+        if (stripeID(paymentIntentId, 'pi')) await applyPrepaidPayment(env, prepaid, paymentIntentId);
+      }
+      await changed?.(prepaid.user_id, await resolveEntitlement(env, prepaid.user_id));
+      await env.DB.prepare('INSERT INTO billing_webhook_events (event_id,user_id) VALUES (?,?) ON CONFLICT(event_id) DO NOTHING').bind(event.id, prepaid.user_id).run();
+      return authJson({ received: true }, 200, {});
     }
     const record = customer ? await env.DB.prepare("SELECT user_id FROM pro_billing WHERE stripe_customer_id = ?").bind(customer).first<{ user_id: string }>() : null;
     if (record) {

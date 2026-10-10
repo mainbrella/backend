@@ -7,6 +7,7 @@ import { syncAccountEntitlement } from "../lib/container-service";
 import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
+import { handlePrepaidBillingRequest } from './prepaid-billing';
 import { handleAdminRequest } from "./admin";
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
@@ -32,6 +33,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
   if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);

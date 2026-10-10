@@ -1,6 +1,10 @@
 # Usage subscription billing
 
-New purchases use one Stripe Customer and one monthly subscription. The $5
+This runbook describes existing legacy usage subscriptions. New purchases use
+[prepaid compute billing](./prepaid-billing.md), with one-time funding and no
+monthly subscription. The legacy invoice path remains for old subscriptions.
+
+Existing legacy accounts use one Stripe Customer and one monthly subscription. The $5
 minimum is paid in advance and includes the first $5 of resource usage. Mainbrella
 owns the usage ledger; Stripe owns invoices, collection, receipts and payment
 status. Additional usage is billed at renewal, or on a final usage invoice after

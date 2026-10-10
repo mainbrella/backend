@@ -35,6 +35,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/trial": ["post"], "/subscription/checkout": ["post"], "/subscription/complete": ["post"], "/subscription/portal": ["post"],
   "/subscription/change": ["post"], "/subscription/cancel": ["post"], "/subscription/resume": ["post"],
   "/subscription/usage": ["get", "post"], "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
+  '/billing/config': ['get'], '/billing/balance': ['get'], '/billing/topups': ['post'], '/billing/topups/complete': ['post'], '/billing/settings': ['post'],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
   "/containers/files": ["get", "put"],
@@ -167,6 +168,23 @@ test("OpenAPI 3.1 documents every current endpoint with unique operation IDs and
       }
     }
   }
+});
+
+test('prepaid schemas expose one-time funding, payment verification and consent-based auto recharge', async () => {
+  const { paths, components } = await document();
+  assert.deepEqual(paths['/billing/balance'].get.security, [{ cookieAuth: [] }]);
+  const purchase = paths['/billing/topups'].post;
+  assert.deepEqual(purchase.security, [{ cookieAuth: [] }]);
+  assert.match(purchase.description, /No subscription is created/);
+  assert.match(purchase.description, /client-supplied credit amounts never authorize/i);
+  const body = purchase.requestBody.content['application/json'].schema;
+  assert.equal(body.properties.amountCents.minimum, 500);
+  assert.equal(body.properties.amountCents.maximum, 100000);
+  assert.equal(body.properties.requestId.format, 'uuid');
+  assert.match(paths['/billing/topups/complete'].post.description, /Pending payments do not increase/);
+  assert.match(paths['/billing/settings'].post.description, /explicitly authorizes/);
+  assert.ok(components.schemas.PrepaidBalance.properties.autoRecharge);
+  assert.ok(components.schemas.PrepaidBalance.properties.availableBalanceCents);
 });
 
 test("schema describes optional container bodies, multipart image source, and WebSocket upgrades", async () => {

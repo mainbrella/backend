@@ -26,7 +26,7 @@ export function subscriptionPlan(subscription: StripeSubscription | null, env?: 
     subscription?.items.data.some((item) => item.price.id === planPrices(env)[plan]),
   ) || null;
 }
-export type BillingEnv = Env & { LOCAL_DEV?: string; STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string; STRIPE_USAGE_BASE_PRICE_ID?: string; STRIPE_USAGE_METERED_PRICE_IDS?: string };
+export type BillingEnv = Env & { LOCAL_DEV?: string; STRIPE_SECRET_KEY?: string; STRIPE_PUBLISHABLE_KEY?: string; STRIPE_WEBHOOK_SECRET?: string; STRIPE_USAGE_BASE_PRICE_ID?: string; STRIPE_USAGE_METERED_PRICE_IDS?: string; STRIPE_PREPAID_PRICE_ID?: string };
 export interface StripeSubscription {
   id: string;
   status: string;

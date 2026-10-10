@@ -1,4 +1,5 @@
 import { usageBillingConfigured } from '../lib/usage-billing';
+import { prepaidBillingConfigured } from '../lib/prepaid-billing';
 import { entitlementHeaders } from '../../containers/plan-policy.js';
 import { USAGE_PRICING, validSpendLimit } from '../../containers/usage-policy.js';
 import { redeemTrial } from '../lib/trial-coupons';
@@ -14,7 +15,7 @@ async function stateResponse(env: BillingEnv, state: BillingState, cors: StringH
   const plan = state.entitlement.plan || subscriptionPlan(state.subscription, env);
   return authJson({ subscription: state.subscription, trial: state.trial || null, plan, active: state.entitlement.active,
     valid_until: state.entitlement.validUntil, pro: state.entitlement.active && (plan === "pro" || plan === "scale"),
-    configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
+    configured: prepaidBillingConfigured(env) || Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
 }
 
 export async function handleSubscriptionRequest(request: Request, env: BillingEnv, changed?: EntitlementChanged): Promise<Response> {
@@ -25,8 +26,9 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (path === "/subscription/config" && request.method === "GET") {
-    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS, usage_pricing: USAGE_PRICING, usage_configured: usageBillingConfigured(env),
-      configured: Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
+    return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS, usage_pricing: USAGE_PRICING, usage_configured: prepaidBillingConfigured(env) || usageBillingConfigured(env),
+      prepaid_configured: prepaidBillingConfigured(env), billing_model: prepaidBillingConfigured(env) ? 'prepaid' : 'legacy',
+      configured: prepaidBillingConfigured(env) || Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
   }
   if (!["/subscription", "/subscription/trial", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume", "/subscription/usage"].includes(path)) {
     return authJson({ error: "not_found" }, 404, cors);
@@ -43,8 +45,12 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (["/subscription/checkout", "/subscription/trial", "/subscription/change"].includes(path) && !validPlan(body?.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (path === "/subscription/portal" && body?.plan !== undefined && !validPlan(body.plan)) return authJson({ error: "invalid_plan" }, 400, cors);
     if (["/subscription/change", "/subscription/cancel"].includes(path) && body?.confirm !== true) return authJson({ error: "confirmation_required" }, 400, cors);
+    if (prepaidBillingConfigured(env) && (['/subscription/checkout', '/subscription/change', '/subscription/resume'].includes(path)
+      || (path === '/subscription/portal' && body?.plan !== undefined) || (path === '/subscription/usage' && request.method === 'POST'))) {
+      return authJson({ error: 'prepaid_billing_required' }, 409, cors);
+    }
     if (path === '/subscription/usage') {
-      const state = await resolveBillingState(env, user.id);
+      const state = await resolveBillingState(env, user.id, true);
       if (request.method === 'POST' && !validSpendLimit(body?.spendLimitCents)) return authJson({ error: 'invalid_spend_limit' }, 400, cors);
       if (!env.CONTAINER_ACCOUNT) throw new Error('billing_unavailable');
       const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${user.id}`));
@@ -79,22 +85,22 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       if (session.status !== "complete") return authJson({ error: "checkout_not_complete" }, 409, cors);
     }
     if (path === "/subscription" || path === "/subscription/complete") {
-      const state = await resolveBillingState(env, user.id);
+      const state = await resolveBillingState(env, user.id, true);
       await changed?.(user.id, state.entitlement);
       return stateResponse(env, state, cors);
     }
     if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
     if (path === "/subscription/trial") {
-      const state = await resolveBillingState(env, user.id);
+      const state = await resolveBillingState(env, user.id, true);
       if (state.subscription) return authJson({ error: "subscription_exists" }, 409, cors);
       await redeemTrial(env, user.id, body!.plan as Plan, body!.code);
-      const updated = await resolveBillingState(env, user.id);
+      const updated = await resolveBillingState(env, user.id, true);
       await changed?.(user.id, updated.entitlement);
       return stateResponse(env, updated, cors);
     }
     if (path !== "/subscription/checkout") {
       if (!record) return authJson({ error: "no_subscription" }, 409, cors);
-      const state = await resolveBillingState(env, user.id);
+      const state = await resolveBillingState(env, user.id, true);
       const subscription = state.subscription;
       if (path === "/subscription/portal") {
         const target = body?.plan as Plan | undefined;
@@ -125,7 +131,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
         if (!subscription.cancel_at_period_end) return authJson({ error: "not_canceling" }, 409, cors);
         await stripeRequest(env, `/subscriptions/${encodeURIComponent(subscription.id)}`, new URLSearchParams({ cancel_at_period_end: "false", cancel_at: "" }));
       }
-      const updated = await resolveBillingState(env, user.id);
+      const updated = await resolveBillingState(env, user.id, true);
       await changed?.(user.id, updated.entitlement);
       return stateResponse(env, updated, cors);
     }

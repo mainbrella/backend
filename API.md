@@ -1,7 +1,7 @@
 # Container automation API
 
 Base URL: `https://api.mainbrella.com` (local API: `http://localhost:8787`).
-The dashboard and automation share the same account-owned containers and allowance. An active paid plan or coupon trial is required.
+The dashboard and automation share the same account-owned containers and allowance. Prepaid funding, an existing paid legacy plan, or a coupon trial is required.
 
 ## Authentication
 
@@ -343,18 +343,18 @@ start returns 402 without provisioning or consuming quota. If an existing billin
 record is now unpaid, an attempted start also triggers background revocation of
 that account's existing containers.
 
-| Plan | USD/month | Concurrent containers | Starts/UTC month | Hard limit | Idle timeout |
+| Plan | Funding | Concurrent containers | Starts/UTC month | Hard limit | Idle timeout |
 | --- | ---: | ---: | ---: | --- | --- |
-| Usage (Ad Hoc) | $5 minimum | 100 | 10,000 | 24 hours | 30 minutes |
-| Builder (legacy) | $5 | 5 | 1,000 | 1 hour | 10 minutes |
-| Pro | $180 | 100 | 10,000 | 24 hours | 30 minutes |
-| Scale | $999 | 500 | 100,000 | 72 hours | 60 minutes |
+| Prepaid (Ad Hoc) | $5 minimum top-up | 100 | 10,000 | 24 hours | 30 minutes |
+| Builder (legacy) | $5/month | 5 | 1,000 | 1 hour | 10 minutes |
+| Pro (legacy) | $180/month | 100 | 10,000 | 24 hours | 30 minutes |
+| Scale (legacy) | $999/month | 500 | 100,000 | 72 hours | 60 minutes |
 
 All plans offer five sizes with bash, tmux and outbound internet. `POST /containers` accepts `size`: `lite` (default), `small`, `medium`, `large`, or `xl`. Size is included in the idempotency fingerprint. The default image includes Node 24; other runtimes depend on the selected image. All include SSH and browser terminals. A container permits four concurrent
 terminal connections (browser/SSH combined). An account permits ten live SSH
 access tokens, each lasting at most 15 minutes or the machine deadline. Process
 resume after stop, custom resources, teams, advanced logs/audits and
-priority capacity are unavailable. New usage subscriptions have a $5 monthly minimum credited toward resource usage. Existing fixed-price subscriptions retain their terms.
+priority capacity are unavailable. New accounts fund compute with one-time payments; unused balance carries forward. Existing fixed-price subscriptions retain their terms.
 Ordinary stop discards unsaved filesystem changes; save a workspace explicitly
 to restore its filesystem into a fresh container.
 
@@ -370,9 +370,9 @@ reservation; stopping early does not refund usage. Quota persists across stops,
 restarts, upgrades, downgrades, cancellation and resubscription, and resets at the
 next UTC month. At capacity, additional POSTs return 409 without spending usage.
 
-A successful payment for the current recognized plan period is required. Unapproved Stripe trials,
+A positive verified prepaid balance is required for prepaid access. Legacy access requires a successful payment for the current recognized plan period. Unapproved Stripe trials,
 failed payments, expired periods, paused/canceled subscriptions and stale database
-plan fields grant no access. Stripe outages return 503 instead of guessing a plan.
+plan fields grant no access. Stripe outages prevent new funding and legacy payment verification; prepaid accounts may continue only within already confirmed funds.
 DELETE cleanup remains available during billing outages. Hard deadlines are fixed
 at creation and capped by the original paid period; upgrades and renewals never
 lengthen existing sessions. Start a new container after that deadline.
@@ -509,18 +509,26 @@ Bearer automation credentials do not authorize purchases or plan changes.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /subscription/config` | Public server plan definitions and billing availability. |
-| `GET /subscription` | Current Stripe subscription, paid `active`, `plan`, `valid_until` (Unix ms), `scheduled_plan`, and `scheduled_change_at` (Unix seconds). |
-| `POST /subscription/checkout` with `{"plan":"usage"}` | Creates/reuses account-owned embedded checkout for the $5 monthly minimum; requires a saved payment method and rejects an existing live subscription. New legacy purchases are unavailable. |
-| `POST /subscription/complete` with `{"session_id":"cs_..."}` | Verifies owned checkout completion and current paid entitlement. |
-| `POST /subscription/portal` with `{"plan":"pro"}` | Stripe confirmation URL for an upgrade with immediate invoiced proration. |
-| `POST /subscription/portal` with `{}` | Payment methods and invoice history portal URL. |
-| `POST /subscription/change` with `{"plan":"usage","confirm":true}` | Explicitly migrates an existing legacy subscription at renewal. Existing legacy downgrades remain supported. Select the current plan to remove a scheduled change. |
-| `GET /subscription/usage` | Current billing period, measured compute, estimated bill, reserved cost, spending cap and usage alert. |
-| `POST /subscription/usage` with `{"spendLimitCents":5000,"authorizeOverages":true}` | Sets the account spending cap. Any cap above the default $5 requires explicit overage authorization. |
+| `GET /billing/config` | Public `{configured,minTopupCents:500,maxTopupCents:100000}`. |
+| `GET /billing/balance` | `{balance}` with confirmed balance, available and reserved cents, monthly spending, production rate/runway and automatic recharge settings. |
+| `POST /billing/topups` with `{"amountCents":2000,"requestId":"<uuid>"}` | Creates or recovers hosted one-time Stripe Checkout and returns `{url,sessionId}`. Reuse the same UUID and amount after an uncertain response. |
+| `POST /billing/topups/complete` with `{"sessionId":"cs_..."}` | Verifies account-owned Checkout and live succeeded/captured card payment, then applies funding by immutable payment identity. Returns 200 `{balance}` only after verified payment; pending returns 409 `payment_pending`, expired returns 409 `topup_expired`. |
+| `POST /billing/settings` with `{"spendLimitCents":5000}` | Sets the USD monthly consumption cap; raising it adds no funds. |
+| `POST /billing/settings` with `{"autoRecharge":{"enabled":true,"amountCents":2000,"monthlyLimitCents":10000}}` | Explicitly authorizes $20 automatic recharges up to $100 per UTC month and saving the verified card. Both amounts are $5–$1,000 and maximum must cover at least one recharge. Pending payments count toward authorization and never fund runtime. |
+| `GET /subscription/config` | Legacy plan policy plus `prepaid_configured` and `billing_model`. |
+| `GET /subscription` | Effective entitlement; prepaid uses internal `plan:"usage"` with `subscription:null`. Existing legacy subscribers retain live Stripe reconciliation. |
+| `POST /subscription/complete` with `{"session_id":"cs_..."}` | Reconciles a previously issued legacy subscription Checkout. |
+| `POST /subscription/portal` with `{}` | Existing legacy payment methods and invoice history portal URL. |
+| `GET /subscription/usage` | Existing legacy usage-subscription billing-period information. |
 | `POST /subscription/cancel` with `{"confirm":true}` | Cancels at paid period end and removes a pending downgrade. |
-| `POST /subscription/resume` with `{}` | Resumes a subscription pending period-end cancellation. |
-| `POST /subscription/webhook` | Stripe signature authenticated; private integration for live entitlement reconciliation and renewal/final usage invoicing. |
+| `POST /subscription/webhook` | Stripe signature authenticated; credits successful prepaid purchases and revokes refunded/disputed funding using live charge state. Existing legacy invoices and entitlement events remain supported. |
+
+When `STRIPE_PREPAID_PRICE_ID` is configured, recurring Checkout, plan changes,
+upgrades, resumption and legacy cap mutation return 409 `prepaid_billing_required`.
+New purchases do not create a monthly subscription. Each dollar paid adds one
+dollar of balance. Repeated $5 purchases and a larger single purchase have the
+same value, compute prices and account limits; $180 funds the same balance as
+36 purchases of $5, and $1,000 funds the same balance as 200 purchases of $5.
 
 Use the web billing controls for explicit user confirmation. Never perform a
 purchase, plan change or cancellation as part of an ordinary container job.
@@ -534,7 +542,7 @@ Errors are JSON `{ "error": "code" }`. Handle HTTP status as well as the code.
 | 400 | `invalid_container_id` / `container_id_required` | Select an ID returned by GET; supply it when multiple containers exist. |
 | 400 | `invalid_generation` / `invalid_file_path` | Send the exact returned creation timestamp and a valid absolute file path. |
 | 401 | `not_authenticated` | API key or session missing, malformed, expired, or revoked. Provision a valid credential. |
-| 402 | `subscription_required` | No paid container access. Use the web billing controls to subscribe or resolve payment; do not retry creation. |
+| 402 | `subscription_required` | No paid container access. Use the web billing controls to add prepaid funds or resolve legacy payment; do not retry creation. |
 | 403 | `origin_required` / `origin_not_allowed` | Cookie mutations need a trusted Origin; Bearer requests may omit it. Supplied Origins must be trusted. |
 | 404 | `not_found` | Use the exact documented route; no arbitrary container IDs. |
 | 413 | `request_too_large` | HTTP execution body exceeds 32 KiB. |
@@ -663,10 +671,10 @@ This local evidence does not establish production support.
 
 ## Production containers and networks
 
-Usage subscriptions support `lifecycle: "production"` in `POST /containers`.
+Prepaid accounts support `lifecycle: "production"` in `POST /containers`.
 Omitted lifecycle remains `ad_hoc`, with the existing session and idle limits.
 Production machines have no session or idle shutdown; five-minute compute
-reservations renew automatically while paid access and the spending cap permit.
+reservations renew automatically while confirmed funding and the spending cap permit.
 The account checks every 30 seconds, independently of dashboard visits. All
 machines share the same monthly spending cap, concurrency and start safeguards.
 
@@ -708,8 +716,10 @@ runtime before the account/API worker and web UI. Feature discovery and a
 versioned private start route reject an incompatible runtime before provisioning.
 Production cannot restore a saved workspace. There is no persistent disk,
 transactional snapshot, HTTP readiness guarantee, replica failover or uptime SLA.
-Use external durable storage. Payment renewal can interrupt compute until the
-next billing period is proven paid; recovery resumes the same logical service.
+Use external durable storage. Starting or expanding production requires 24 hours
+of funding for the resulting fleet, after existing runtime reservations. Funding
+exhaustion pauses compute and preserves service configuration; successful funding
+allows recovery of the same logical service. A pending recharge grants no runtime.
 
 ## Protected application previews
 
@@ -895,7 +905,7 @@ Legacy Builder includes 250 compute-unit hours/month and 28 concurrent units; Pr
 
 Create with `{"catalogId":"node","size":"medium"}`. `GET /containers` returns `sizes`, `limits.maxComputeUnitHours`, `limits.maxConcurrentComputeUnits`, and `usage.computeUnitHours`, `reservedComputeUnitHours`, `availableComputeUnitHours`, and `concurrentComputeUnits`. Runtime is reserved durably before provisioning; unused runtime is released on a reconciled stop. Used hours include provisioning and idle time. Ambiguous starts retain reservations until reconciliation. Capacity rejection does not reserve usage. Machines receive an immutable budget deadline and stop at the earliest of that deadline, idle/session/paid-access expiry, or, for legacy plans, the UTC month boundary. Clients must honor returned `expiresAt`.
 
-Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. Legacy plans have no overages. Usage subscriptions meter compute at $0.02 per unit-hour, subject to a spending cap.
+Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. Legacy plans have no overages. Prepaid accounts meter compute at $0.02 per unit-hour, subject to confirmed funding and a spending cap.
 
 ## Saved workspaces and portable export
 
@@ -990,14 +1000,14 @@ rollout requires the frontend, API and new SDK CLI release together; source
 availability does not imply the currently published npm package contains `repo`.
 
 
-## Usage subscription billing
+## Prepaid billing
 
-New accounts purchase one monthly Stripe subscription using `plan: "usage"` at `/subscription/checkout`. The $5 monthly minimum covers the first $5 of aggregate resource usage. Compute costs $0.02 per compute-unit hour; weighted hourly rates are Lite $0.02, Small $0.12, Medium $0.20, Large $0.32 and XL $0.56. Provisioning and idle time count; only elapsed allocation is billed. Ephemeral machine disk is included. Storage, dedicated IPs and email have no separately enabled usage charges yet.
+New accounts purchase $5–$1,000 of prepaid compute balance through `/billing/topups`. There is no monthly subscription or monthly minimum charge. Unused funding carries forward. Each dollar paid adds one dollar of balance, regardless of purchase size or repetition; all prepaid accounts use the same prices and limits. Client-supplied credit amounts are ignored. Compute costs $0.02 per compute-unit hour; weighted hourly rates are Lite $0.02, Small $0.12, Medium $0.20, Large $0.32 and XL $0.56. Provisioning and idle time count; only elapsed allocation is billed. Ephemeral disk is included. Storage, dedicated IPs and email have no separately enabled usage charges yet.
 
-Mainbrella keeps a durable account ledger by Stripe subscription billing period, independently of calendar-month start limits. Usage accounts return `limits.maxComputeUnitHours: null`; `availableComputeUnitHours` expresses remaining spending capacity after runtime reservations. `GET /containers` additionally returns `billing` with period bounds, actual compute-unit hours, an estimated total in USD cents, spending cap, committed cost, overage authorization, invoicing status and an alert at 50%, 80% or 100%. Legacy accounts return `billing: null` and retain their fixed UTC-month allowances. All clients must honor `expiresAt`; usage sandboxes still have a 24-hour session deadline and 30-minute idle timeout. Always-on deployments are a separate future lifecycle mode.
+Mainbrella keeps the wallet in the durable account controller. Available funding is confirmed payment credit minus elapsed consumption minus reserved future runtime. Reservations happen before provisioning and unused reservations are released after confirmed stops. All clients must honor returned `expiresAt`; Ad Hoc machines retain the 24-hour session and 30-minute idle deadlines. Production renews funded five-minute reservations and requires at least 24 hours of fleet funding at launch. The monthly consumption cap remains separate from prepaid balance; raising it never creates funding.
 
-Browser-only `GET /subscription/usage` returns `{billing}`. `POST /subscription/usage` accepts `{spendLimitCents:500}` to keep overages disabled, or `{spendLimitCents:5000,authorizeOverages:true}` to authorize usage charges up to $50 per billing month. Dollar caps exclude taxes; supported caps are $5–$1,000. Raising a cap requires explicit authorization, recorded with its timestamp. A cap below committed usage returns 409 `spend_limit_below_committed_usage`; missing overage consent returns 400 `overage_authorization_required`. New starts can be shortened or rejected with 429 `spend_limit_reached`. Stopping releases unused reservations. Paid access and normal concurrency/start safeguards still apply.
+Browser-only `GET /billing/balance` returns balance, available and reserved USD cents, monthly usage/cap, production hourly cost and funded runway, and automatic recharge status. Explicit `/billing/settings` consent enables automatic recharges with a fixed amount and monthly maximum. The durable pending attempt is saved before contacting Stripe. Metadata and retained payment IDs recover unknown outcomes after HTTP idempotency keys expire; an old unknown attempt fails closed. Succeeded captured card payments fund runtime; pending, failed or authentication-required payments do not.
 
-At `invoice.created`, the signed webhook reconciles closed ledger periods, subtracts the included $5 once across all resources, and attaches any overage as an invoice item to that exact draft renewal invoice. Stable ledger identifiers, an immutable pending write, HTTP idempotency keys and Stripe invoice-item metadata prevent retries from creating duplicate charges. Cancellation ends access and generates a final subscription-linked usage invoice without another minimum. Stripe manages payment collection, receipts and failed invoices. Billing failures remain retryable and cannot grant unpaid access.
+Checkout completion and signed Stripe webhooks independently fetch current PaymentIntent and charge state. Payment currency, amount, capture, customer, account metadata and funding purpose are verified. Funding is applied once per payment identity, across retries and event types. Refunds remove the corresponding number of cents; a dispute revokes the payment's entire balance contribution. A reversal can leave a negative wallet when credit was already consumed. Delayed success events cannot restore revoked funding. Dispute restoration requires operator reconciliation in this initial implementation.
 
-Existing subscriptions stay unchanged until an authenticated customer confirms `POST /subscription/change` with `{plan:"usage",confirm:true}`. The same subscription switches at renewal; there is no second subscription or checkout. New purchases of legacy plans return 409 `legacy_plan_unavailable`. See `docs/usage-billing.md` for migration, Stripe configuration and qualification requirements.
+Set `STRIPE_PREPAID_PRICE_ID` to an active one-time USD $5 Price with an active Product. The backend validates it; exact $5 purchases use that Price and other amounts use inline prices under its Product. Test and live environments need their respective Price IDs and secret keys. Apply migration `019_prepaid_billing.sql` and configure the existing signed `/subscription/webhook` for Checkout, PaymentIntent, charge/refund and dispute events before deployment. Existing legacy read, payment-method management, invoice reconciliation and cancellation remain available; new recurring purchases are disabled. See `docs/usage-billing.md` for operator setup.

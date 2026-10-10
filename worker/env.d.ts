@@ -1,6 +1,7 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  STRIPE_PREPAID_PRICE_ID?: string;
   LOCAL_DEV?: string;
   LOCAL_PREVIEW_PORT?: string;
   ACTIVITY_WEBSOCKET_ENABLED?: string;
