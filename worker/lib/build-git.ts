@@ -90,29 +90,31 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
   const output = JSON.parse(result.stdout) as Omit<Bundle, 'schemaVersion' | 'parts'> & { parts: Omit<Part, 'key'>[] };
   if (!/^[a-f0-9]{40}$/.test(output.commitId) || !output.parts.length || output.parts.length > 128) throw new BuildError('build_git_unavailable');
   await runtime.persist('Persist Git bundle', async () => {
-  const parts: Part[] = [];
-  for (const [index, part] of output.parts.entries()) {
-    const response = await runtime.read(`${BUILD_GIT_ROOT}/output/${index}`);
-    if (!response.ok) throw new BuildError('build_git_unavailable');
-    const bytes = await response.arrayBuffer();
-    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
-    if (bytes.byteLength !== part.size || hash !== part.sha256) throw new BuildError('build_git_unavailable');
-    const key = `${prefix(params.userId, params.appId)}parts/${hash}`;
-    await env.BUCKET!.put(key, bytes, { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
-    parts.push({ ...part, key });
-  }
-  const bundleKey = `${prefix(params.userId, params.appId)}bundles/${output.commitId}.json`;
-  await env.BUCKET!.put(bundleKey, JSON.stringify({ schemaVersion: 1, commitId: output.commitId, size: output.size, parts } satisfies Bundle),
-    { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
-  // R2 objects must exist before the database head can reference them. A lost
-  // response is safe to retry: content keys and the turn's version ID are stable.
-  await env.DB.batch([
-    env.DB.prepare(`INSERT INTO build_git_versions (id, app_id, parent_version_id, commit_id, bundle_key, source_json, lockfile, assets_json, message, verified, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(params.turnId, params.appId, app.git_version_id ?? null, output.commitId, bundleKey,
-      JSON.stringify(files), lockfile, JSON.stringify(assets.map(image => image.id)), message, verified ? 1 : 0, turn.created_at),
-    env.DB.prepare('UPDATE build_apps SET git_version_id = ? WHERE id = ? AND user_id = ? AND active_turn_id = ? AND git_version_id IS ?')
-      .bind(params.turnId, params.appId, params.userId, params.turnId, app.git_version_id ?? null),
-  ]);
+    // A Workflow step retries this callback, not the surrounding function. D1
+    // may have committed before its response was lost, so reconcile on every attempt.
+    if (await buildGitVersion(env, params.appId, params.turnId)) return;
+    const parts: Part[] = [];
+    for (const [index, part] of output.parts.entries()) {
+      const response = await runtime.read(`${BUILD_GIT_ROOT}/output/${index}`);
+      if (!response.ok) throw new BuildError('build_git_unavailable');
+      const bytes = await response.arrayBuffer();
+      const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (bytes.byteLength !== part.size || hash !== part.sha256) throw new BuildError('build_git_unavailable');
+      const key = `${prefix(params.userId, params.appId)}parts/${hash}`;
+      await env.BUCKET!.put(key, bytes, { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
+      parts.push({ ...part, key });
+    }
+    const bundleKey = `${prefix(params.userId, params.appId)}bundles/${output.commitId}.json`;
+    await env.BUCKET!.put(bundleKey, JSON.stringify({ schemaVersion: 1, commitId: output.commitId, size: output.size, parts } satisfies Bundle),
+      { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
+    // Publish the database head only after all immutable R2 objects exist.
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO build_git_versions (id, app_id, parent_version_id, commit_id, bundle_key, source_json, lockfile, assets_json, message, verified, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(params.turnId, params.appId, app.git_version_id ?? null, output.commitId, bundleKey,
+        JSON.stringify(files), lockfile, JSON.stringify(assets.map(image => image.id)), message, verified ? 1 : 0, turn.created_at),
+      env.DB.prepare('UPDATE build_apps SET git_version_id = ? WHERE id = ? AND user_id = ? AND active_turn_id = ? AND git_version_id IS ?')
+        .bind(params.turnId, params.appId, params.userId, params.turnId, app.git_version_id ?? null),
+    ]);
   });
   return (await buildGitVersion(env, params.appId, params.turnId))!;
 }
