@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '028_build_operations.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const params: BuildParams = { userId: USER_ONE, appId: crypto.randomUUID(), turnId: crypto.randomUUID() };
   const now = new Date().toISOString();

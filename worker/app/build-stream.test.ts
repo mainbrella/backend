@@ -11,6 +11,7 @@ import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/bu
 import { buildTokenPrices } from '../lib/build-pricing';
 import { BUILD_MODEL, BuildError, buildStarter } from '../lib/build-contract';
 import { buildBillingFixture } from './build-billing-test-helpers';
+import { accountBillingRequest } from '../lib/prepaid-billing';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/build-images';
@@ -111,7 +112,7 @@ test('inference stream failures retain provider codes and messages as failure de
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -764,6 +765,53 @@ test('queued builds retain native reasoning modes from before the menu was prune
   assert.throws(() => buildReasoningOptions('@cf/zai-org/glm-5.3', 'xhigh'), /invalid_build_effort/);
 });
 
+test('prepaid app creation, edits and previews depend on available funds after ten turns today', async t => {
+  for (const mode of ['create', 'build', 'preview'] as const) {
+    for (const reserved of [false, true]) await t.test(`${mode}, funds ${reserved ? 'reserved' : 'available'}`, async sub => {
+      const f = await fixture(sub);
+      f.sqlite.prepare("UPDATE build_turns SET status = 'failed', error = 'build_failed' WHERE id = ?").run(f.turnId);
+      f.sqlite.prepare('UPDATE build_apps SET active_turn_id = NULL, revision = 1 WHERE id = ?').run(f.appId);
+      const now = new Date().toISOString();
+      for (let index = 0; index < 9; index++) {
+        f.sqlite.prepare(`INSERT INTO build_turns (id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at)
+          VALUES (?,?,?,?,?,?,1,?,'Finished',?,?)`)
+          .run(crypto.randomUUID(), f.appId, USER_ONE, `history-${index}`, 'Previous request',
+            index % 2 ? 'preview' : 'build', index % 3 ? 'succeeded' : 'failed', BUILD_MODEL, now);
+      }
+      f.sqlite.prepare('INSERT INTO prepaid_accounts (user_id,stripe_customer_id,created_at) VALUES (?,?,?)')
+        .run(USER_ONE, 'cus_build', Date.now());
+      await accountBillingRequest(f.env, USER_ONE, '/billing/funding', { id: 'pi_more_build', customerId: 'cus_build',
+        amountCents: 3500, refundedCents: 0, disputed: false, createdAt: Date.now(), kind: 'topup' });
+      await accountBillingRequest(f.env, USER_ONE, '/billing/settings', { spendLimitCents: 4000 });
+      if (reserved) await accountBillingRequest(f.env, USER_ONE, '/billing/inference', { action: 'reserve',
+        id: `${f.turnId}:held`, model: BUILD_MODEL, appId: f.appId, turnId: f.turnId,
+        reservedMicroUsd: 40_000_000, createdAt: Date.now() });
+      const { balance } = await accountBillingRequest(f.env, USER_ONE, '/billing/balance');
+      assert.equal(balance.balanceCents, 4000);
+      assert.equal(balance.availableBalanceCents, reserved ? 0 : 4000);
+      const dispatched: unknown[] = [];
+      Object.assign(f.env, { BUILD_ENABLED: 'true', AI: {}, PREVIEWS_ENABLED: 'true', PREVIEW_DOMAIN: 'mainbrella.dev', PREVIEW_ROUTES: {},
+        BUILD_WORKFLOW: { async create(options: unknown) { dispatched.push(options); } } });
+      const path = mode === 'create' ? 'apps' : `apps/${f.appId}/turns`;
+      const body = mode === 'create' ? { prompt: 'A new app' }
+        : mode === 'build' ? { mode, revision: 1, prompt: 'Add charts' } : { mode, revision: 1 };
+      const response = await handleBuildRequest(new Request(`https://api.mainbrella.com/build/${path}`, { method: 'POST',
+        headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}`,
+          'Content-Type': 'application/json', 'Idempotency-Key': 'funded-request' }, body: JSON.stringify(body) }), f.env);
+      assert.equal(response.status, reserved ? 402 : 202, await response.clone().text());
+      assert.equal(dispatched.length, reserved ? 0 : 1);
+      assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_turns WHERE user_id = ?').get(USER_ONE) as { count: number }).count,
+        reserved ? 10 : 11);
+      if (reserved) assert.deepEqual(await response.json(), { error: 'insufficient_balance' });
+      else {
+        const { app } = await response.json() as any;
+        assert.ok(app.activeTurnId);
+        assert.equal(app.turns.find((turn: any) => turn.id === app.activeTurnId).mode, mode === 'preview' ? 'preview' : 'build');
+      }
+    });
+  }
+});
+
 test('model selection is saved, returned and protected by idempotency on create and update', async t => {
   const f = await fixture(t);
   f.sqlite.prepare("UPDATE build_turns SET status = 'succeeded' WHERE id = ?").run(f.turnId);
@@ -778,6 +826,7 @@ test('model selection is saved, returned and protected by idempotency on create 
   const config = await (await handleBuildRequest(new Request('https://api.mainbrella.com/build/config', { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env)).json() as any;
   assert.equal(config.models.length, buildModels.length);
   assert.equal(config.model, '@cf/zai-org/glm-5.3');
+  assert.ok(!('dailyTurns' in config));
   assert.deepEqual(config.models.map((model: any) => [model.description, model.efforts, model.defaultEffort]), [
     ['Best quality', ['high', 'max'], 'high'], ['Coding', ['always'], 'always'], ['Lower cost', ['high', 'max'], 'high'],
   ]);

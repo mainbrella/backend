@@ -6,7 +6,7 @@ import { validIdempotencyKey } from '../../containers/container-account-core.js'
 import { resolveEntitlement } from '../lib/entitlements';
 import { accountResponse, containerError } from '../lib/container-service';
 import { previewsConfigured } from '../lib/preview-routing';
-import { BUILD_MODEL, BUILD_MAX_APPS, BUILD_DAILY_TURNS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema,
+import { BUILD_MODEL, BUILD_MAX_APPS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema,
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
 import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
@@ -146,7 +146,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (match[1] === 'config') return authJson({ available: buildConfigured(env), model: env.BUILD_MODEL || BUILD_MODEL,
       models: (localCodexConfigured(env) ? [{ id: env.BUILD_MODEL || BUILD_MODEL, name: env.BUILD_MODEL || BUILD_MODEL, description: undefined, efforts: ['low'], defaultEffort: 'low' }] : buildModels).map(({ id, name, description, efforts, defaultEffort }) => ({ id, name, ...(description ? { description } : {}), efforts, defaultEffort })),
-      maxApps: BUILD_MAX_APPS, dailyTurns: BUILD_DAILY_TURNS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
+      maxApps: BUILD_MAX_APPS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
       aiMarkupPercent: BUILD_AI_MARKUP_PERCENT, computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
     const id = match[2];
     if (request.method === 'GET' && !id) {
@@ -253,7 +253,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const message = error instanceof Error ? error.message : '';
     if (error instanceof BuildError) return authJson({ error: message }, error.status, cors);
     if (message.includes('build_busy') || message.includes('revision_conflict')) return authJson({ error: message.includes('revision_conflict') ? 'revision_conflict' : 'build_busy' }, 409, cors);
-    if (['build_app_limit', 'build_daily_limit', 'build_turn_limit'].some(code => message.includes(code))) return authJson({ error: message.includes('build_daily_limit') ? 'build_daily_limit' : message.includes('build_turn_limit') ? 'build_turn_limit' : 'build_app_limit' }, 429, cors);
+    if (['build_app_limit', 'build_turn_limit'].some(code => message.includes(code))) return authJson({ error: message.includes('build_turn_limit') ? 'build_turn_limit' : 'build_app_limit' }, 429, cors);
     if (/UNIQUE constraint failed: build_turns\.user_id/.test(message)) return authJson({ error: 'build_busy' }, 409, cors);
     if (/UNIQUE constraint failed/.test(message)) return authJson({ error: 'submission_conflict' }, 409, cors);
     if (error instanceof SyntaxError || message === 'invalid_request') return authJson({ error: 'invalid_request' }, 400, cors);

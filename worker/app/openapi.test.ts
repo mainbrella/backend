@@ -139,6 +139,14 @@ test('Build configuration describes the opt-in local Codex provider and preserve
   assert.equal(config.responses[200].content['application/json'].schema.properties.model.type, 'string');
   assert.equal(config.responses[200].content['application/json'].schema.properties.models.type, 'array');
   assert.equal(config.responses[200].content['application/json'].schema.properties.models.items.properties.description.type, 'string');
+  assert.ok(!('dailyTurns' in config.responses[200].content['application/json'].schema.properties));
+  assert.match(config.description, /no daily turn quota/i);
+  for (const path of ['/build/apps', '/build/apps/{appId}/turns']) {
+    assert.match(paths[path].post.description, /available.*balance/);
+    assert.match(paths[path].post.description, /account spending limit/);
+    assert.match(paths[path].post.description, /No daily turn quota/);
+    assert.ok(paths[path].post.responses[402]);
+  }
   const creation = paths['/build/apps'].post.requestBody.content['application/json'].schema.properties;
   assert.equal(creation.model.type, 'string'); assert.equal(creation.effort.type, 'string');
 });
