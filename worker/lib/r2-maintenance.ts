@@ -1,5 +1,6 @@
 import { buildContentHash } from './build-storage';
 import { BUILD_GIT_IGNORE } from './build-git';
+import { readBuildGitBundle, type BuildGitBundle } from './build-git-bundle';
 import { deleteStoredObjects, getStoredObject, headStoredObject, inventoryObject, listStoredObjects, PLATFORM_STORAGE,
   acquireStorageLock, releaseStorageLock, storageCharging, storageMetered, STORAGE_DAY_MS, type StorageOwner } from './r2-storage';
 
@@ -38,7 +39,23 @@ async function referencedObjects(env: Env, owner: StorageOwner) {
   }
   const bundles = await env.DB.prepare('SELECT DISTINCT bundle_key FROM build_git_versions WHERE app_id=?').bind(owner.appId).all<{ bundle_key: string }>();
   if (bundles.results.length) keys.add(`build-git/${owner.userId}/${owner.appId}/objects/${await buildContentHash(new TextEncoder().encode(BUILD_GIT_IGNORE))}`);
-  for (const row of bundles.results) { keys.add(row.bundle_key); manifests.add(row.bundle_key); }
+  const history = new Map<string, BuildGitBundle>();
+  for (const row of bundles.results) {
+    let key: string | null = row.bundle_key, child: BuildGitBundle | undefined;
+    const path = new Set<string>();
+    while (key !== null) {
+      if (path.has(key)) throw new Error('storage_reference_unavailable');
+      path.add(key);
+      const cached = history.get(key), bundle: BuildGitBundle = cached ?? await readBuildGitBundle(env, owner, key);
+      if (child?.schemaVersion === 2 && bundle.schemaVersion === 2 && child.prerequisiteCommitId !== bundle.commitId)
+        throw new Error('storage_reference_unavailable');
+      if (cached) break;
+      history.set(key, bundle); keys.add(key);
+      for (const part of bundle.parts) keys.add(part.key);
+      child = bundle;
+      key = bundle.schemaVersion === 2 ? bundle.previousBundleKey : null;
+    }
+  }
   // Inspect only referenced manifest objects. Any missing/corrupt manifest
   // aborts cleanup; uncertain reachability must never cause data deletion.
   for (const key of manifests) {

@@ -12,7 +12,9 @@ import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
 import { BUILD_GIT_ROOT, buildGitVersion, exportBuildGit, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
 import { buildImagePath } from '../lib/build-images';
-import { readBuildSource, readBuildText } from '../lib/build-storage';
+import { readBuildSource, readBuildText, storeBuildObject } from '../lib/build-storage';
+import { putStoredObject } from '../lib/r2-storage';
+import type { BuildGitBundle } from '../lib/build-git-bundle';
 import { cleanupStorageOrphans } from '../lib/r2-maintenance';
 
 async function fixture(t: TestContext) {
@@ -33,9 +35,10 @@ async function fixture(t: TestContext) {
     } catch (error) { f.sqlite.exec('ROLLBACK'); throw error; }
   }) as D1Database['batch'];
 
-  const objects = new Map<string, Uint8Array<ArrayBuffer>>(), puts: string[] = [];
+  const objects = new Map<string, Uint8Array<ArrayBuffer>>(), puts: string[] = [], gets: string[] = [];
   const bucket = {
     async get(key: string) {
+      gets.push(key);
       const bytes = objects.get(key);
       return bytes ? { size: bytes.byteLength, get body() { return new Response(bytes.slice()).body; }, arrayBuffer: async () => bytes.slice().buffer,
         json: async () => JSON.parse(new TextDecoder().decode(bytes)) } : null;
@@ -170,7 +173,7 @@ async function fixture(t: TestContext) {
     git(['fsck', '--full'], directory);
     return directory;
   }
-  return { ...f, params, app, turn, startTurn, objects, puts, bucket, disk, localPath, runtime, commands, attempts, dispatched, editSource, run, cloneRepository, npm };
+  return { ...f, params, app, turn, startTurn, objects, puts, gets, bucket, disk, localPath, runtime, commands, attempts, dispatched, editSource, run, cloneRepository, npm };
 }
 
 function request(appId: string, suffix: string, session = SESSION_ONE, body?: unknown, key = 'restore') {
@@ -182,6 +185,127 @@ function git(args: string[], cwd: string) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
 }
+
+const manifest = (f: Awaited<ReturnType<typeof fixture>>, key: string) => JSON.parse(new TextDecoder().decode(f.objects.get(key)!)) as BuildGitBundle;
+
+test('later saves upload only incremental history and reuse the hydrated platform repository', async t => {
+  const f = await fixture(t);
+  // A varied source makes the baseline larger than the small edit that follows.
+  const large = Array.from({ length: 1200 }, (_, i) => createHash('sha256').update(String(i)).digest('hex').slice(0, 40)).join('\n');
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), { ...buildStarter, 'src/data.txt': large }, true);
+  const next = f.startTurn(), source = { ...buildStarter, 'src/data.txt': large, 'src/new.ts': 'export const next = true;' };
+  await hydrateBuildGit(f.env, next, f.runtime, first, f.turn(next));
+  // The app's own Git copy is never trusted for saving.
+  rmSync(f.localPath('/workspace/app/.git'), { recursive: true });
+  const reads = f.gets.length;
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), source, true);
+  assert.deepEqual(f.gets.slice(reads).filter(key => /\/(parts|bundles)\//.test(key)), []);
+  const initial = manifest(f, first.bundle_key), increment = manifest(f, second.bundle_key);
+  assert.equal(initial.schemaVersion, 2); assert.equal(increment.schemaVersion, 2);
+  assert.ok(increment.schemaVersion === 2);
+  assert.equal(increment.prerequisiteCommitId, first.commit_id);
+  assert.equal(increment.previousBundleKey, first.bundle_key);
+  assert.ok(increment.size < initial.size / 10, `${increment.size} should be much smaller than ${initial.size}`);
+  assert.equal((await buildGitVersion(f.env, next.appId, first.id))!.bundle_key, first.bundle_key);
+  // An increment requires its base; it cannot masquerade as a complete backup.
+  const bytes = Buffer.concat(increment.parts.map(part => Buffer.from(f.objects.get(part.key)!)));
+  const bundle = join(f.disk, 'increment.bundle'), empty = join(f.disk, 'empty');
+  writeFileSync(bundle, bytes); mkdirSync(empty); git(['init', '-q'], empty);
+  assert.notEqual(spawnSync('git', ['bundle', 'verify', bundle], { cwd: empty }).status, 0);
+  git(['bundle', 'verify', bundle], f.localPath(`${BUILD_GIT_ROOT}/repository`));
+  const third = f.startTurn();
+  await saveBuildGitVersion(f.env, third, f.runtime, f.turn(third), { ...source, 'src/third.ts': 'export const third = true;' }, true);
+  t.mock.method(f.env.USER_CONTAINER, 'get', () => { assert.fail('Exports do not require a sandbox'); });
+  f.setBillingMode('unpaid');
+  const clone = await f.cloneRepository();
+  assert.equal(git(['rev-list', '--count', 'HEAD'], clone), '3');
+  assert.equal(git(['rev-parse', 'HEAD~2'], clone), first.commit_id);
+});
+
+test('unchanged saves reuse their parent bundle without empty increments', async t => {
+  const f = await fixture(t), first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn(), puts = f.puts.length;
+  const unchanged = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), buildStarter, true);
+  assert.equal(unchanged.commit_id, first.commit_id); assert.equal(unchanged.bundle_key, first.bundle_key);
+  assert.equal(unchanged.parent_version_id, first.id);
+  assert.deepEqual(f.puts.slice(puts).filter(key => /\/(parts|bundles)\//.test(key)), []);
+  const third = f.startTurn();
+  const changed = await saveBuildGitVersion(f.env, third, f.runtime, f.turn(third), { ...buildStarter, 'src/new.ts': 'new' }, true);
+  const increment = manifest(f, changed.bundle_key);
+  assert.ok(increment.schemaVersion === 2);
+  assert.equal(increment.previousBundleKey, first.bundle_key);
+  const clone = await f.cloneRepository();
+  assert.equal(git(['rev-list', '--count', 'HEAD'], clone), '2');
+});
+
+test('saving reconstructs the parent if the hydrated platform repository disappears', async t => {
+  const f = await fixture(t), first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  await hydrateBuildGit(f.env, next, f.runtime, first, f.turn(next));
+  rmSync(f.localPath(`${BUILD_GIT_ROOT}/repository`), { recursive: true });
+  const reads = f.gets.length;
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/new.ts': 'new' }, true);
+  assert.ok(f.gets.slice(reads).includes(first.bundle_key));
+  const clone = await f.cloneRepository();
+  assert.equal(git(['rev-parse', 'HEAD'], clone), second.commit_id);
+  assert.equal(git(['rev-parse', 'HEAD^'], clone), first.commit_id);
+});
+
+test('legacy shared full bundles still export ancestors, hydrate and accept new increments', async t => {
+  const f = await fixture(t);
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/new.ts': 'new' }, true);
+  const clone = await f.cloneRepository('legacy-source'), full = join(f.disk, 'legacy.bundle');
+  git(['bundle', 'create', full, 'main'], clone);
+  const bytes = new Uint8Array(readFileSync(full)), hash = createHash('sha256').update(bytes).digest('hex');
+  const key = `build-git/${USER_ONE}/${next.appId}/bundles/legacy.json`, partKey = `build-git/${USER_ONE}/${next.appId}/parts/${hash}`;
+  await putStoredObject(f.env, next, partKey, bytes, 'history');
+  await putStoredObject(f.env, next, key, JSON.stringify({ schemaVersion: 1, commitId: second.commit_id, size: bytes.length,
+    parts: [{ key: partKey, size: bytes.length, sha256: hash }] }), 'history');
+  f.sqlite.prepare('UPDATE build_git_versions SET bundle_key=? WHERE app_id=?').run(key, next.appId);
+  const response = await exportBuildGit(f.env, USER_ONE, next.appId, first, {}), ancestor = join(f.disk, 'legacy-ancestor.bundle');
+  writeFileSync(ancestor, new Uint8Array(await response.arrayBuffer()));
+  git(['clone', '-q', '-b', 'main', ancestor, join(f.disk, 'legacy-ancestor')], f.disk);
+  assert.equal(git(['rev-parse', 'HEAD'], join(f.disk, 'legacy-ancestor')), first.commit_id);
+  await hydrateBuildGit(f.env, next, f.runtime, first, f.turn(next));
+  assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
+  const third = f.startTurn();
+  const saved = await saveBuildGitVersion(f.env, third, f.runtime, f.turn(third), { ...buildStarter, 'src/third.ts': 'third' }, true);
+  const increment = manifest(f, saved.bundle_key); assert.ok(increment.schemaVersion === 2);
+  assert.equal(increment.previousBundleKey, key);
+  rmSync(f.localPath(BUILD_GIT_ROOT), { recursive: true });
+  await hydrateBuildGit(f.env, third, f.runtime, saved, f.turn(third));
+  assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), saved.commit_id);
+  await f.cloneRepository('legacy-with-increment');
+});
+
+test('cleanup preserves dependency bundles without version rows and defers deletion for broken chains', async t => {
+  const f = await fixture(t); f.env.R2_BILLING_MODE = 'meter';
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/new.ts': 'new' }, true);
+  f.sqlite.prepare('DELETE FROM build_git_versions WHERE id=?').run(first.id);
+  const orphan = await storeBuildObject(f.env, next, new TextEncoder().encode('orphaned upload'));
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id=NULL WHERE id=?').run(next.appId);
+  f.sqlite.prepare('UPDATE r2_objects SET updated_at=?').run(Date.now() - 2 * 86400000);
+  await cleanupStorageOrphans(f.env);
+  assert.ok(f.objects.has(first.bundle_key)); assert.ok(!f.objects.has(orphan.$r2));
+  for (const part of manifest(f, first.bundle_key).parts) assert.ok(f.objects.has(part.key));
+  await f.cloneRepository('retained-dependency');
+  const remaining = await storeBuildObject(f.env, next, new TextEncoder().encode('keep until reachability is known'));
+  f.sqlite.prepare('UPDATE r2_objects SET updated_at=?').run(Date.now() - 2 * 86400000);
+  const original = f.objects.get(first.bundle_key)!;
+  t.mock.method(console, 'error', () => {});
+  for (const bad of [null, new TextEncoder().encode('{broken'), new TextEncoder().encode(JSON.stringify({ schemaVersion: 99 }))]) {
+    if (bad) f.objects.set(first.bundle_key, bad); else f.objects.delete(first.bundle_key);
+    await cleanupStorageOrphans(f.env);
+    assert.ok(f.objects.has(remaining.$r2));
+    await assert.rejects(hydrateBuildGit(f.env, next, f.runtime, second, f.turn(next)), /build_git_unavailable/);
+  }
+  f.objects.set(first.bundle_key, original);
+  await cleanupStorageOrphans(f.env); assert.ok(!f.objects.has(remaining.$r2));
+});
 
 test('R2 versions export valid Git history with lockfiles and referenced images, excluding untracked files', async t => {
   const f = await fixture(t), imageId = crypto.randomUUID(), unusedImageId = crypto.randomUUID();
@@ -216,18 +340,18 @@ test('R2 versions export valid Git history with lockfiles and referenced images,
   assert.ok(!paths.includes('.env')); assert.ok(!paths.includes('untracked.txt'));
 });
 
-test('ancestor versions share the newest full-history bundle and still export and hydrate their original commit after cleanup', async t => {
+test('incremental versions retain their dependencies and ancestors still export and hydrate after cleanup', async t => {
   const f = await fixture(t); f.env.R2_BILLING_MODE = 'meter';
   const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), { ...buildStarter, 'src/old.ts': 'export const old = true;' }, true);
   const oldBundle = first.bundle_key;
   const next = f.startTurn();
   const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/new.ts': 'export const next = true;' }, true);
-  assert.equal((await buildGitVersion(f.env, f.params.appId, first.id))!.bundle_key, second.bundle_key);
+  assert.equal((await buildGitVersion(f.env, f.params.appId, first.id))!.bundle_key, oldBundle);
   assert.notEqual(oldBundle, second.bundle_key);
   f.sqlite.prepare('UPDATE build_apps SET active_turn_id=NULL WHERE id=?').run(f.params.appId);
   f.sqlite.prepare('UPDATE r2_objects SET updated_at=?').run(Date.now() - 2 * 86400000);
   await cleanupStorageOrphans(f.env);
-  assert.equal(f.objects.has(oldBundle), false);
+  assert.equal(f.objects.has(oldBundle), true);
   assert.ok(f.objects.has(second.bundle_key));
   const response = await exportBuildGit(f.env, USER_ONE, f.params.appId, first, {});
   assert.equal(response.status, 200);
@@ -270,18 +394,22 @@ test('lost D1 save acknowledgements retry the persistence callback without dupli
 });
 
 test('lost R2 part and manifest acknowledgements reconcile immutable uploads before publishing the head', async t => {
-  for (const target of ['parts/', 'bundles/']) await t.test(target, async sub => {
-    const f = await fixture(sub), put = f.bucket.put.bind(f.bucket);
+  for (const withParent of [false, true]) for (const target of ['parts/', 'bundles/']) await t.test(`${withParent ? 'increment' : 'initial'} ${target}`, async sub => {
+    const f = await fixture(sub);
+    const parent = withParent ? await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true) : null;
+    const params = withParent ? f.startTurn() : f.params, put = f.bucket.put.bind(f.bucket);
+    const attempts = f.attempts.get('Persist Git bundle') ?? 0;
     let lost = false;
     sub.mock.method(f.bucket, 'put', async (...args: Parameters<typeof put>) => {
       const result = await put(...args);
-      assert.equal(f.app().git_version_id, null, 'R2 objects precede the database head');
+      assert.equal(f.app().git_version_id, parent?.id ?? null, 'R2 objects precede the database head');
       if (!lost && args[0].includes(target)) { lost = true; throw new Error('Lost R2 acknowledgement after upload'); }
       return result;
     });
-    const version = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
-    assert.ok(lost); assert.equal(f.attempts.get('Persist Git bundle'), 2);
-    assert.equal([...f.objects.keys()].filter(key => key.includes('/parts/') || key.includes('/bundles/')).length, 2); assert.equal(f.app().git_version_id, version!.id);
+    const version = await saveBuildGitVersion(f.env, params, f.runtime, f.turn(params), { ...buildStarter, 'src/new.ts': 'new' }, true);
+    assert.ok(lost); assert.equal(f.attempts.get('Persist Git bundle')! - attempts, 2);
+    assert.equal([...f.objects.keys()].filter(key => key.includes('/parts/') || key.includes('/bundles/')).length, withParent ? 4 : 2);
+    assert.equal(f.app().git_version_id, version.id); assert.equal(version.parent_version_id, parent?.id ?? null);
     await f.cloneRepository();
   });
 });

@@ -149,6 +149,12 @@ test('Build repository browsing documents manifests and authenticated individual
   assert.equal(stream.parameters.find((param: any) => param.name === 'path').required, true);
   assert.ok(stream.responses[200].content['text/plain']);
   assert.ok(stream.responses[200].content['image/jpeg']);
+  const repository = paths['/build/apps/{appId}/repository'].get;
+  assert.equal(repository.operationId, 'exportBuildRepository');
+  assert.deepEqual(repository.security, [{ cookieAuth: [] }]);
+  assert.match(repository.description, /without paid access or a running sandbox/);
+  assert.match(repository.description, /one self-contained Git bundle/);
+  assert.ok(repository.responses[200].content['application/octet-stream']);
 });
 
 test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {
