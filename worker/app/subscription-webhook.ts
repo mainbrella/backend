@@ -58,7 +58,7 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
         catch (error) { if (!(error instanceof Error) || !['payment_pending', 'topup_expired'].includes(error.message)) throw error; }
       } else {
         if (event.type.startsWith('payment_intent.')) paymentIntentId = event.data.object.id;
-        if (stripeID(paymentIntentId, 'pi')) await applyPrepaidPayment(env, prepaid, paymentIntentId);
+        if (stripeID(paymentIntentId, 'pi')) await applyPrepaidPayment(env, prepaid, paymentIntentId, undefined, event.type.startsWith('charge.dispute.'));
       }
       await changed?.(prepaid.user_id, await resolveEntitlement(env, prepaid.user_id));
       await env.DB.prepare('INSERT INTO billing_webhook_events (event_id,user_id) VALUES (?,?) ON CONFLICT(event_id) DO NOTHING').bind(event.id, prepaid.user_id).run();

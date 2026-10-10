@@ -29,6 +29,50 @@ export class PrepaidWallet {
     }
     return state.wallet;
   }
+  accounting(state) {
+    if (!this.account.accountingSink || !state.wallet) return;
+    const wallet = state.wallet;
+    if (!wallet.accounting) {
+      wallet.accounting = { pending: {}, fundingStates: {} };
+      if (wallet.usedUnitMs > 0) this.queue(state, { key: `legacy_usage:${state.userId}`, type: 'legacy_usage', occurredAt: this.account.now(),
+        data: { unitMs: wallet.usedUnitMs, monthlyUnitMs: { ...wallet.monthlyUnitMs }, reason: 'usage_predates_ledger' } });
+    }
+    return wallet.accounting;
+  }
+  queue(state, event) {
+    if (!this.account.accountingSink) return;
+    const accounting = this.accounting(state);
+    if (!accounting) return;
+    accounting.pending[event.key] ??= { ...event, userId: state.userId };
+  }
+  fundingEvidence(state) {
+    const accounting = this.accounting(state);
+    if (!accounting) return;
+    for (const funding of Object.values(state.wallet.fundings)) {
+      const revokedCents = funding.disputed ? funding.amountCents : funding.refundedCents;
+      const version = `${revokedCents}:${funding.refundedCents}:${funding.disputed ? 'disputed' : 'clear'}`;
+      if (accounting.fundingStates[funding.id] === version) continue;
+      this.queue(state, { key: `funding_state:${funding.id}:${version}`, type: 'funding_state', occurredAt: this.account.now(),
+        data: { fundingId: funding.id, creditCents: funding.amountCents, revokedCents, refundedCreditCents: funding.refundedCents, disputed: funding.disputed } });
+      accounting.fundingStates[funding.id] = version;
+    }
+  }
+  async flushAccounting(state) {
+    const accounting = this.accounting(state);
+    if (!accounting) return;
+    this.fundingEvidence(state);
+    if (!Object.keys(accounting.pending).length) return;
+    // Persist consumption and the outbox together before any D1 write. If the
+    // acknowledgement is lost, the next attempt reuses the same event identity.
+    await this.account.ctx.storage.put('containerAccount', state);
+    try {
+      for (const event of Object.values(accounting.pending)) {
+        await this.account.accountingSink(event);
+        delete accounting.pending[event.key];
+      }
+    } catch { /* Keep all unacknowledged entries and retry from the alarm. */ }
+    await this.account.ctx.storage.put('containerAccount', state);
+  }
   metrics(state, now = this.account.now()) {
     const wallet = state.wallet;
     const { periodStart, periodEnd } = utcPeriod(now);
@@ -49,6 +93,7 @@ export class PrepaidWallet {
   }
   record(state, lease, stoppedAt) {
     const wallet = this.ensure(state, lease.billing.customerId);
+    this.accounting(state);
     const end = Math.max(lease.meteredUntil, Math.min(stoppedAt, lease.endAt));
     const runtimeMs = end - lease.meteredUntil;
     const containerId = Object.entries(state.leases ?? {}).find(([, value]) => value === lease)?.[0];
@@ -62,6 +107,10 @@ export class PrepaidWallet {
     wallet.usedUnitMs += runtimeMs * machineSize(lease.size).computeUnits;
     for (let at = lease.meteredUntil; at < end;) {
       const until = Math.min(end, utcPeriod(at).periodEnd), month = new Date(at).toISOString().slice(0, 7);
+      this.queue(state, { key: `compute:${resource?.id ?? lease.resourceHistoryId}:${at}:${until}`, type: 'compute', occurredAt: until,
+        data: { resourceId: resource?.id ?? lease.resourceHistoryId, containerId: containerId ?? null, name: lease.name ?? null,
+          lifecycle: lease.lifecycle ?? 'ad_hoc', size: lease.size, startAt: at, endAt: until,
+          unitMs: (until - at) * machineSize(lease.size).computeUnits, unitMsPerCent: UNIT_MS_PER_CENT } });
       wallet.monthlyUnitMs[month] = (wallet.monthlyUnitMs[month] ?? 0) + (until - at) * machineSize(lease.size).computeUnits;
       at = until;
     }
@@ -133,10 +182,15 @@ export class PrepaidWallet {
       || !Number.isSafeInteger(funding.amountCents) || funding.amountCents < 500 || funding.amountCents > 100000
       || !Number.isSafeInteger(funding.refundedCents) || funding.refundedCents < 0 || funding.refundedCents > funding.amountCents
       || typeof funding.disputed !== 'boolean' || !Number.isSafeInteger(funding.createdAt) || funding.createdAt <= 0) throw new Error('invalid_payment');
+    // Accounting outages must not delay a verified revocation. This recovery
+    // mode can reduce existing credit only; it cannot create a new funding.
+    if (funding.revokeOnly && !state.wallet?.fundings?.[funding.id]) return false;
     const wallet = this.ensure(state, funding.customerId), previous = wallet.fundings[funding.id];
     if (previous && (previous.amountCents !== funding.amountCents || previous.customerId !== funding.customerId || previous.createdAt !== funding.createdAt)) throw new Error('payment_conflict');
     // Older success webhooks cannot restore money already refunded or disputed.
     wallet.fundings[funding.id] = { ...funding, refundedCents: Math.max(previous?.refundedCents ?? 0, funding.refundedCents), disputed: Boolean(previous?.disputed || funding.disputed) };
+    delete wallet.fundings[funding.id].revokeOnly;
+    this.fundingEvidence(state);
     return this.metrics(state).remaining < 0;
   }
   productionUnits(state) {

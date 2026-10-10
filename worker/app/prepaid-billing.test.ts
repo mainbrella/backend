@@ -8,6 +8,8 @@ import { handleSubscriptionRequest } from './subscription';
 import { ensurePrepaidAccount, prepaidRecharge, type PrepaidBalance, type Funding } from '../lib/prepaid-billing';
 import { resolveEntitlement } from '../lib/entitlements';
 import { ContainerAccountController } from '../../containers/container-account-core.js';
+import { appendAccountingEvent } from '../lib/accounting-ledger';
+import { createAccountingClose } from '../lib/accounting-close';
 
 const requestId = 'a623dbd1-6341-4402-98ec-2657d8d479fa';
 const blankBalance = (): PrepaidBalance => ({ balanceCents: 0, availableBalanceCents: 0, reservedBalanceCents: 0, currency: 'usd',
@@ -47,6 +49,7 @@ async function fixture(t: test.TestContext, owned = true) {
     amount_subtotal: 2000, amount_total: 2000, total_details: { amount_discount: 0, amount_tax: 0, amount_shipping: 0 },
     allow_promotion_codes: true, customer: TEST_CUSTOMER, client_reference_id: TEST_USER, payment_intent: 'pi_prepaid' as string | null, metadata: { mainbrella_request_id: requestId } };
   let rechargeIntent: any = null; let createRechargeStatus = 'succeeded';
+  const refunds: { id: string; charge: string; amount: number; currency: string; created: number; status: string; balance_transaction: null }[] = [];
   const price = { id: 'price_prepaid', active: true, type: 'one_time', currency: 'usd', unit_amount: 500, recurring: null as unknown, product: { id: 'prod_prepaid', active: true } };
   f.state.override = (url, init) => {
     if (url.pathname === '/v1/customers/search') return Response.json({ data: [], has_more: false });
@@ -56,6 +59,13 @@ async function fixture(t: test.TestContext, owned = true) {
     if (url.pathname === '/v1/payment_intents/pi_prepaid') return Response.json(intent);
     if (url.pathname === '/v1/payment_methods/pm_card') return Response.json({ id: 'pm_card', customer: TEST_CUSTOMER, type: 'card' });
     if (url.pathname === '/v1/charges/ch_prepaid') return Response.json(intent.latest_charge);
+    if (url.pathname === '/v1/refunds') {
+      const recorded = refunds.reduce((sum, refund) => sum + refund.amount, 0);
+      if (intent.latest_charge.amount_refunded > recorded) refunds.push({ id: `re_${refunds.length + 1}`, charge: 'ch_prepaid',
+        amount: intent.latest_charge.amount_refunded - recorded, currency: 'usd', created: intent.created + refunds.length + 1, status: 'succeeded', balance_transaction: null });
+      return Response.json({ data: refunds, has_more: false });
+    }
+    if (url.pathname === '/v1/disputes') return Response.json({ data: [{ id: 'du_test', charge: 'ch_prepaid', currency: 'usd', balance_transactions: [] }], has_more: false });
     if (url.pathname === '/v1/checkout/sessions' && init?.method === 'GET') return Response.json({ data: [], has_more: false });
     if (url.pathname === '/v1/checkout/sessions' && init?.method === 'POST') {
       const params = new URLSearchParams(String(init.body));
@@ -276,6 +286,70 @@ test('a live Stripe promotion funds the immutable nominal topup amount', async t
   assert.equal(response.status, 200);
   assert.equal(f.funding.get('pi_prepaid')?.amountCents, 2000);
   assert.equal(f.balance.balanceCents, 2000);
+});
+
+test('taxed discounted receipts preserve cash, promotion, tax location, funding date and late processing fees separately', async t => {
+  const f = await fixture(t);
+  f.checkout.total_details.amount_discount = 1000; f.checkout.total_details.amount_tax = 100;
+  f.checkout.amount_total = 1100; f.intent.amount = 1100; f.intent.amount_received = 1100; f.intent.latest_charge.amount = 1100;
+  const paidAt = f.intent.created + 10;
+  Object.assign(f.intent.latest_charge, { created: paidAt });
+  Object.assign(f.checkout, { customer_details: { address: { country: 'US', state: 'CA', postal_code: '90232', city: 'Culver City' } } });
+  const complete = () => handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env);
+  assert.equal((await complete()).status, 200);
+  assert.equal(f.balance.balanceCents, 2000);
+  const receipt = f.sqlite.prepare("SELECT * FROM accounting_ledger WHERE event_type='funding'").get() as any;
+  const data = JSON.parse(receipt.payload);
+  assert.equal(data.amountPaidCents, 1100); assert.equal(data.considerationCents, 1000);
+  assert.equal(data.promotionalCreditCents, 1000); assert.equal(data.taxCollectedCents, 100);
+  assert.equal(receipt.occurred_at, paidAt * 1000);
+  assert.deepEqual(data.taxLocation, { country: 'US', state: 'CA', postalCode: '90232', city: 'Culver City', source: 'checkout' });
+  Object.assign(f.intent.latest_charge, { balance_transaction: { id: 'txn_payment', source: 'ch_prepaid', amount: 1100, fee: 62, net: 1038, created: paidAt, available_on: paidAt + 172800, currency: 'usd', type: 'charge' } });
+  assert.equal((await complete()).status, 200);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM accounting_ledger WHERE event_type='funding'").get()!.n, 1);
+  const settlement = JSON.parse((f.sqlite.prepare("SELECT payload FROM accounting_ledger WHERE event_type='stripe_balance'").get() as any).payload);
+  assert.equal(settlement.processingFeeCents, 62); assert.equal(settlement.netCents, 1038); assert.equal(settlement.availableAt, (paidAt + 172800) * 1000);
+  assert.equal(f.balance.balanceCents, 2000);
+});
+
+test('missing financial refund evidence still revokes existing compute and leaves the webhook retryable', async t => {
+  const f = await fixture(t);
+  await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env);
+  f.intent.latest_charge.amount_refunded = 2000; f.intent.latest_charge.refunded = true;
+  const original = f.state.override;
+  f.state.override = (url, init) => url.pathname === '/v1/refunds' ? Response.json({ error: 'temporary_failure' }, { status: 503 }) : original?.(url, init);
+  const result = await handleSubscriptionWebhook(await webhook('charge.refunded', { id: 'ch_prepaid', customer: TEST_CUSTOMER }, 'evt_retry_refund'), f.env);
+  assert.equal(result.status, 503); assert.equal(f.balance.balanceCents, 0);
+  assert.equal(f.accountCalls.at(-1)!.body.revokeOnly, true);
+  assert.equal(f.sqlite.prepare("SELECT event_id FROM billing_webhook_events WHERE event_id = 'evt_retry_refund'").get(), undefined);
+  f.state.override = original;
+  assert.equal((await handleSubscriptionWebhook(await webhook('charge.refunded', { id: 'ch_prepaid', customer: TEST_CUSTOMER }, 'evt_retry_refund'), f.env)).status, 200);
+});
+
+test('monthly source refresh checkpoints real wallet intervals across a month boundary without provisioning guests', async t => {
+  const now = Date.UTC(2026, 9, 1, 1), received = Date.UTC(2026, 8, 27);
+  t.mock.method(Date, 'now', () => now);
+  const f = await fixture(t), stored = new Map<string, any>();
+  f.intent.created = received / 1000;
+  Object.assign(f.intent.latest_charge, { created: received / 1000, balance_transaction: { id: 'txn_real', source: 'ch_prepaid', amount: 2000, fee: 88, net: 1912, currency: 'usd', created: received / 1000, available_on: received / 1000 + 172800, type: 'charge' } });
+  Object.assign(f.checkout, { customer_details: { address: { country: 'US', state: 'CA', postal_code: '90232' } } });
+  const storage = { async get(key: string) { return structuredClone(stored.get(key)); }, async put(key: string, value: unknown) { stored.set(key, structuredClone(value)); },
+    async getAlarm() { return null; }, async setAlarm() {}, async deleteAlarm() {} };
+  const controller = new ContainerAccountController({ storage } as any, () => { throw new Error('must_not_provision'); }, () => now,
+    undefined, undefined, undefined, event => appendAccountingEvent(f.env, event));
+  f.env.CONTAINER_ACCOUNT = { idFromName: (name: string) => name, get: () => ({ fetch: (request: Request) => controller.fetch(request) }) } as any;
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups/complete', { sessionId: 'cs_prepaid' }), f.env)).status, 200);
+  const state = stored.get('containerAccount'), start = Date.UTC(2026, 8, 30, 23);
+  state.leases.small = { size: 'lite', startAt: start, meteredUntil: start, endAt: now, unitMs: now - start,
+    billing: { kind: 'prepaid', customerId: TEST_CUSTOMER } };
+  stored.set('containerAccount', state);
+  const result = await createAccountingClose(f.env, '2026-09', TEST_USER);
+  assert.deepEqual(result.report.issues, ['cpa_tax_method_not_recorded']);
+  assert.equal(result.report.customerComputeCredits.consumedUnitMs, '3600000');
+  assert.equal(result.report.customerComputeCredits.outstandingCreditCents, 1998);
+  assert.equal(result.report.deferredRevenue.outstandingMicroUsd, '19980000');
+  assert.equal(stored.get('containerAccount').wallet.usedUnitMs, 7200000);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM accounting_ledger WHERE event_type='compute'").get()!.n, 2);
 });
 
 test('discounted Checkout rejects a changed nominal subtotal, invalid discount arithmetic, or mismatched paid intent', async t => {

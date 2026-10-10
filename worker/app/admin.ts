@@ -1,7 +1,7 @@
 import { authCorsHeaders, authJson, currentUser, type AuthUser } from "./auth-core";
 import type { Plan } from "../lib/stripe";
 
-const ADMIN_EMAIL = "oneone@gmail.com";
+export const ADMIN_EMAIL = "oneone@gmail.com";
 const PAGE_SIZE = 25;
 
 type TableDefinition = {

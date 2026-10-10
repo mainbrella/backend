@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { PrepaidWallet, UNIT_MS_PER_CENT, utcPeriod } from './prepaid-wallet.js';
 import { ContainerAccountController } from './container-account-core.js';
 
-function fixture(recharge) {
+function fixture(recharge, accountingSink) {
   let now = Date.UTC(2026, 9, 31, 23, 59);
   const saved = [];
-  const account = { now: () => now, ctx: { storage: { async put(key, value) { saved.push(structuredClone(value)); } } } };
+  const account = { now: () => now, accountingSink, ctx: { storage: { async put(key, value) { saved.push(structuredClone(value)); } } } };
   const wallet = new PrepaidWallet(account, recharge);
   const state = { userId: 'owner', leases: {}, production: {}, spendLimitCents: 5000 };
   const payment = { id: 'pi_paid', customerId: 'cus_owner', amountCents: 500, refundedCents: 0, disputed: false, createdAt: now, kind: 'topup' };
@@ -15,6 +15,63 @@ function fixture(recharge) {
     billing: { kind: 'prepaid', customerId: 'cus_owner', ...utcPeriod(now) } });
   return { wallet, state, payment, lease, saved, now: () => now, advance(ms) { now += ms; } };
 }
+
+test('accounting outbox survives lost acknowledgements and retains all usage beyond wallet history compaction', async () => {
+  const ledger = new Map(); let loseAcknowledgement = true;
+  const f = fixture(undefined, async event => {
+    const prior = ledger.get(event.key);
+    if (prior) assert.deepEqual(event, prior);
+    ledger.set(event.key, structuredClone(event));
+    if (loseAcknowledgement) { loseAcknowledgement = false; throw new Error('lost_ack'); }
+  });
+  const lease = f.lease(120000); f.state.leases.small = lease; f.wallet.track(f.state, lease, 'small');
+  f.advance(120000); f.wallet.record(f.state, lease, f.now()); f.wallet.finish(f.state, lease, f.now()); delete f.state.leases.small;
+  await f.wallet.flushAccounting(f.state);
+  assert.ok(Object.keys(f.state.wallet.accounting.pending).length > 0);
+  assert.ok(Object.keys(f.saved[0].wallet.accounting.pending).length > 0);
+  await f.wallet.flushAccounting(f.state);
+  assert.deepEqual(f.state.wallet.accounting.pending, {});
+  const boundaryRows = [...ledger.values()].filter(event => event.type === 'compute');
+  assert.equal(boundaryRows.length, 2);
+  assert.equal(boundaryRows[0].data.endAt, Date.UTC(2026, 10, 1));
+  assert.equal(boundaryRows.reduce((sum, event) => sum + event.data.unitMs, 0), 120000);
+  for (let i = 0; i < 260; i++) {
+    const current = f.lease(1); f.state.leases.small = current; f.wallet.track(f.state, current, 'small');
+    f.advance(1); f.wallet.record(f.state, current, f.now()); f.wallet.finish(f.state, current, f.now()); delete f.state.leases.small;
+    await f.wallet.flushAccounting(f.state);
+  }
+  assert.equal(Object.keys(f.state.wallet.resources).length, 256);
+  const usage = [...ledger.values()].filter(event => event.type === 'compute');
+  assert.equal(usage.length, 262);
+  assert.equal(usage.reduce((sum, event) => sum + event.data.unitMs, 0), f.state.wallet.usedUnitMs);
+});
+
+test('accounting activation preserves a labeled baseline without attributing old usage to new allocations', async () => {
+  const f = fixture(); f.state.wallet.usedUnitMs = 500;
+  const ledger = [];
+  f.wallet.account.accountingSink = async event => ledger.push(event);
+  const lease = f.lease(10); f.state.leases.small = lease; f.wallet.track(f.state, lease, 'small');
+  f.advance(10); f.wallet.record(f.state, lease, f.now());
+  await f.wallet.flushAccounting(f.state);
+  assert.equal(ledger.find(event => event.type === 'legacy_usage').data.unitMs, 500);
+  assert.equal(ledger.find(event => event.type === 'compute').data.unitMs, 10);
+});
+
+test('revocation recovery cannot create credit and records disputes after a full refund as separate evidence', async () => {
+  const ledger = [], f = fixture(undefined, async event => ledger.push(event));
+  f.wallet.applyFunding(f.state, { ...f.payment, id: 'pi_unrecorded', refundedCents: 100, revokeOnly: true });
+  assert.equal(f.state.wallet.fundings.pi_unrecorded, undefined);
+  f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 500, revokeOnly: true });
+  await f.wallet.flushAccounting(f.state);
+  f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 500, disputed: true });
+  await f.wallet.flushAccounting(f.state);
+  const states = ledger.filter(event => event.type === 'funding_state');
+  assert.equal(states.length, 3);
+  assert.notEqual(states[1].key, states[2].key);
+  assert.equal(states[1].data.disputed, false);
+  assert.equal(states[2].data.disputed, true);
+  assert.equal(f.wallet.status(f.state).balanceCents, 0);
+});
 
 test('short allocations accumulate exact lifetime cost without per-start or per-period rounding', () => {
   const f = fixture();

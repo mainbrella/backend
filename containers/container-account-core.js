@@ -19,8 +19,8 @@ export const machineName = (userId, id) => id === 'small' ? `user:${userId}` : `
 // One serialized account owner reserves every start before provisioning a slot.
 // It survives restarts and plan/customer/subscription changes without resetting usage.
 export class ContainerAccountController {
-  constructor(ctx, machineFor, now = () => Date.now(), invoiceUsage, refreshEntitlement, recharge) {
-    Object.assign(this, { ctx, machineFor, now, refreshEntitlement });
+  constructor(ctx, machineFor, now = () => Date.now(), invoiceUsage, refreshEntitlement, recharge, accountingSink) {
+    Object.assign(this, { ctx, machineFor, now, refreshEntitlement, accountingSink });
     this.production = new AccountProduction(this);
     this.tail = Promise.resolve();
     this.workspaces = new AccountWorkspaces(this);
@@ -154,6 +154,8 @@ export class ContainerAccountController {
     state.pending = Object.fromEntries(Object.entries(state.pending).filter(([id]) => state.slots.includes(id)));
     await this.ctx.storage.put(KEY, state);
     let alarmAt;
+    await this.billing.wallet.flushAccounting(state);
+    if (Object.keys(state.wallet?.accounting?.pending ?? {}).length) alarmAt = this.now() + 60_000;
     if (retry && state.slots.length) alarmAt = this.now() + 30_000;
     else if (state.entitlement.active && state.slots.length) {
       alarmAt = Math.min(state.entitlement.validUntil, ...Object.values(state.pending).map(at => at + 90_000));
@@ -335,6 +337,16 @@ export class ContainerAccountController {
       }
       return await this.serialized(async () => {
         const state = await load(), body = await request.json();
+        if (path === '/billing/accounting-checkpoint') {
+          for (const lease of Object.values(state.leases)) if (lease.billing?.kind === 'prepaid') this.billing.wallet.record(state, lease, this.now());
+          this.billing.wallet.fundingEvidence(state);
+          const fundings = Object.values(state.wallet?.fundings ?? {}).map(row => ({ id: row.id, creditCents: row.amountCents, revokedCents: row.disputed ? row.amountCents : row.refundedCents }));
+          const asOf = this.now(), usedUnitMs = state.wallet?.usedUnitMs ?? 0;
+          this.billing.wallet.queue(state, { key: `wallet_checkpoint:${crypto.randomUUID()}`, type: 'wallet_checkpoint', occurredAt: asOf,
+            data: { asOf, usedUnitMs, fundings } });
+          await this.saveState(state);
+          return this.respond({ asOf, usedUnitMs, fundings, pendingEvents: Object.keys(state.wallet?.accounting?.pending ?? {}).length });
+        }
         if (path === '/billing/settings') this.billing.wallet.settings(state, body);
         else if (this.billing.wallet.applyFunding(state, body)) state.wallet.fundingRevoked = true;
         state.entitlement = this.prepaidEntitlement(state);
@@ -358,7 +370,7 @@ export class ContainerAccountController {
   }
   async fetch(request) {
     const url = new URL(request.url);
-    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
+    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       return this.serialized(async () => {

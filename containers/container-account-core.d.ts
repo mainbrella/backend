@@ -3,7 +3,7 @@ export function validIdempotencyKey(key: unknown): boolean;
 export function validContainerId(id: string): boolean;
 export function machineName(userId: string, id: string): string;
 export class ContainerAccountController {
-  constructor(ctx: { storage: DurableObjectStorage }, machineFor: (userId: string, id: string) => { fetch(request: Request): Promise<Response> }, now?: () => number, invoiceUsage?: (event: import('../worker/lib/usage-billing').UsageInvoice) => Promise<string>, refreshEntitlement?: (userId: string) => Promise<import('./plan-policy.js').Entitlement>, recharge?: (event: import('../worker/lib/prepaid-billing').PrepaidRechargeEntry) => Promise<import('../worker/lib/prepaid-billing').RechargeResult>);
+  constructor(ctx: { storage: DurableObjectStorage }, machineFor: (userId: string, id: string) => { fetch(request: Request): Promise<Response> }, now?: () => number, invoiceUsage?: (event: import('../worker/lib/usage-billing').UsageInvoice) => Promise<string>, refreshEntitlement?: (userId: string) => Promise<import('./plan-policy.js').Entitlement>, recharge?: (event: import('../worker/lib/prepaid-billing').PrepaidRechargeEntry) => Promise<import('../worker/lib/prepaid-billing').RechargeResult>, accountingSink?: (event: import('../worker/lib/accounting-ledger').AccountingEvent) => Promise<void>);
   fetch(request: Request): Promise<Response>;
   alarm(): Promise<void>;
 }

@@ -1,5 +1,9 @@
 # Prepaid compute billing
 
+Accounting evidence, ledger exports, monthly closes and pending professional tax
+decisions are documented in [accounting-ledger.md](accounting-ledger.md). Apply
+`020_accounting_ledger.sql` before deploying the accounting-enabled payment path.
+
 New purchases add $5–$1,000 USD of compute balance through one-time Checkout.
 Stripe promotion codes discount the price without reducing the selected
 compute balance. Without a discount, every dollar paid adds one dollar of

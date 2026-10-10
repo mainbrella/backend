@@ -9,6 +9,7 @@ import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
 import { handlePrepaidBillingRequest } from './prepaid-billing';
 import { handleAdminRequest } from "./admin";
+import { handleAccountingRequest } from './accounting';
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
@@ -76,6 +77,7 @@ async function handleLegacyRequest(
     return handleAuthRequest(request, env, ctx);
   }
 
+  if (url.pathname.startsWith('/admin/accounting/')) return handleAccountingRequest(request, env);
   if (url.pathname.startsWith("/admin/")) {
     return handleAdminRequest(request, env);
   }

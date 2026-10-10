@@ -21,6 +21,7 @@ import { registerWorkspaceRoutes } from './openapi-workspaces';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerPrepaidBillingRoutes } from './openapi-prepaid-billing';
+import { registerAccountingRoutes } from './openapi-accounting';
 import { registerOperationsRoutes } from "./openapi-operations";
 import { registerPrivateServiceRoutes } from './openapi-private-services';
 import { forward, type LegacyHandler } from "./openapi-shared";
@@ -52,6 +53,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerRepoLaunchRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);
+  registerAccountingRoutes(api, handler);
   registerCapabilityRoutes(api, handler);
   registerActivityRoutes(api, handler);
   registerExecutionRoutes(api, handler);

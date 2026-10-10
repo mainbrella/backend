@@ -47,6 +47,7 @@ const endpointMethods: Record<string, string[]> = {
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
   "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
+  '/admin/accounting/ledger': ['get'], '/admin/accounting/closes': ['get', 'post'], '/admin/accounting/policies': ['get', 'post'],
 };
 
 async function document() {
@@ -54,6 +55,23 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('accounting schemas describe protected exports, immutable revisions and explicit CPA methods', async () => {
+  const { paths, components } = await document();
+  for (const path of ['/admin/accounting/ledger', '/admin/accounting/closes', '/admin/accounting/policies']) {
+    for (const operation of Object.values(paths[path]) as any[]) {
+      assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+      assert.match(operation.description, /oneone@gmail\.com/);
+      assert.ok(operation.responses[403]);
+    }
+  }
+  assert.ok(paths['/admin/accounting/ledger'].get.responses[200].content['application/x-ndjson']);
+  assert.match(paths['/admin/accounting/closes'].post.description, /null until a CPA-approved policy/);
+  assert.match(paths['/admin/accounting/policies'].post.description, /does not create refund rights/);
+  assert.ok(components.schemas.AccountingCloseReport.properties.customerComputeCredits);
+  assert.ok(components.schemas.AccountingCloseReport.properties.deferredRevenue);
+  assert.ok(components.schemas.AccountingCloseReport.properties.taxableAdvancePaymentsByReceiptYear);
+});
 
 test('Private Services schemas expose account authentication, exact generations, and HTTP-only registration', async () => {
   const { paths, components } = await document();
