@@ -7,14 +7,14 @@ import { spawn } from 'node:child_process';
 import { serialize } from 'node:v8';
 import { DatabaseSync } from 'node:sqlite';
 
-async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787' } = {}) {
+async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787', aiArgs = [], codexFail = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/.bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
-  for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
-  writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }] }));
+  for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs', 'codex-bridge.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }], ai: { binding: 'AI' }, compatibility_flags: ['nodejs_compat', 'global_fetch_strictly_public'] }));
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ name: 'mainbrella-containers', containers: [
     { class_name: 'UserContainer', images: { terminal: { dockerfile: './containers/Dockerfile' } } },
   ] }));
@@ -26,6 +26,7 @@ async function run(t, { signal, fail = false, migrationFail, allImages = false, 
   db.prepare('INSERT INTO _cf_KV VALUES (?, ?)').run('builderMachine', serialize({ createdAt: 1 }));
   db.close();
   writeFileSync(join(root, 'docker-state.json'), '[]');
+  writeFileSync(join(root, 'bin/codex'), readFileSync(new URL('fixtures/codex-app-server.mjs', import.meta.url)), { mode: 0o755 });
   writeFileSync(join(root, 'bin/docker'), `#!${process.execPath}
 import fs from 'node:fs';
 const rows = JSON.parse(fs.readFileSync('docker-state.json'));
@@ -44,24 +45,25 @@ const configs = args.flatMap((v, i) => v === '--config' ? [JSON.parse(fs.readFil
 fs.writeFileSync('configs.json', JSON.stringify(configs));
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('docker-state.json', JSON.stringify([${JSON.stringify(proxy)}]));
+${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);" : ''}
 console.log('fixture-ready');
-${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);" : `process.exit(${fail ? 7 : 0});`}
+${signal ? '' : `process.exit(${fail ? 7 : 0});`}
 `, { mode: 0o755 });
-  const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), ...portArgs, '--persist-to', 'state'], {
-    cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, ...(migrationFail ? { FAIL_LOCAL_MIGRATION: migrationFail } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
+  const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), ...aiArgs, ...portArgs, '--persist-to', 'state'], {
+    cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, CODEX_PATH: join(root, 'bin', codexFail ? 'missing-codex' : 'codex'), CODEX_FIXTURE_LOG: join(root, 'codex.jsonl'), ...(migrationFail ? { FAIL_LOCAL_MIGRATION: migrationFail } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
-  let output = '';
+  let output = '', sentSignal = false;
   child.stdout.on('data', chunk => {
     output += chunk;
-    if (signal && output.includes('fixture-ready')) child.kill(signal);
+    if (signal && !sentSignal && output.includes('fixture-ready')) { sentSignal = true; child.kill(signal); }
   });
   child.stderr.on('data', chunk => { output += chunk; });
   const code = await new Promise((resolve, reject) => {
     child.once('exit', resolve);
     child.once('error', reject);
   });
-  assert.equal(code, migrationFail ? 9 : fail ? 7 : 0, output);
+  assert.equal(code, migrationFail ? 9 : codexFail ? 1 : fail ? 7 : 0, output);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'docker-state.json'))), [], output);
   assert.equal(readdirSync(root).some(path => path.startsWith('.wrangler-local-')), false);
   const migrations = readFileSync(join(root, 'migrations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -71,7 +73,7 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
     assert.equal(migration[migration.indexOf('--config') + 1].match(/\.wrangler-local-api-\d+\.jsonc$/)?.length, 1);
     assert.equal(migration[migration.indexOf('--persist-to') + 1], realpathSync(join(root, 'state')));
   }
-  if (migrationFail) {
+  if (migrationFail || codexFail) {
     assert.equal(readdirSync(root).includes('args.json'), false, 'dev should not start after migration failure');
     assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
     return;
@@ -86,6 +88,21 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
   assert.equal(containerConfig.vars.PROJECT_HOSTING_ENABLED, undefined);
   assert.equal(containerConfig.vars.PROJECT_DOMAIN_PROVIDER, undefined);
   assert.equal(containerConfig.vars.LOCAL_PREVIEW_PORT, undefined);
+  if (aiArgs.includes('--ai=codex') || aiArgs.includes('codex')) {
+    assert.match(apiConfig.vars.BUILD_CODEX_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(apiConfig.vars.BUILD_MODEL, 'codex/fixture-model');
+    assert.match(apiConfig.vars.BUILD_CODEX_TOKEN, /^[a-f0-9]{64}$/);
+    assert.equal(apiConfig.ai, undefined);
+    assert.deepEqual(apiConfig.compatibility_flags, ['nodejs_compat']);
+    assert.equal(containerConfig.vars.BUILD_CODEX_URL, undefined);
+    assert.equal(output.includes(apiConfig.vars.BUILD_CODEX_TOKEN), false);
+    const records = readFileSync(join(root, 'codex.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(records.some(record => record.stopped), 'the launcher must shut down Codex with Wrangler');
+  } else {
+    assert.deepEqual(apiConfig.ai, { binding: 'AI' });
+    assert.equal(apiConfig.vars.BUILD_CODEX_URL, undefined);
+    assert.equal(readdirSync(root).includes('codex.jsonl'), false);
+  }
   assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
   const images = configs[1].containers[0].images;
   assert.deepEqual(Object.keys(images), allImages ? ['terminal', 'python', 'rust', 'go', 'devops'] : ['terminal']);
@@ -93,6 +110,7 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
     for (const id of ['python', 'rust', 'go', 'devops']) assert.equal(images[id].dockerfile, `./containers/catalog/${id}.Dockerfile`);
   }
   assert.equal(JSON.parse(readFileSync(join(root, 'args.json'))).includes('--all-images'), false);
+  assert.equal(JSON.parse(readFileSync(join(root, 'args.json'))).some(arg => arg === '--ai' || arg.startsWith('--ai=')), false);
   assert.match(output, /Cleaned up 1 local container proxy/);
 }
 
@@ -113,4 +131,13 @@ test('dev launcher passes the selected port to local project aliases in both CLI
 });
 test('dev launcher stops before Wrangler dev and removes temporary configs when a local migration fails', { timeout: 10_000 }, async t => {
   await run(t, { migrationFail: 'delta' });
+});
+test('opt-in Codex launcher starts and stops the bridge for Wrangler exit, failure and signals', { timeout: 10_000 }, async t => {
+  await run(t, { aiArgs: ['--ai=codex'] });
+  await run(t, { aiArgs: ['--ai', 'codex'], fail: true });
+  await run(t, { aiArgs: ['--ai=codex'], signal: 'SIGINT' });
+  await run(t, { aiArgs: ['--ai=codex'], signal: 'SIGTERM' });
+});
+test('Codex startup failure removes configs and prevents Wrangler startup', { timeout: 10_000 }, async t => {
+  await run(t, { aiArgs: ['--ai=codex'], codexFail: true });
 });

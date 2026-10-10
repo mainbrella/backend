@@ -17,6 +17,7 @@ const failures = errors(400, 401, 402, 403, 404, 405, 409, 413, 429, 503);
 export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   const common = { tags: ['Build'], security: cookieSecurity };
   register(api, 'get', '/build/config', { ...common, operationId: 'getBuildConfig', summary: 'Read Build availability and beta limits',
+    description: 'Reports the configured inference model. Production uses Workers AI; opt-in local development can use a Codex app-server bridge with the same build tools and validation.',
     responses: { 200: jsonResponse(z.object({ available: z.boolean(), model: z.string(), maxApps: z.number(), dailyTurns: z.number(), aiBilling: z.literal('included'), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);
   register(api, 'get', '/build/apps', { ...common, operationId: 'listBuildApps', summary: 'List account-saved apps', request: { headers },
     responses: { 200: jsonResponse(z.object({ apps: z.array(app).max(50) })), ...failures } }, handler);

@@ -4,6 +4,8 @@ interface Env {
   BUILD_ENABLED?: string;
   BUILD_MODEL?: string;
   BUILD_AI_GATEWAY?: string;
+  BUILD_CODEX_URL?: string;
+  BUILD_CODEX_TOKEN?: string;
   STRIPE_PREPAID_PRICE_ID?: string;
   LOCAL_DEV?: string;
   LOCAL_PREVIEW_PORT?: string;

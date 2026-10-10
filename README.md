@@ -65,6 +65,38 @@ from `containers/Dockerfile` and starts containers on demand. This requires
 Wrangler 4.136.0 or newer. Press `r` in the dev terminal to rebuild the image.
 `npm run dev:lan` exposes the same setup on your local network.
 
+To use your signed-in Codex CLI for Build inference, run:
+
+```sh
+codex login
+npm run dev -- --ai=codex
+```
+
+The launcher starts a private loopback Node bridge to `codex app-server` over
+stdio, using the model in your Codex configuration. Set `CODEX_PATH` if the CLI
+is outside your PATH. Codex inference runs remotely and uses your Codex account;
+this mode does not exercise the production Workers AI model. The app-server
+[dynamic-tool protocol](https://learn.chatgpt.com/docs/app-server) is experimental
+and the bridge enables `experimentalApi`.
+
+Mainbrella's existing build agent still validates and executes all six file and
+command tools, persists source in local D1, repairs compiler errors, and creates
+Docker-backed previews. Assistant updates use the existing activity stream.
+Codex runs from an empty temporary directory with local execution integrations
+disabled. The bridge uses an ephemeral bearer token, never exposes a browser
+endpoint, and stops with Wrangler. Errors, timeouts and inference disconnects
+cancel pending Codex work; closing the browser activity stream keeps the durable
+build running as usual. Abandoned sessions expire after 12 idle minutes, with a
+30-minute absolute limit. Restarting dev loses active Codex sessions; those
+builds fail explicitly and can be retried as new turns.
+
+This mode changes only the launcher's temporary API configuration: it removes
+the AI binding and permits loopback fetches. Deployment configurations stay
+unchanged. App-server does not expose a per-response token cap; the bridge checks
+reported usage at each tool handoff/completion and the existing build agent
+enforces its cumulative budgets. Plain `npm run dev` keeps the default Workers
+AI path.
+
 Local preview links use `http://<token>.localhost:8787/` and route through the
 local API Worker to the container, including WebSockets. Open them on the Mac
 running Wrangler. Reissue previews created before this setup to get local links.

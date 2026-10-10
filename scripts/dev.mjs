@@ -4,10 +4,23 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { LocalProxyCleanup } from './local-proxy-cleanup.mjs';
 import { IMAGE_CATALOG } from '../containers/image-catalog.js';
+import { startCodexBridge } from './codex-bridge.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const allImages = process.argv.slice(2).includes('--all-images');
 const args = process.argv.slice(2).filter(arg => arg !== '--all-images');
+const aiIndex = args.findIndex(arg => arg === '--ai' || arg.startsWith('--ai='));
+const aiMode = aiIndex < 0 ? 'workers' : args[aiIndex].includes('=') ? args[aiIndex].slice('--ai='.length) : args[aiIndex + 1];
+if (!['workers', 'codex'].includes(aiMode)) {
+  console.error('Use --ai=codex for local Codex inference, or --ai=workers for the default provider.');
+  process.exit(1);
+}
+if (aiIndex >= 0) args.splice(aiIndex, args[aiIndex].includes('=') ? 1 : 2);
+let child, bridge, shutdownSignal;
+const startup = new AbortController();
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  shutdownSignal = signal; startup.abort(); child?.kill(signal);
+});
 const persistIndex = args.indexOf('--persist-to');
 const persistPath = args.find(arg => arg.startsWith('--persist-to='))?.slice('--persist-to='.length)
   ?? (persistIndex >= 0 ? args[persistIndex + 1] : undefined);
@@ -71,15 +84,40 @@ for (const database of ['delta', 'mainbrella-preview-routes']) {
     process.exit();
   }
 }
-const child = spawn(wrangler, [
+if (aiMode === 'codex') {
+  try {
+    bridge = await startCodexBridge({ signal: startup.signal });
+    const config = JSON.parse(readFileSync(configPaths[0], 'utf8'));
+    delete config.ai;
+    // The bridge is a loopback HTTP service, reachable only during local dev.
+    config.compatibility_flags = (config.compatibility_flags ?? []).filter(flag => flag !== 'global_fetch_strictly_public');
+    config.vars = { ...config.vars, BUILD_CODEX_URL: bridge.url, BUILD_CODEX_TOKEN: bridge.token, BUILD_MODEL: bridge.model };
+    writeFileSync(configPaths[0], JSON.stringify(config, null, 2));
+    console.log(`Local Build inference: ${bridge.model} via codex app-server (remote inference).`);
+  } catch (error) {
+    if (!shutdownSignal) console.error(error.message);
+    await bridge?.close();
+    await sweep(true); removeConfigs();
+    process.exit(shutdownSignal === 'SIGINT' ? 130 : shutdownSignal === 'SIGTERM' ? 143 : 1);
+  }
+}
+if (shutdownSignal) {
+  await bridge?.close(); await sweep(true); removeConfigs();
+  process.exit(shutdownSignal === 'SIGINT' ? 130 : 143);
+}
+child = spawn(wrangler, [
   'dev', '--local', ...configPaths.flatMap(path => ['--config', path]), ...args,
 ], { cwd: root, stdio: 'inherit' });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { child.kill(signal); });
 const timer = setInterval(() => { void sweep(); }, 15_000);
+let finishing;
 async function finish(code) {
-  clearInterval(timer);
-  await sweep(true);
-  process.exitCode = code;
+  return finishing ??= (async () => {
+    clearInterval(timer);
+    await bridge?.close();
+    await sweep(true);
+    removeConfigs();
+    process.exitCode = code;
+  })();
 }
 child.on('error', error => { console.error(error.message); void finish(1); });
 child.on('exit', (code, signal) => { void finish(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1)); });

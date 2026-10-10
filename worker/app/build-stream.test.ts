@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
 import { readBuildInference, buildInference } from '../lib/build-ai';
 import { buildAppStream, saveBuildActivity, buildToolLabel } from '../lib/build-activity';
-import { handleBuildRequest, failBuildTurn } from './build';
+import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
+import { buildStarter } from '../lib/build-contract';
+import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
-import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE } from './paid-container-test-helpers';
+import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
 
 const event = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\r\n\r\n`;
 const delta = (value: unknown) => event({ choices: [{ delta: value, finish_reason: null }] });
@@ -132,4 +137,86 @@ test('the agent streams and saves edits before allocating a sandbox, including f
   assert.ok(data.app.turns[0].activity.every((item: any) => item.status === 'succeeded'));
   const source = await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/source'), f.env)).json() as any;
   assert.deepEqual(source.files, { 'src/App.tsx': outputs[1].args!.content });
+});
+
+test('local Codex runs through the existing source, command, compiler repair and preview workflow', async t => {
+  const realFetch = globalThis.fetch;
+  const bridge = await startCodexBridge({ spawnProcess(_executable, args, options) {
+    return spawn(process.execPath, [fileURLToPath(new URL('../../scripts/fixtures/codex-app-server.mjs', import.meta.url)), ...args], options);
+  } });
+  t.after(() => bridge.close());
+  const f = await fixture(t), billingFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.hostname === '127.0.0.1') return realFetch(input, options);
+    const response = await billingFetch(input, options);
+    return new Response((await response.text()).replaceAll(PLAN_PRICES.builder, planPrices(f.env).builder),
+      { status: response.status, headers: response.headers });
+  });
+  Object.assign(f.env, { LOCAL_DEV: 'true', BUILD_ENABLED: 'true', BUILD_MODEL: bridge.model,
+    BUILD_CODEX_URL: bridge.url, BUILD_CODEX_TOKEN: bridge.token, PREVIEWS_ENABLED: 'true', BUILD_WORKFLOW: {} });
+  f.env.AI = undefined as unknown as Ai;
+  const files = { ...buildStarter, 'src/old.ts': 'old' };
+  f.sqlite.prepare('UPDATE build_apps SET source_json = ?, container_json = ? WHERE id = ?')
+    .run(JSON.stringify(files), JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT }), f.appId);
+  f.sqlite.exec(readFileSync(new URL('../../preview-migrations/001_preview_routes.sql', import.meta.url), 'utf8'));
+  f.env.PREVIEW_ROUTES = { prepare(sql: string) {
+    const statement = f.env.DB.prepare(sql), run = statement.run.bind(statement);
+    statement.run = (async () => ({ ...await run(), success: true })) as typeof statement.run;
+    return statement;
+  } } as D1Database;
+  const commands: string[] = [], guestFiles = new Map<string, string>();
+  const executions = new Map<string, { id: string; status: string; stdout: string; stderr: string }>();
+  let compiles = 0;
+  f.env.USER_CONTAINER = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/files' && request.method === 'PUT') {
+      guestFiles.set(url.searchParams.get('path')!, await request.text()); return Response.json({ saved: true });
+    }
+    if (url.pathname === '/executions' && request.method === 'POST') {
+      const { command } = await request.json() as { command: string }; commands.push(command);
+      const failed = command.includes('tsc --noEmit') && ++compiles <= 2;
+      const id = `execution-${commands.length}`;
+      const result = { id, status: failed ? 'failed' : 'succeeded', stdout: '', stderr: failed ? 'Compiler error: fix src/App.tsx' : '' };
+      executions.set(id, result); return Response.json(result);
+    }
+    if (url.pathname.startsWith('/executions/')) return Response.json(executions.get(url.pathname.split('/').at(-1)!));
+    if (url.pathname === '/previews') return Response.json({ id: 'b'.repeat(32), token: 'a'.repeat(48),
+      port: 3000, createdAt: GENERATION_ONE, expiresAt: Date.now() + 30 * 60_000 }, { status: 201 });
+    assert.fail(`Unexpected container request: ${request.method} ${url.pathname}`);
+  } }) } as unknown as DurableObjectNamespace;
+  assert.equal(buildConfigured(f.env), true, 'Codex mode works without an AI binding');
+  const steps: string[] = [];
+  const step = { async do(name: string, _options: unknown, operation: () => Promise<unknown>) { steps.push(name); return operation(); },
+    async sleep() { assert.fail('fixture commands complete immediately'); } } as unknown as Parameters<typeof runBuildAgent>[2];
+  await runBuildAgent(f.env, f.params, step, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  const turn = data.app.turns[0];
+  assert.equal(turn.status, 'succeeded', turn.error);
+  assert.equal(data.app.revision, 1); assert.equal(data.app.activeTurnId, null);
+  assert.match(data.app.preview.url, /^http:\/\/[a-z0-9]+\.localhost:8787\/$/);
+  assert.equal(compiles, 3, 'Mainbrella sends its compiler failure back to Codex before completing');
+  assert.ok(steps.indexOf('AI 0') < steps.indexOf('Allocate sandbox'));
+  assert.ok(turn.activity.some((item: any) => item.type === 'message' && item.text.includes('Using write_file')));
+  assert.ok(turn.activity.some((item: any) => item.type === 'tool' && item.status === 'failed'));
+  const source = await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/source'), f.env)).json() as any;
+  assert.equal(source.files['src/App.tsx'], 'repaired'); assert.equal(source.files['src/old.ts'], undefined);
+  assert.equal(guestFiles.get('/workspace/app/src/App.tsx'), 'repaired');
+  const revision = f.sqlite.prepare('SELECT source_json FROM build_revisions WHERE app_id = ?').get(f.appId) as { source_json: string };
+  assert.equal(JSON.parse(revision.source_json)['src/App.tsx'], 'repaired');
+  assert.ok(commands.some(command => command.includes('npm install --no-audit')));
+  assert.ok(commands.some(command => command.includes('mainbrella-build-preview')));
+});
+
+test('Codex variables cannot select local inference outside local dev, and tool status stays out of Workers AI payloads', async () => {
+  let calls = 0;
+  const env = { BUILD_CODEX_URL: 'http://127.0.0.1:1', BUILD_CODEX_TOKEN: 'local-token', AI: { async run(_model: string, options: any) {
+    calls++; assert.ok(options.messages.every((message: any) => !Object.hasOwn(message, 'tool_success')));
+    return { choices: [{ message: { content: 'Production model' }, finish_reason: 'stop' }] };
+  } } } as unknown as Env;
+  const result = await buildInference(env, [{ role: 'tool', content: 'Result', tool_call_id: 'call', tool_success: false }], 1024);
+  assert.equal(result.message.content, 'Production model'); assert.equal(calls, 1);
+  env.LOCAL_DEV = 'true'; env.BUILD_CODEX_URL = 'https://external.example';
+  await assert.rejects(buildInference(env, [{ role: 'user', content: 'Test' }], 1024, undefined, 'session'), /build_unavailable/);
+  assert.equal(calls, 1);
 });

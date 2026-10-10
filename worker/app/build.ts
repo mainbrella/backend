@@ -9,9 +9,10 @@ import { BUILD_MODEL, BUILD_MAX_APPS, BUILD_DAILY_TURNS, BuildError, buildCreate
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
 import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
+import { localCodexConfigured } from '../lib/build-codex';
 
 export function buildConfigured(env: Env) {
-  return env.BUILD_ENABLED === 'true' && Boolean(env.AI && env.BUILD_WORKFLOW && previewsConfigured(env));
+  return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI) && env.BUILD_WORKFLOW && previewsConfigured(env));
 }
 function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = []) {
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;

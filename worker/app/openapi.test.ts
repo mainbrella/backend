@@ -120,6 +120,16 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.match(update.description, /project owned by the signed-in user/);
 });
 
+test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {
+  const { paths } = await document();
+  const config = paths['/build/config'].get;
+  assert.equal(config.operationId, 'getBuildConfig');
+  assert.deepEqual(config.security, [{ cookieAuth: [] }]);
+  assert.match(config.description, /Production uses Workers AI/);
+  assert.match(config.description, /local development.*Codex app-server/);
+  assert.equal(config.responses[200].content['application/json'].schema.properties.model.type, 'string');
+});
+
 test('project hosting schemas describe local aliases and simulated DNS and TLS', async () => {
   const { paths, components } = await document();
   const endpoint = paths['/projects/endpoint'].get;
