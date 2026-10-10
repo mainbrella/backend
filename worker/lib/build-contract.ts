@@ -29,11 +29,14 @@ export interface BuildAppRow {
 }
 export interface BuildTurnRow {
   id: string; app_id: string; user_id: string; request_key: string; prompt: string; mode: 'build' | 'preview';
-  base_revision: number; log: string;
+  base_revision: number; log: string; failure_operation_id?: string | null;
   status: 'queued' | 'running' | 'succeeded' | 'failed'; stage: string; summary: string | null; error: string | null;
   model: string; effort?: string | null; input_tokens: number; output_tokens: number; created_at: string; finished_at: string | null;
 }
 export class BuildError extends Error {
+  classification: 'provider' | 'parser' | 'infrastructure' | 'validation' = 'infrastructure';
+  providerCode?: string;
+  operationId?: string;
   constructor(message: string, public status = 503, public details?: string) { super(message); }
 }
 export const ownedBuildApp = (env: Env, userId: string, id: string) => env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? AND id = ?').bind(userId, id).first<BuildAppRow>();

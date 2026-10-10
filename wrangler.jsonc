@@ -12,6 +12,7 @@
 		"enabled": true
 	},
 	"ai": { "binding": "AI" },
+	"version_metadata": { "binding": "VERSION_METADATA" },
 	"workflows": [{ "binding": "BUILD_WORKFLOW", "name": "mainbrella-build", "class_name": "BuildWorkflow" }],
 	"triggers": {
 		"crons": [

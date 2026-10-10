@@ -7,9 +7,9 @@ const headers = z.object({ Origin: z.string().optional() });
 const submissionHeaders = headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
 const image = z.object({ id: z.uuid(), toolId: z.string(), label: z.string(), path: z.string() }).openapi('BuildImage');
 const turn = z.object({ id: z.uuid(), prompt: z.string(), mode: z.enum(['build', 'preview']), status: z.enum(['queued', 'running', 'succeeded', 'failed']),
-  activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['running', 'succeeded', 'failed']) })),
+  activity: z.array(z.object({ id: z.string(), type: z.enum(['message', 'tool']), text: z.string(), status: z.enum(['proposed', 'running', 'skipped', 'blocked', 'succeeded', 'failed', 'unknown']), explanation: z.string().nullable() })),
   images: z.array(image).max(4),
-  stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), log: z.string(), model: z.string(), effort: z.string().nullable(), inputTokens: z.number().int(), outputTokens: z.number().int(), aiCostCents: z.number().nonnegative(),
+  stage: z.string(), summary: z.string().nullable(), error: z.string().nullable(), errorExplanation: z.string().nullable(), failureOperationId: z.string().nullable(), log: z.string(), model: z.string(), effort: z.string().nullable(), inputTokens: z.number().int().nullable(), outputTokens: z.number().int().nullable(), aiCostCents: z.number().nonnegative(),
   createdAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable() }).openapi('BuildTurn');
 const app = z.object({ id: z.uuid(), name: z.string(), prompt: z.string(), revision: z.number().int(), activeTurnId: z.string().nullable(),
   container: z.object({ id: z.string(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime() }).nullable(),
@@ -18,6 +18,17 @@ const detail = z.object({ app: app.extend({ turns: z.array(turn) }) });
 const failures = errors(400, 401, 402, 403, 404, 405, 409, 413, 429, 503);
 export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   const common = { tags: ['Build'], security: cookieSecurity };
+  register(api, 'get', '/build/apps/{appId}/turns/{turnId}/diagnostics', { ...common, operationId: 'getBuildTurnDiagnostics', summary: 'Inspect an owned turn’s durable operation evidence',
+    description: 'Read-only, session-authenticated. Assembles ordered logical operations and attempt IDs, deployment/schema versions, dispatch intent, stream evidence, provider references, bounded command output, immutable source snapshots and independent billing/cleanup outcomes. Unknown outcomes are not replayed. Detailed records are excluded from routine SSE snapshots.',
+    request: { params: params.extend({ turnId: z.uuid() }), headers }, responses: { 200: jsonResponse(z.object({
+      schemaVersion: z.literal(1), turnId: z.uuid(), status: z.enum(['queued','running','succeeded','failed']), error: z.string().nullable(), log: z.string(), failureOperationId: z.string().nullable(),
+      operations: z.array(z.object({ turn_id: z.uuid(), operation_id: z.string(), attempt_id: z.string(), schema_version: z.number().int(), deployment_version: z.string().nullable(),
+        kind: z.enum(['text','image','tool','command','source','billing','cleanup']), label: z.string(), status: z.enum(['proposed','skipped','blocked','succeeded','failed','unknown']),
+        dispatch_attempted: z.number().int().nullable(), created_at: z.number(), started_at: z.number().nullable(), updated_at: z.number(), finished_at: z.number().nullable(),
+        evidence: z.record(z.string(), z.unknown()), result: z.unknown().nullable(), source: z.record(z.string(), z.string()).nullable() })),
+      billing: z.array(z.object({ id: z.string(), user_id: z.string(), app_id: z.string(), turn_id: z.string(), model: z.string(), reserved_micro_usd: z.number(),
+        cost_micro_usd: z.number().nullable(), usage_json: z.string().nullable(), status: z.enum(['reserved','running','reported','settled']), created_at: z.number(), reported_at: z.number().nullable() })),
+    })), ...errors(400,401,403,404,405,503) } }, handler);
   register(api, 'get', '/build/config', { ...common, operationId: 'getBuildConfig', summary: 'Read Build availability and beta limits',
     description: 'Reports a curated list of three models: GLM-5.3 (default, best quality), Kimi K2.7 Code (coding), and GLM-5.3 Flash (lower cost). GLM models accept high (default) or max reasoning effort; Kimi reasoning is always on. Each build accepts model and effort; choices outside this list return 400. Production uses Workers AI; opt-in local development can use a Codex app-server bridge with the same build tools and validation.',
     responses: { 200: jsonResponse(z.object({ available: z.boolean(), model: z.string(), models: z.array(z.object({ id: z.string(), name: z.string(), description: z.string().optional(), efforts: z.array(z.string()), defaultEffort: z.string() })), maxApps: z.number(), dailyTurns: z.number(), aiBilling: z.enum(['prepaid', 'included']), aiMarkupPercent: z.number(), computeUnitHourlyCents: z.number(), size: z.literal('small') })), ...errors(401, 403, 503) } }, handler);

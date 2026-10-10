@@ -7,6 +7,8 @@ import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessag
 import { buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { settleReportedBuildUsage } from './build-billing';
+import { buildFailure, failureError, proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation,
+  retainBuildSource, type OperationResult, type OperationStatus } from './build-journal';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
@@ -85,11 +87,23 @@ async function allocate(env: Env, params: BuildParams): Promise<BuildContainer> 
   return container;
 }
 
-async function runCommand(env: Env, params: BuildParams, container: BuildContainer, step: Step, label: string, command: string, timeoutMs = 300_000): Promise<Execution> {
+async function runCommand(env: Env, params: BuildParams, container: BuildContainer, step: Step, label: string, command: string, timeoutMs = 300_000, files?: BuildFiles): Promise<Execution> {
+  const ref = { params, id: label };
   const execution = await step.do(`${label}: start`, retry, async () => {
+    await proposeBuildOperation(env, ref, 'command', label, { command, timeoutMs, containerId: container.id, containerGeneration: container.createdAt });
+    const previous = await readBuildOperation(env, ref);
+    if (previous?.evidence_json) {
+      const evidence = JSON.parse(previous.evidence_json);
+      if (evidence.executionId) return { id: evidence.executionId } as Execution;
+    }
+    if (previous?.status === 'proposed') await startBuildOperation(env, ref, 'command', label);
+    if (files) await retainBuildSource(env, ref, files);
     const { stub, headers } = await machine(env, params.userId, container);
-    return json<Execution>(await stub.fetch(new Request('https://internal/executions', { method: 'POST',
+    await recordBuildOperation(env, ref, { dispatchAttempted: true });
+    const result = await json<Execution>(await stub.fetch(new Request('https://internal/executions', { method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json', 'Idempotency-Key': `build-${params.turnId}-${label.replace(/[^a-zA-Z0-9_-]/g, '-')}` }, body: JSON.stringify({ command, timeoutMs }) })));
+    await recordBuildOperation(env, ref, { evidence: { executionId: result.id } });
+    return result;
   });
   for (let poll = 0; poll < 70; poll++) {
     const result = await step.do(`${label}: inspect ${poll}`, retry, async () => {
@@ -98,6 +112,9 @@ async function runCommand(env: Env, params: BuildParams, container: BuildContain
     });
     if (!['starting', 'running'].includes(result.status)) {
       await step.do(`${label}: retain logs`, retry, async () => {
+        await recordBuildOperation(env, ref, { status: result.status === 'succeeded' ? 'succeeded' : 'failed', finished: true,
+          evidence: { executionId: result.id, executionStatus: result.status, exitCode: result.exitCode ?? null,
+            stdout: (result.stdout || '').slice(-6000), stderr: (result.stderr || '').slice(-6000) }, result: { ok: true, value: { ...result, stdout: (result.stdout || '').slice(-6000), stderr: (result.stderr || '').slice(-6000) } } });
         await env.DB.prepare('UPDATE build_turns SET log = ? WHERE id = ? AND user_id = ?')
           .bind(`${result.status}\n${result.stdout || ''}\n${result.stderr || ''}`.slice(-12_000), params.turnId, params.userId).run();
       });
@@ -105,7 +122,7 @@ async function runCommand(env: Env, params: BuildParams, container: BuildContain
     }
     await step.sleep(`${label}: wait ${poll}`, '5 seconds');
   }
-  throw new BuildError('build_command_timeout');
+  const error = new BuildError('build_command_timeout'); error.operationId = label; throw error;
 }
 async function writeGuestFile(env: Env, userId: string, container: BuildContainer, path: string, content: string | Uint8Array<ArrayBuffer>) {
   const { stub, headers } = await machine(env, userId, container);
@@ -131,21 +148,24 @@ async function saveSource(env: Env, params: BuildParams, files: BuildFiles) {
   await env.DB.prepare('UPDATE build_apps SET source_json = ?, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
     .bind(JSON.stringify(files), new Date().toISOString(), params.appId, params.userId, params.turnId).run();
 }
-async function executeTool(env: Env, params: BuildParams, container: BuildContainer | undefined, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string; succeeded: boolean }> {
+async function executeTool(env: Env, params: BuildParams, container: BuildContainer | undefined, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string; succeeded: boolean; state?: OperationStatus }> {
   const schema = buildToolSchemas[call.function.name as keyof typeof buildToolSchemas];
   let args: Record<string, string>;
   try {
     const parsed = schema?.safeParse(JSON.parse(call.function.arguments));
-    if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false };
+    if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false, state: 'blocked' };
     args = parsed.data;
-  } catch { return { files, output: 'Arguments must be valid JSON.', logs, succeeded: false }; }
+  } catch { return { files, output: 'Arguments must be valid JSON.', logs, succeeded: false, state: 'blocked' }; }
   if (call.function.name === 'generate_image') {
-    const failure = { error: 'Could not generate this image. Continue building with CSS or reuse a saved image; do not substitute stock imagery.' };
+    const failure = { error: 'Could not generate this image. Continue building with CSS or reuse a saved image; do not substitute stock imagery.', state: 'unknown' as OperationStatus };
     const result = await step.do(`${label}: generate image`, { ...noRetry, timeout: '1 minute' }, async () => {
       try { return { image: await generateBuildImage(env, params, label, args.label, args.prompt) }; }
-      catch { return failure; }
+      catch {
+        const operation = await readBuildOperation(env, { params, id: `image-${label}` });
+        return { ...failure, state: operation?.status ?? 'unknown' };
+      }
     }).catch(() => failure);
-    return { files, output: 'image' in result ? JSON.stringify(result.image) : result.error, logs, succeeded: 'image' in result };
+    return { files, output: 'image' in result ? JSON.stringify(result.image) : result.error, logs, succeeded: 'image' in result, state: 'image' in result ? 'succeeded' : result.state };
   }
   if (call.function.name === 'list_files') return { files, output: Object.keys(files).join('\n'), logs, succeeded: true };
   if (call.function.name === 'read_file') return { files, output: files[args.path] ?? 'File not found.', logs, succeeded: Object.hasOwn(files, args.path) };
@@ -153,14 +173,21 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
   if (call.function.name === 'run_command') {
     if (!container) throw new BuildError('build_runtime_unavailable');
     await materialize(env, params, container, files, step, `${label}-source`);
-    const result = await runCommand(env, params, container, step, label, args.command === 'npm install' ? install : compile);
+    const result = await runCommand(env, params, container, step, `${label}-command`, args.command === 'npm install' ? install : compile, 300_000, files);
     const output = `${result.status}\n${result.stdout || ''}\n${result.stderr || ''}`.slice(-12_000);
     return { files, output, logs: output, succeeded: result.status === 'succeeded' };
   }
   const next = { ...files };
   if (call.function.name === 'delete_file') delete next[args.path]; else next[args.path] = args.content;
-  try { validateBuildFiles(next); } catch { return { files, output: 'Source limit exceeded. Keep each file below 64 KiB and the project below 256 KiB / 80 files.', logs, succeeded: false }; }
-  await step.do(`${label}: save source`, retry, async () => saveSource(env, params, next));
+  try { validateBuildFiles(next); } catch { return { files, output: 'Source limit exceeded. Keep each file below 64 KiB and the project below 256 KiB / 80 files.', logs, succeeded: false, state: 'blocked' }; }
+  await step.do(`${label}: save source`, retry, async () => {
+    const ref = { params, id: `${label}-source` };
+    await proposeBuildOperation(env, ref, 'source', `Save ${args.path}`);
+    await recordBuildOperation(env, ref, { status: 'unknown', started: true });
+    await retainBuildSource(env, ref, next, [args.path]);
+    await saveSource(env, params, next);
+    await recordBuildOperation(env, ref, { status: 'succeeded', finished: true });
+  });
   if (call.function.name === 'delete_file' && container) {
     const removed = await runCommand(env, params, container, step, `${label}-delete`, `rm -f -- ${shellQuote(`${root}/${args.path}`)}`, 30_000);
     if (removed.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
@@ -169,6 +196,11 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
 }
 
 export async function runBuildAgent(env: Env, params: BuildParams, step: Step, startedAt: number) {
+  let currentOperation: string | null = null;
+  async function settleUsage(label: string) {
+    try { await step.do(label, retry, async () => settleReportedBuildUsage(env, params.turnId)); return null; }
+    catch (error) { return buildFailure(error, label); }
+  }
   try {
     const initial = await step.do('Load build', retry, async () => {
       const app = await ownedBuildApp(env, params.userId, params.appId);
@@ -201,7 +233,8 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       if (initial.turn.mode === 'build') {
         const remaining = BUILD_OUTPUT_BUDGET - outputTokens;
         if (remaining < 1024 || inputTokens >= BUILD_INPUT_BUDGET || new TextEncoder().encode(JSON.stringify(messages)).length > 192 * 1024) throw new BuildError('build_budget_exceeded');
-        const result = await step.do(`AI ${round}`, noRetry, async (): Promise<BuildAIResult | { error: string; details?: string }> => {
+        currentOperation = `text-${round}`;
+        const result = await step.do(`AI ${round}`, noRetry, async (): Promise<OperationResult<BuildAIResult>> => {
           try {
             if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
             await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
@@ -209,48 +242,57 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
               if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
               for (const [index, call] of calls.entries()) {
                 if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
-                  { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
+                  { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'proposed' });
+                if (call?.function.name) await proposeBuildOperation(env, { params, id: `tool-${round}-${index}` }, 'tool', buildToolLabel(call.function.name, call.function.arguments), { toolName: call.function.name, inferenceOperationId: `text-${round}` });
               }
             }, params.turnId, { params, operation: `text-${round}`, model: initial.turn.model, effort: initial.turn.effort });
-            if (result.message.content) await saveBuildActivity(env, params, round * 10,
-              { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
-            return result;
+            if (result.message.content) {
+              try { await saveBuildActivity(env, params, round * 10,
+                { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' }); } catch { /* Optional display. */ }
+            }
+            return { ok: true, value: result };
           } catch (error) {
-            // Workflow RPC drops custom Error prototypes. Return failure
-            // details as data, then restore BuildError outside the step.
-            return { error: error instanceof BuildError ? error.message : 'build_failed',
-              details: error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : undefined };
+            return { ok: false, failure: buildFailure(error, `text-${round}`) };
           }
         });
-        await step.do(`Settle AI usage ${round}`, retry, async () => settleReportedBuildUsage(env, params.turnId));
-        if ('error' in result) throw new BuildError(result.error, 503, result.details);
-        inputTokens += result.inputTokens; outputTokens += result.outputTokens;
-        messages.push(result.message);
+        const settlementFailure = await settleUsage(`Settle AI usage ${round}`);
+        if (!result.ok) throw failureError(result.failure);
+        if (settlementFailure) throw failureError(settlementFailure);
+        const inference = result.value;
+        inputTokens += inference.inputTokens; outputTokens += inference.outputTokens;
+        messages.push(inference.message);
         await step.do(`Record AI usage ${round}`, retry, async () => {
           await env.DB.prepare('UPDATE build_turns SET input_tokens = ?, output_tokens = ? WHERE id = ? AND user_id = ?').bind(inputTokens, outputTokens, params.turnId, params.userId).run();
         });
-        if (result.message.tool_calls?.length) {
-          for (let index = 0; index < result.message.tool_calls.length; index++) {
-            const call = result.message.tool_calls[index];
+        if (inference.message.tool_calls?.length) {
+          for (let index = 0; index < inference.message.tool_calls.length; index++) {
+            const call = inference.message.tool_calls[index];
             const activity = { id: `tool-${round}-${index}`, type: 'tool' as const, text: buildToolLabel(call.function.name, call.function.arguments) };
+            currentOperation = activity.id;
             await step.do(`Tool stage ${round}-${index}`, retry, async () => {
+              await startBuildOperation(env, { params, id: activity.id }, 'tool', activity.text, { toolName: call.function.name, arguments: call.function.arguments.slice(0, 4000) });
               await stage(env, params, activity.text);
-              await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: 'running' });
+              try { await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: 'running' }); } catch { /* Optional display. */ }
             });
             if (call.function.name === 'run_command') {
               await sandbox();
               await step.do(`Command stage ${round}-${index}`, retry, async () => stage(env, params, activity.text));
             }
             const output = await executeTool(env, params, container, files, call, step, `tool-${round}-${index}`, logs);
-            await step.do(`Settle tool usage ${round}-${index}`, retry, async () => settleReportedBuildUsage(env, params.turnId));
-            await step.do(`Tool complete ${round}-${index}`, retry, async () => saveBuildActivity(env, params, round * 10 + index + 1,
-              { ...activity, status: output.succeeded ? 'succeeded' : 'failed' }));
+            const toolSettlementFailure = await settleUsage(`Settle tool usage ${round}-${index}`);
+            await step.do(`Tool complete ${round}-${index}`, retry, async () => {
+              const state = output.state ?? (output.succeeded ? 'succeeded' : 'failed');
+              await recordBuildOperation(env, { params, id: activity.id }, { status: state, finished: true,
+                evidence: { output: output.output.slice(-6000) }, result: { ok: true, value: { succeeded: output.succeeded } } });
+              try { await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: state }); } catch { /* Optional display. */ }
+            });
+            if (toolSettlementFailure) throw failureError(toolSettlementFailure);
             files = output.files; logs = output.logs;
             messages.push({ role: 'tool', tool_call_id: call.id, content: output.output, tool_success: output.succeeded });
           }
           continue;
         }
-        summary = result.message.content || 'App updated.';
+        summary = inference.message.content || 'App updated.';
         if (JSON.stringify(files) === initial.app.source_json && initial.app.revision === 0) {
           messages.push({ role: 'user', content: 'You have not edited any files yet. Implement the requested app using write_file before finishing.' });
           continue;
@@ -259,9 +301,11 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const ready = await sandbox();
       await step.do(`Check stage ${round}`, retry, async () => stage(env, params, 'Installing dependencies'));
       await materialize(env, params, ready, files, step, `check-${round}`);
-      const installed = await runCommand(env, params, ready, step, `install-${round}`, install);
+      currentOperation = `install-${round}`;
+      const installed = await runCommand(env, params, ready, step, currentOperation, install, 300_000, files);
       await step.do(`Compile stage ${round}`, retry, async () => stage(env, params, 'Checking the app'));
-      const built = installed.status === 'succeeded' ? await runCommand(env, params, ready, step, `compile-${round}`, compile) : installed;
+      if (installed.status === 'succeeded') currentOperation = `compile-${round}`;
+      const built = installed.status === 'succeeded' ? await runCommand(env, params, ready, step, currentOperation!, compile, 300_000, files) : installed;
       logs = `${built.status}\n${built.stdout || ''}\n${built.stderr || ''}`.slice(-12_000);
       if (built.status === 'succeeded') { verified = true; break; }
       if (initial.turn.mode === 'preview') throw new BuildError('build_check_failed');
@@ -270,6 +314,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     if (!verified) throw new BuildError('build_budget_exceeded');
     await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
     const ready = await sandbox();
+    currentOperation = 'start-preview';
     const launched = await runCommand(env, params, ready, step, 'start-preview', startPreview, 60_000);
     if (launched.status !== 'succeeded') throw new BuildError('preview_start_failed');
     const preview = await step.do('Create preview', noRetry, async () => {
@@ -302,11 +347,23 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
         await env.DB.prepare("UPDATE build_turns SET log = substr(log || ?, -12000) WHERE id = ? AND user_id = ? AND status IN ('queued', 'running') AND substr(log, -length(?)) != ?")
           .bind(output, params.turnId, params.userId, output, output).run();
       }
-      await failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code);
+      await failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code, error instanceof BuildError ? error.operationId ?? currentOperation : currentOperation);
     });
   } finally {
-    await step.do('Settle remaining AI usage', retry, async () => settleReportedBuildUsage(env, params.turnId));
-    if (localCodexConfigured(env)) await step.do('Close local inference', { ...noRetry, timeout: '10 seconds' },
-      async () => closeCodexInference(env, params.turnId));
+    // Secondary failures are retained independently and cannot replace the turn's cause.
+    await settleUsage('Settle remaining AI usage');
+    if (localCodexConfigured(env)) {
+      const ref = { params, id: 'cleanup-local-inference' };
+      await step.do('Close local inference', { ...noRetry, timeout: '10 seconds' }, async () => {
+        await proposeBuildOperation(env, ref, 'cleanup', 'Close local inference');
+        try {
+          await recordBuildOperation(env, ref, { status: 'unknown', started: true, dispatchAttempted: true });
+          await closeCodexInference(env, params.turnId);
+          await recordBuildOperation(env, ref, { status: 'succeeded', finished: true });
+        } catch (error) {
+          await recordBuildOperation(env, ref, { status: 'failed', finished: true, result: { ok: false, failure: buildFailure(error, ref.id) } });
+        }
+      }).catch(() => { console.error('build_cleanup_unavailable', { turnId: params.turnId }); });
+    }
   }
 }

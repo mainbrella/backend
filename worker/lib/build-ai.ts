@@ -4,6 +4,7 @@ import { BUILD_MODEL, BuildError, validBuildPath, type BuildParams } from './bui
 import { codexInference, localCodexConfigured } from './build-codex';
 import { meteredBuildInference } from './build-billing';
 import { buildTokenCostMicroUsd, readBuildTokenUsage } from './build-pricing';
+import { buildFailure, recordBuildOperation, startBuildOperation, checkpointBuildOperation, type OperationRef } from './build-journal';
 
 const path = z.string().refine(value => validBuildPath(value) && !value.startsWith('public/generated/'));
 export const buildToolSchemas = {
@@ -52,39 +53,92 @@ export async function buildInference(env: Env, messages: BuildAIMessage[], maxTo
     parallel_tool_calls: false, max_completion_tokens: maxTokens, max_tokens: maxTokens, ...buildReasoningOptions(model, billing?.effort), stream: true,
     stream_options: { include_usage: true },
   };
+  const ref: OperationRef | undefined = billing ? { params: billing.params, id: billing.operation } : undefined;
+  const evidence: Record<string, unknown> = { model, provider: codex ? 'local_codex' : 'workers_ai', tokenAllowance: maxTokens,
+    options: { ...payload, messages: undefined }, finishReason: null, finishReasonSource: null, usage: null,
+    doneSeen: null, termination: null, providerLogId: null, providerRequestId: null };
+  if (ref) await startBuildOperation(env, ref, 'text', 'Model response', evidence);
+  let dispatched = false, retained = false;
   const invoke = async (report?: (cost: number, usage: Record<string, unknown>) => Promise<void>): Promise<BuildAIResult> => {
-  const onUsage = async (raw: unknown) => {
-    const usage = readBuildTokenUsage(raw);
-    if (usage && report) await report(buildTokenCostMicroUsd(model, usage), usage);
+    let value: BuildAIResult | undefined, primary: unknown;
+    let rawUsage: unknown;
+    try {
+      if (ref) await recordBuildOperation(env, ref, { dispatchAttempted: true });
+      dispatched = true;
+      const output = codex ? await codexInference(env, sessionId!, messages, tools, maxTokens)
+        : await env.AI.run(model, payload, env.BUILD_AI_GATEWAY ? { gateway: { id: env.BUILD_AI_GATEWAY, skipCache: true,
+          metadata: ref ? { turnId: ref.params.turnId, operationId: ref.id, attemptId: ref.attempt ?? '1' } : undefined } } : undefined);
+      // Read immediately after invocation; this binding property is the most recent request's ID.
+      evidence.providerLogId = codex ? null : env.AI.aiGatewayLogId ?? null;
+      const result: Record<string, any> = output instanceof ReadableStream
+        ? await readBuildInference(output, onProgress, usage => { rawUsage = usage; return Promise.resolve(); }, async snapshot => {
+          Object.assign(evidence, snapshot);
+          if (ref) await checkpointBuildOperation(env, ref, evidence);
+        }) : output as Record<string, any>;
+      if (!(output instanceof ReadableStream)) {
+        rawUsage = result.usage;
+        evidence.finishReason = result.choices?.[0]?.finish_reason ?? result.finish_reason ?? null;
+        evidence.finishReasonSource = evidence.finishReason ? 'supplied' : null;
+        evidence.termination = 'non_stream';
+        evidence.providerRequestId = typeof result.id === 'string' ? result.id : null;
+      }
+      const usage = readBuildTokenUsage(rawUsage);
+      const native = typeof result.response === 'string' || Array.isArray(result.tool_calls);
+      const choice = result.choices?.[0] ?? (native ? { finish_reason: result.finish_reason ?? 'stop', message: { content: result.response, tool_calls: normalizeBuildToolCalls(result.tool_calls) } } : undefined);
+      if (native && !evidence.finishReason) { evidence.finishReason = 'stop'; evidence.finishReasonSource = 'inferred'; }
+      const response = choice?.message;
+      if (!response || choice.finish_reason === 'length') throw new BuildError('model_response_incomplete');
+      const content = typeof response.content === 'string' ? response.content.slice(0, 6000) : null;
+      const calls = response.tool_calls ?? [];
+      if (!Array.isArray(calls) || calls.length > 8 || Array.from(calls).some((call: any) => !call || !call.id || typeof call.id !== 'string'
+        || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string'
+        || call.function.arguments.length > 96 * 1024)) throw new BuildError('invalid_model_response');
+      if (!content && !calls.length) throw new BuildError('invalid_model_response');
+      if (report && !usage) throw new BuildError('build_billing_reconciliation_required');
+      // Estimates bound further local execution only; the journal retains missing usage as unknown.
+      value = { message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) },
+        inputTokens: usage?.inputTokens ?? new TextEncoder().encode(JSON.stringify(messages)).length,
+        outputTokens: usage?.outputTokens ?? maxTokens, cachedInputTokens: usage?.cachedInputTokens ?? 0 };
+    } catch (error) {
+      primary = error;
+      if (error instanceof BuildError && ['invalid_model_response', 'model_response_incomplete'].includes(error.message)) error.classification = 'parser';
+      if (!(error instanceof BuildError) && error && typeof error === 'object' && 'code' in error) {
+        const provider = new BuildError('build_failed', 503, error instanceof Error ? error.message : undefined);
+        provider.classification = 'provider'; provider.providerCode = String(error.code).slice(0, 120); primary = provider;
+      }
+    }
+    const usage = readBuildTokenUsage(rawUsage);
+    evidence.usage = rawUsage ?? evidence.usage ?? null;
+    if (usage && report) evidence.usageCharge = { costMicroUsd: buildTokenCostMicroUsd(model, usage), usage };
+    const failure = primary ? buildFailure(primary, ref?.id ?? null) : null;
+    if (primary instanceof BuildError && ref) primary.operationId = ref.id;
+    if (ref) {
+      try {
+        await recordBuildOperation(env, ref, { status: !primary ? 'succeeded' : failure?.classification === 'infrastructure' ? 'unknown' : 'failed',
+          finished: true, evidence, result: failure ? { ok: false, failure } : { ok: true, value } });
+        retained = true;
+      } catch (error) { if (!primary) primary = error; }
+    }
+    // The inference outcome is retained before accounting. A storage failure can
+    // be retried from usageCharge without dispatching the provider again.
+    if (usage && report) {
+      try { await report(buildTokenCostMicroUsd(model, usage), usage); }
+      catch (error) { if (!primary) primary = error; }
+    }
+    if (primary) throw primary;
+    return value!;
   };
-  const output = codex ? await codexInference(env, sessionId!, messages, tools, maxTokens)
-    : await env.AI.run(model, payload, env.BUILD_AI_GATEWAY ? { gateway: { id: env.BUILD_AI_GATEWAY, skipCache: true } } : undefined);
-  const result: Record<string, any> = output instanceof ReadableStream ? await readBuildInference(output, onProgress, onUsage) : output as Record<string, any>;
-  if (!(output instanceof ReadableStream)) await onUsage(result.usage);
-  const usage = readBuildTokenUsage(result.usage);
-  if (report && !usage) throw new BuildError('build_billing_reconciliation_required');
-  const native = typeof result.response === 'string' || Array.isArray(result.tool_calls);
-  const choice = result.choices?.[0] ?? (native ? { finish_reason: result.finish_reason ?? 'stop', message: { content: result.response, tool_calls: normalizeBuildToolCalls(result.tool_calls) } } : undefined);
-  const response = choice?.message;
-  if (!response || choice.finish_reason === 'length') throw new BuildError('model_response_incomplete');
-  const content = typeof response.content === 'string' ? response.content.slice(0, 6000) : null;
-  const calls = response.tool_calls ?? [];
-  if (!Array.isArray(calls) || calls.length > 8 || Array.from(calls).some((call: any) => !call || !call.id || typeof call.id !== 'string'
-    || call.type !== 'function' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string'
-    || call.function.arguments.length > 96 * 1024)) throw new BuildError('invalid_model_response');
-  if (!content && !calls.length) throw new BuildError('invalid_model_response');
-  const count = (value: unknown, fallback: number) => Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : fallback;
-  return { message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) },
-    inputTokens: count(result.usage?.prompt_tokens, new TextEncoder().encode(JSON.stringify(messages)).length),
-    outputTokens: count(result.usage?.completion_tokens, maxTokens), cachedInputTokens: usage?.cachedInputTokens ?? 0 };
-  };
-  if (!billing || codex) return invoke();
-  // Bytes cover byte-fallback tokens, tool schemas, and prior tool results.
-  // Extra room covers provider chat-template and role separators. This is a
-  // funding hold only; never use this estimate as the customer's actual usage.
-  const inputBound = new TextEncoder().encode(JSON.stringify(payload)).length + messages.length * 64 + 2048;
-  const reserved = buildTokenCostMicroUsd(model, { inputTokens: inputBound, cachedInputTokens: 0, outputTokens: maxTokens });
-  return meteredBuildInference(env, billing.params, billing.operation, model, reserved, invoke);
+  try {
+    if (!billing || codex) return await invoke();
+    const inputBound = new TextEncoder().encode(JSON.stringify(payload)).length + messages.length * 64 + 2048;
+    const reserved = buildTokenCostMicroUsd(model, { inputTokens: inputBound, cachedInputTokens: 0, outputTokens: maxTokens });
+    return await meteredBuildInference(env, billing.params, billing.operation, model, reserved, invoke);
+  } catch (error) {
+    if (error instanceof BuildError && ref) error.operationId ??= ref.id;
+    if (ref && !dispatched && !retained) await recordBuildOperation(env, ref, { status: 'blocked', finished: true,
+      result: { ok: false, failure: buildFailure(error, ref.id) } });
+    throw error;
+  }
 }
 
 function normalizeBuildToolCalls(value: unknown): unknown {
@@ -95,23 +149,38 @@ function normalizeBuildToolCalls(value: unknown): unknown {
 
 /** Assemble function-call arguments before execution; only public assistant text is shown. */
 export async function readBuildInference(stream: ReadableStream<Uint8Array>, onProgress?: (text: string, calls: BuildToolCall[]) => Promise<void>,
-  onUsage?: (usage: unknown) => Promise<void>) {
+  onUsage?: (usage: unknown) => Promise<void>, onEvidence?: (evidence: Record<string, unknown>) => Promise<void>) {
   const reader = stream.getReader(), decoder = new TextDecoder();
   const calls: BuildToolCall[] = [];
   let buffer = '', content = '', finish: string | null = null, usage: Record<string, unknown> | undefined;
   let lastProgress = 0, lastText = '', done = false, native = false;
+  let bytes = 0, events = 0, lastEventAt: number | null = null, lastCheckpoint = 0;
+  let termination: string | null = null, finishSource: string | null = null, providerRequestId: string | null = null, primary: unknown;
+  const snapshot = () => ({ finishReason: finish, finishReasonSource: finishSource, doneSeen: done, termination,
+    eventCount: events, byteCount: bytes, lastEventAt, bufferedBytes: new TextEncoder().encode(buffer).length,
+    usage: usage ?? null, providerRequestId });
+  async function checkpoint(force = false) {
+    if (onEvidence && (force || Date.now() - lastCheckpoint >= 1000)) {
+      lastCheckpoint = Date.now();
+      try { await onEvidence(snapshot()); } catch { /* Optional evidence checkpoints do not abort inference. */ }
+    }
+  }
+  async function progress() { try { await onProgress?.(content, calls); } catch { /* Display is optional. */ } }
   async function event(data: string) {
-    if (data === '[DONE]') { done = true; if (native && !finish) finish = calls.length ? 'tool_calls' : 'stop'; return; }
+    events++; lastEventAt = Date.now();
+    if (data === '[DONE]') { done = true; termination = 'done'; if (native && !finish) { finish = calls.length ? 'tool_calls' : 'stop'; finishSource = 'inferred'; } return; }
     let chunk: Record<string, any>;
     try { chunk = JSON.parse(data); } catch { throw new BuildError('invalid_model_response'); }
-    if (chunk.usage) usage = chunk.usage;
+    if (typeof chunk.id === 'string') providerRequestId = chunk.id;
+    if (chunk.usage) { usage = chunk.usage; await checkpoint(true); }
     if (chunk.error) {
       const code = typeof chunk.error.code === 'string' ? chunk.error.code : 'build_failed';
       const known = ['build_inference_timeout', 'build_inference_disconnected', 'build_interrupted',
         'build_budget_exceeded', 'invalid_model_response', 'build_unavailable'].includes(code);
       const message = typeof chunk.error.message === 'string' ? chunk.error.message : typeof chunk.error === 'string' ? chunk.error : '';
       const details = [known || code === 'build_failed' ? '' : code, message].filter(Boolean).join(': ').slice(0, 4000);
-      throw new BuildError(known ? code : 'build_failed', 503, details || undefined);
+      const error = new BuildError(known ? code : 'build_failed', 503, details || undefined);
+      error.classification = 'provider'; error.providerCode = code; throw error;
     }
     if (typeof chunk.response === 'string' || Array.isArray(chunk.tool_calls)) {
       native = true;
@@ -121,10 +190,10 @@ export async function readBuildInference(stream: ReadableStream<Uint8Array>, onP
         if (normalized.length > 8) throw new BuildError('invalid_model_response');
         calls.splice(0, calls.length, ...normalized);
       }
-      if (chunk.finish_reason) finish = chunk.finish_reason;
+      if (chunk.finish_reason) { finish = chunk.finish_reason; finishSource = 'supplied'; }
     }
     const choice = chunk.choices?.[0];
-    if (choice?.finish_reason) finish = choice.finish_reason;
+    if (choice?.finish_reason) { finish = choice.finish_reason; finishSource = 'supplied'; }
     const delta = choice?.delta;
     if (typeof delta?.content === 'string') content = (content + delta.content).slice(0, 6000);
     for (const part of delta?.tool_calls ?? []) {
@@ -139,12 +208,15 @@ export async function readBuildInference(stream: ReadableStream<Uint8Array>, onP
     }
     const text = JSON.stringify([content, calls.map(call => [call.function.name, call.function.arguments.match(/"path"\s*:\s*"([^"\\]+)"/)?.[1]])]);
     if (onProgress && text !== lastText && Date.now() - lastProgress >= 400) {
-      await onProgress(content, calls); lastProgress = Date.now(); lastText = text;
+      await progress(); lastProgress = Date.now(); lastText = text;
     }
   }
   try {
     while (!done) {
-      const next = await reader.read();
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try { next = await reader.read(); } catch (error) { termination = 'read_exception'; throw error; }
+      if (next.value) bytes += next.value.byteLength;
+      if (next.done && !done) termination = 'eof';
       buffer += next.done ? decoder.decode() : decoder.decode(next.value, { stream: true });
       // Normalize CRLF after accumulation so a split CR/LF remains intact.
       let boundary: RegExpExecArray | null;
@@ -152,16 +224,26 @@ export async function readBuildInference(stream: ReadableStream<Uint8Array>, onP
         const block = buffer.slice(0, boundary.index); buffer = buffer.slice(boundary.index + boundary[0].length);
         const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
         if (data) await event(data);
+        if (done) break;
       }
       if (buffer.length > 128 * 1024) throw new BuildError('invalid_model_response');
+      await checkpoint();
       if (next.done) break;
     }
     if (!finish || finish === 'length') throw new BuildError('model_response_incomplete');
-    await onProgress?.(content, calls);
+    await progress();
     return { choices: [{ finish_reason: finish, message: { content: content || null, tool_calls: calls } }], usage };
+  } catch (error) {
+    primary = error;
+    if (error instanceof BuildError && error.classification !== 'provider') error.classification = 'parser';
+    throw error;
   } finally {
+    await progress();
+    await checkpoint(true);
     await reader.cancel().catch(() => {}); reader.releaseLock();
-    // A length-limited or invalid response can still be billable inference.
-    if (usage) await onUsage?.(usage);
+    if (usage) {
+      try { await onUsage?.(usage); }
+      catch (error) { if (!primary) throw error; }
+    }
   }
 }

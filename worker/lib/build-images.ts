@@ -1,6 +1,7 @@
 import { BuildError, ownedBuildApp, type BuildParams } from './build-contract';
 import { meteredBuildInference } from './build-billing';
 import { BUILD_IMAGE_COST_MICRO_USD, BUILD_IMAGE_STEPS, buildImageCostMicroUsd } from './build-pricing';
+import { proposeBuildOperation, startBuildOperation, recordBuildOperation, buildFailure } from './build-journal';
 
 export const BUILD_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
 export const BUILD_IMAGE_MAX_BYTES = 1024 * 1024;
@@ -47,15 +48,34 @@ export async function generateBuildImage(env: Env, params: BuildParams, toolId: 
   const previous = await env.DB.prepare('SELECT * FROM build_images WHERE turn_id = ? AND tool_id = ?')
     .bind(params.turnId, toolId).first<BuildImageRow>();
   if (previous) return publicBuildImage(previous);
-  if (!env.AI) throw new BuildError('build_images_unavailable');
+  const ref = { params, id: `image-${toolId}` };
+  await proposeBuildOperation(env, ref, 'image', `Generate ${label}`, { model: BUILD_IMAGE_MODEL, label, prompt,
+    options: { steps: BUILD_IMAGE_STEPS }, limits: { perTurn: 4, perApp: 12 } });
   const limits = await env.DB.prepare('SELECT COUNT(*) AS total, SUM(turn_id = ?) AS current FROM build_images WHERE app_id = ?')
     .bind(params.turnId, params.appId).first<{ total: number; current: number | null }>();
-  if (limits && (limits.total >= 12 || (limits.current ?? 0) >= 4)) throw new BuildError('build_image_limit');
+  await recordBuildOperation(env, ref, { evidence: { limits: { perTurn: 4, perApp: 12, appCount: limits?.total ?? 0, turnCount: limits?.current ?? 0 } } });
+  if (!env.AI || limits && (limits.total >= 12 || (limits.current ?? 0) >= 4)) {
+    const error = new BuildError(!env.AI ? 'build_images_unavailable' : 'build_image_limit'); error.classification = 'validation'; error.operationId = ref.id;
+    await recordBuildOperation(env, ref, { status: 'blocked', finished: true, result: { ok: false, failure: buildFailure(error, ref.id) } });
+    throw error;
+  }
+  await startBuildOperation(env, ref, 'image', `Generate ${label}`);
+  let dispatched = false;
+  try {
   const result = await meteredBuildInference(env, params, `image-${toolId}`, BUILD_IMAGE_MODEL, BUILD_IMAGE_COST_MICRO_USD, async report => {
-    const output = await env.AI.run(BUILD_IMAGE_MODEL, { prompt, steps: BUILD_IMAGE_STEPS });
-    if (typeof output.image !== 'string') throw new BuildError('build_image_invalid');
-    const { width, height } = buildImageDimensions(buildImageBytes(output.image));
-    await report(buildImageCostMicroUsd(width, height), { width, height, steps: BUILD_IMAGE_STEPS });
+    await recordBuildOperation(env, ref, { dispatchAttempted: true }); dispatched = true;
+    const output = await env.AI.run(BUILD_IMAGE_MODEL, { prompt, steps: BUILD_IMAGE_STEPS }, env.BUILD_AI_GATEWAY ? {
+      gateway: { id: env.BUILD_AI_GATEWAY, skipCache: true, metadata: { turnId: params.turnId, operationId: ref.id, attemptId: '1' } },
+    } : undefined);
+    await recordBuildOperation(env, ref, { evidence: { providerLogId: env.AI.aiGatewayLogId ?? null, providerReturned: true } });
+    if (typeof output.image !== 'string') { const error = new BuildError('build_image_invalid'); error.classification = 'parser'; throw error; }
+    let dimensions: { width: number; height: number };
+    try { dimensions = buildImageDimensions(buildImageBytes(output.image)); }
+    catch (error) { if (error instanceof BuildError) error.classification = 'parser'; throw error; }
+    const { width, height } = dimensions;
+    const usage = { width, height, steps: BUILD_IMAGE_STEPS }, costMicroUsd = buildImageCostMicroUsd(width, height);
+    await recordBuildOperation(env, ref, { evidence: { providerResult: { width, height }, usageCharge: { costMicroUsd, usage } } });
+    await report(costMicroUsd, usage);
     return output;
   });
   if (typeof result.image !== 'string') throw new BuildError('build_image_invalid');
@@ -66,7 +86,15 @@ export async function generateBuildImage(env: Env, params: BuildParams, toolId: 
     SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM build_apps WHERE id = ? AND user_id = ? AND active_turn_id = ?)`)
     .bind(id, params.appId, params.turnId, toolId, label, prompt, result.image, params.appId, params.userId, params.turnId).run();
   if (!saved.meta.changes) throw new BuildError('build_interrupted');
-  return { id, toolId, label, path: buildImagePath(id) };
+  const image = { id, toolId, label, path: buildImagePath(id) };
+  await recordBuildOperation(env, ref, { status: 'succeeded', finished: true, result: { ok: true, value: image } });
+  return image;
+  } catch (error) {
+    if (error instanceof BuildError) error.operationId ??= ref.id;
+    await recordBuildOperation(env, ref, { status: !dispatched ? 'blocked' : error instanceof BuildError && error.classification === 'parser' ? 'failed' : 'unknown',
+      finished: true, result: { ok: false, failure: buildFailure(error, ref.id) } });
+    throw error;
+  }
 }
 
 export async function savedBuildImages(env: Env, appId: string) {

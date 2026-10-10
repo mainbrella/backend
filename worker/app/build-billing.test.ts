@@ -8,11 +8,18 @@ import { buildImageCostMicroUsd, buildTokenCostMicroUsd, buildInferenceChargeMic
 import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageDimensions } from '../lib/build-images';
+import { readFileSync } from 'node:fs';
 
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '028_build_operations.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const params: BuildParams = { userId: USER_ONE, appId: crypto.randomUUID(), turnId: crypto.randomUUID() };
+  const now = new Date().toISOString();
+  f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+    .run(params.appId, USER_ONE, 'create', 'Hello', 'Hello', '{}', now, now);
+  f.sqlite.prepare("INSERT INTO build_turns (id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at) VALUES(?,?,?,?,?,'build',0,'running','Building',?,?)")
+    .run(params.turnId, params.appId, USER_ONE, 'turn', 'Hello', BUILD_MODEL, now);
   const infer = (operation = 'text-0') => buildInference(f.env, [{ role: 'user', content: 'Hello' }], 1024,
     undefined, params.turnId, { params, operation, model: BUILD_MODEL });
   return { ...f, ...billing, params, infer };

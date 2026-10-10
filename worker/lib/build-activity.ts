@@ -1,6 +1,6 @@
 import type { BuildParams } from './build-contract';
 
-export type BuildActivity = { id: string; type: 'message' | 'tool'; text: string; status: 'running' | 'succeeded' | 'failed' };
+export type BuildActivity = { id: string; type: 'message' | 'tool'; text: string; status: 'proposed' | 'running' | 'skipped' | 'blocked' | 'succeeded' | 'failed' | 'unknown'; explanation?: string | null };
 export type BuildActivityRow = BuildActivity & { turn_id: string };
 
 export async function saveBuildActivity(env: Env, params: BuildParams, position: number, activity: BuildActivity) {

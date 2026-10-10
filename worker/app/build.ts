@@ -15,22 +15,39 @@ import { BUILD_AI_MARKUP_PERCENT, buildTokenPrices } from '../lib/build-pricing'
 import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, type BuildImageRow } from '../lib/build-images';
+import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
 
 export function buildConfigured(env: Env) {
   return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
 }
-function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = [], images: Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>[] = [], costs: Record<string, number> = {}) {
+function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = [], images: Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>[] = [], costs: Record<string, number> = {}, operations: OperationRow[] = []) {
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;
   return { id: row.id, name: row.name, prompt: row.initial_prompt, revision: row.revision,
     activeTurnId: row.active_turn_id, container: row.container_json ? JSON.parse(row.container_json) as BuildContainer : null,
     preview: preview && preview.expiresAt > Date.now() ? preview : null, createdAt: row.created_at, updatedAt: row.updated_at,
     ...(turns ? { turns: turns.map(turn => ({ id: turn.id, prompt: turn.prompt, mode: turn.mode, status: turn.status,
-      stage: turn.stage, summary: turn.summary, error: turn.error, log: turn.log, model: turn.model, effort: turn.effort ?? null,
-      activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => item),
+      stage: turn.stage, summary: turn.summary, error: turn.error, log: '', model: turn.model, effort: turn.effort ?? null,
+      failureOperationId: turn.failure_operation_id ?? null,
+      errorExplanation: operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)
+        ? operationExplanation(operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)!) : null,
+      activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => {
+        const op = operations.find(op => op.turn_id === turn.id && op.operation_id === item.id);
+        const image = operations.find(op => op.turn_id === turn.id && op.operation_id === `image-${item.id}`);
+        const state = op ? op.status === 'unknown' && !op.finished_at && ['queued', 'running'].includes(turn.status) ? 'running' : op.status : item.status;
+        return { ...item, status: state, explanation: image ? operationExplanation(image) : op ? operationExplanation(op) : null };
+      }),
       images: images.filter(image => image.turn_id === turn.id).map(publicBuildImage),
-      inputTokens: turn.input_tokens, outputTokens: turn.output_tokens, aiCostCents: (costs[turn.id] ?? 0) / 10000,
+      ...turnTokenUsage(turn, operations), aiCostCents: (costs[turn.id] ?? 0) / 10000,
       createdAt: turn.created_at, finishedAt: turn.finished_at })) } : {}),
   };
+}
+function turnTokenUsage(turn: BuildTurnRow, operations: OperationRow[]) {
+  const inferences = operations.filter(op => op.turn_id === turn.id && op.kind === 'text' && op.started_at);
+  if (!inferences.length) return { inputTokens: turn.input_tokens, outputTokens: turn.output_tokens };
+  const evidence = inferences.map(op => JSON.parse(op.evidence_json).usage);
+  const total = (key: string) => evidence.every(usage => Number.isSafeInteger(usage?.[key]) && usage[key] >= 0)
+    ? evidence.reduce((sum, usage) => sum + usage[key], 0) : null;
+  return { inputTokens: total('prompt_tokens'), outputTokens: total('completion_tokens') };
 }
 async function detail(env: Env, userId: string, id: string) {
   const row = await ownedBuildApp(env, userId, id);
@@ -43,7 +60,14 @@ async function detail(env: Env, userId: string, id: string) {
     .bind(id).all<Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>>();
   const { results: costs } = await env.DB.prepare("SELECT turn_id, SUM(cost_micro_usd) AS cost FROM build_ai_usage WHERE app_id = ? AND user_id = ? AND status = 'settled' GROUP BY turn_id")
     .bind(id, userId).all<{ turn_id: string; cost: number }>();
-  return { app: publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost]))) };
+  const { results: operations } = await env.DB.prepare(`SELECT o.turn_id, o.operation_id, o.kind, o.status, o.started_at, o.finished_at,
+    json_object('usage',json_extract(o.evidence_json,'$.usage'),'finishReason',json_extract(o.evidence_json,'$.finishReason'),
+    'tokenAllowance',json_extract(o.evidence_json,'$.tokenAllowance'),'termination',json_extract(o.evidence_json,'$.termination'),
+    'doneSeen',json_extract(o.evidence_json,'$.doneSeen'),'exitCode',json_extract(o.evidence_json,'$.exitCode')) AS evidence_json,
+    CASE WHEN json_extract(o.result_json,'$.ok') = 0 THEN o.result_json ELSE NULL END AS result_json
+    FROM build_operations o JOIN build_turns t ON t.id = o.turn_id WHERE t.app_id = ? AND t.user_id = ?`)
+    .bind(id, userId).all<OperationRow>();
+  return { app: publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost])), operations) };
 }
 async function requireBuildAccess(env: Env, userId: string) {
   if (!buildConfigured(env)) throw new BuildError('build_unavailable');
@@ -67,11 +91,12 @@ export async function dispatchBuildTurn(env: Env, turn: BuildTurnRow) {
     }
   }
 }
-export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'app_id' | 'user_id'>, error: string) {
+export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'app_id' | 'user_id'>, error: string, operationId: string | null = null) {
   await env.DB.batch([
-    env.DB.prepare("UPDATE build_activity SET status = 'failed' WHERE turn_id = ? AND status = 'running'").bind(turn.id),
-    env.DB.prepare("UPDATE build_turns SET status = 'failed', stage = 'Build stopped', error = ?, finished_at = ? WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')")
-      .bind(error, new Date().toISOString(), turn.id, turn.user_id),
+    env.DB.prepare("UPDATE build_operations SET status = 'skipped', finished_at = ?, updated_at = ? WHERE turn_id = ? AND status = 'proposed' AND started_at IS NULL").bind(Date.now(), Date.now(), turn.id),
+    env.DB.prepare("UPDATE build_activity SET status = CASE WHEN status = 'proposed' THEN 'skipped' ELSE 'unknown' END WHERE turn_id = ? AND status IN ('running','proposed')").bind(turn.id),
+    env.DB.prepare("UPDATE build_turns SET status = 'failed', stage = 'Build stopped', error = ?, failure_operation_id = COALESCE(?, (SELECT operation_id FROM build_operations WHERE turn_id = ? AND status = 'unknown' ORDER BY updated_at DESC LIMIT 1)), finished_at = ? WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')")
+      .bind(error, operationId, turn.id, new Date().toISOString(), turn.id, turn.user_id),
     env.DB.prepare('UPDATE build_apps SET active_turn_id = NULL WHERE id = ? AND user_id = ? AND active_turn_id = ?').bind(turn.app_id, turn.user_id, turn.id),
   ]);
 }
@@ -106,10 +131,11 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
-  const match = /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events|images)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
+  const diagnostic = /^\/build\/apps\/([a-f0-9-]{36})\/turns\/([a-f0-9-]{36})\/diagnostics$/.exec(url.pathname);
+  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events|images)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]
-    || (match[3] === 'images') !== Boolean(match[4]) || match[4] && !validExecutionId(match[4])) return authJson({ error: 'not_found' }, 404, cors);
-  const allowed = match[1] === 'config' || ['source', 'export', 'events', 'images'].includes(match[3]) ? ['GET']
+    || ['images', 'diagnostics'].includes(match[3]) !== Boolean(match[4]) || match[4] && !validExecutionId(match[4])) return authJson({ error: 'not_found' }, 404, cors);
+  const allowed = match[1] === 'config' || ['source', 'export', 'events', 'images', 'diagnostics'].includes(match[3]) ? ['GET']
     : match[3] ? ['POST'] : match[2] ? ['GET', 'PATCH', 'DELETE'] : ['GET', 'POST'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: `${allowed.join(', ')}, OPTIONS` });
   if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
@@ -129,6 +155,17 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     if (id) {
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
+      if (match[3] === 'diagnostics') {
+        const turn = await env.DB.prepare('SELECT * FROM build_turns WHERE id = ? AND app_id = ? AND user_id = ?')
+          .bind(match[4], id, user.id).first<BuildTurnRow>();
+        if (!turn) return authJson({ error: 'turn_not_found' }, 404, cors);
+        const operations = await buildOperationTimeline(env, turn.id);
+        const { results: billing } = await env.DB.prepare('SELECT * FROM build_ai_usage WHERE turn_id = ? AND user_id = ? ORDER BY created_at')
+          .bind(turn.id, user.id).all();
+        return authJson({ schemaVersion: 1, turnId: turn.id, status: turn.status, error: turn.error, log: turn.log, failureOperationId: turn.failure_operation_id ?? null,
+          operations: operations.map(({ evidence_json, result_json, source_json, ...op }) => ({ ...op, evidence: JSON.parse(evidence_json),
+            result: result_json ? JSON.parse(result_json) : null, source: source_json ? JSON.parse(source_json) : null })), billing }, 200, cors);
+      }
       if (match[3] === 'images') {
         const image = await env.DB.prepare('SELECT data FROM build_images WHERE id = ? AND app_id = ?')
           .bind(match[4], id).first<{ data: string }>();

@@ -14,6 +14,7 @@ import { buildBillingFixture } from './build-billing-test-helpers';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/build-images';
+import { proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation, retainBuildSource } from '../lib/build-journal';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
 
 const event = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\r\n\r\n`;
@@ -78,7 +79,7 @@ test('inference stream failures retain provider codes and messages as failure de
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -95,6 +96,143 @@ function request(id: string, session = SESSION_ONE, suffix = '') {
 
 const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 4, 0, 4, 0, 0, 0xff, 0xd9]);
 const jpegBase64 = btoa(String.fromCharCode(...jpeg));
+
+const immediateStep = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return structuredClone(await operation()); },
+  async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
+
+test('token exhaustion retains actual usage, explains why the build stopped and skips proposed images', async t => {
+  const f = await fixture(t); let images = 0;
+  t.mock.method(console, 'error', () => {});
+  Object.assign(f.env, { VERSION_METADATA: { id: 'deployment-test' }, BUILD_AI_GATEWAY: 'test-gateway' });
+  f.env.AI = { aiGatewayLogId: 'gateway-log-1', async run(model: string, _input: any, options: any) {
+    if (model === BUILD_IMAGE_MODEL) images++;
+    assert.equal(options.gateway.metadata.operationId, 'text-0');
+    return chunks(delta({ content: 'I’ll build your app.' }) + delta({ tool_calls: [{ index: 0, id: 'image-proposal', type: 'function',
+      function: { name: 'generate_image', arguments: '{"label":"Drone","prompt":"unfinished' } }] })
+      + event({ id: 'provider-request-1', choices: [{ finish_reason: 'length' }], usage: { prompt_tokens: 500, completion_tokens: 8192 } }) + event('[DONE]'));
+  } } as unknown as Ai;
+  await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  const turn = data.app.turns[0];
+  assert.equal(images, 0); assert.equal(turn.outputTokens, 8192); assert.equal(turn.inputTokens, 500);
+  assert.equal(turn.failureOperationId, 'text-0'); assert.match(turn.errorExplanation, /8,192 token response limit/);
+  assert.equal(turn.activity.find((item: any) => item.type === 'tool').status, 'skipped');
+  assert.equal(f.sqlite.prepare('SELECT status FROM build_ai_usage').get()!.status, 'settled');
+  const endpoint = `/turns/${f.turnId}/diagnostics`;
+  const report = await (await handleBuildRequest(request(f.appId, SESSION_ONE, endpoint), f.env)).json() as any;
+  const inference = report.operations.find((op: any) => op.operation_id === 'text-0');
+  assert.equal(inference.deployment_version, 'deployment-test'); assert.equal(inference.schema_version, 1);
+  assert.equal(inference.evidence.finishReason, 'length'); assert.equal(inference.evidence.finishReasonSource, 'supplied');
+  assert.equal(inference.evidence.doneSeen, true); assert.equal(inference.evidence.termination, 'done');
+  assert.equal(inference.evidence.providerLogId, 'gateway-log-1'); assert.equal(inference.evidence.providerRequestId, 'provider-request-1');
+  assert.ok(inference.evidence.byteCount > 0); assert.equal(inference.evidence.eventCount, 4);
+  assert.equal(report.operations.find((op: any) => op.operation_id === 'tool-0-0').dispatch_attempted, 0);
+  assert.ok(!JSON.stringify(data).includes('gateway-log-1')); assert.ok(!JSON.stringify(data).includes('usageCharge'));
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_TWO, endpoint), f.env)).status, 404);
+  assert.equal((await handleBuildRequest(request(f.appId, 'expired', endpoint), f.env)).status, 401);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${crypto.randomUUID()}/diagnostics`), f.env)).status, 404);
+});
+
+test('EOF, missing finish reasons and read exceptions retain distinct stream evidence', async () => {
+  for (const [text, expected, reject] of [
+    [delta({ content: 'partial' }), 'eof', true],
+    [delta({ content: 'complete' }) + event({ choices: [{ finish_reason: 'stop' }] }), 'eof', false],
+    [delta({ content: 'partial' }) + event('[DONE]'), 'done', true],
+  ] as const) {
+    let evidence: any;
+    const result = readBuildInference(chunks(text), undefined, undefined, async value => { evidence = value; });
+    if (reject) await assert.rejects(result, /model_response_incomplete/); else await result;
+    assert.equal(evidence.termination, expected); assert.equal(evidence.doneSeen, expected === 'done');
+    assert.equal(evidence.usage, null); assert.equal(evidence.finishReason, reject ? null : 'stop');
+  }
+  let evidence: any, reads = 0;
+  const stream = new ReadableStream<Uint8Array>({ pull(controller) {
+    if (reads++ === 0) controller.enqueue(new TextEncoder().encode(delta({ content: 'partial' }) + 'data: incomplete'));
+    else controller.error(new Error('connection lost'));
+  } });
+  await assert.rejects(readBuildInference(stream, undefined, undefined, async value => { evidence = value; }), /connection lost/);
+  assert.equal(evidence.termination, 'read_exception'); assert.equal(evidence.doneSeen, false);
+  assert.equal(evidence.bufferedBytes, 'data: incomplete'.length);
+});
+
+test('provider errors survive usage callback failures and optional display failures do not abort parsing', async () => {
+  const stream = chunks(event({ usage: { prompt_tokens: 5, completion_tokens: 8 } }) + event({ error: { code: 'rate_limit_exceeded', message: 'HTTP 429' } }));
+  await assert.rejects(readBuildInference(stream, undefined, async () => { throw new Error('usage write failed'); }), error =>
+    error instanceof BuildError && error.providerCode === 'rate_limit_exceeded' && error.details === 'rate_limit_exceeded: HTTP 429');
+  const result = await readBuildInference(chunks(delta({ content: 'Hello' }) + event({ choices: [{ finish_reason: 'stop' }] }) + event('[DONE]')),
+    async () => { throw new Error('display unavailable'); });
+  assert.equal(result.choices[0].message.content, 'Hello');
+});
+
+test('duplicate operation claims and lost completion records never replay paid inference', async t => {
+  const f = await fixture(t); let calls = 0;
+  const ref = { params: f.params, id: 'duplicate' };
+  await proposeBuildOperation(f.env, ref, 'text', 'Model response');
+  const claims = await Promise.allSettled([startBuildOperation(f.env, ref, 'text', 'Model response'), startBuildOperation(f.env, ref, 'text', 'Model response')]);
+  assert.equal(claims.filter(result => result.status === 'fulfilled').length, 1);
+  const prepare = f.env.DB.prepare.bind(f.env.DB);
+  t.mock.method(f.env.DB, 'prepare', (sql: string) => {
+    const statement = prepare(sql);
+    if (!sql.startsWith('UPDATE build_operations SET status = COALESCE')) return statement;
+    return { bind(...args: unknown[]) {
+      const bound = statement.bind(...args);
+      if (args[0] !== 'succeeded' || !args.includes('text-0')) return bound;
+      return { ...bound, async run() { throw new Error('process lost before completion write'); } };
+    } } as D1PreparedStatement;
+  });
+  f.env.AI = { async run() { calls++; return { choices: [{ finish_reason: 'stop', message: { content: 'Hello' } }], usage: { prompt_tokens: 5, completion_tokens: 8 } }; } } as unknown as Ai;
+  const infer = () => buildInference(f.env, [{ role: 'user', content: 'Hello' }], 1024, undefined, f.turnId,
+    { params: f.params, operation: 'text-0', model: BUILD_MODEL });
+  await assert.rejects(infer(), /build_journal_unavailable/);
+  const operation = await readBuildOperation(f.env, { params: f.params, id: 'text-0' });
+  assert.equal(operation!.status, 'unknown'); assert.equal(operation!.dispatch_attempted, 1); assert.equal(operation!.result_json, null);
+  await assert.rejects(infer(), /build_billing_reconciliation_required/); assert.equal(calls, 1);
+});
+
+test('source snapshots stay immutable when later working source changes', async t => {
+  const f = await fixture(t), ref = { params: f.params, id: 'compile-2' };
+  await startBuildOperation(f.env, ref, 'command', 'Check the build', { command: 'tsc --noEmit', containerGeneration: GENERATION_ONE });
+  await retainBuildSource(f.env, ref, { 'src/App.tsx': 'failed source' });
+  await recordBuildOperation(f.env, ref, { status: 'failed', finished: true, evidence: { exitCode: 2, stdout: '', stderr: 'TS2322' } });
+  f.sqlite.prepare('UPDATE build_apps SET source_json = ? WHERE id = ?').run(JSON.stringify({ 'src/App.tsx': 'fixed source' }), f.appId);
+  const report = await (await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${f.turnId}/diagnostics`), f.env)).json() as any;
+  const command = report.operations[0];
+  assert.deepEqual(command.source, { 'src/App.tsx': 'failed source' }); assert.match(command.evidence.sourceDigest, /^[a-f0-9]{64}$/);
+  assert.equal(command.evidence.exitCode, 2); assert.equal(command.evidence.stderr, 'TS2322');
+});
+
+test('provider rejection stays the turn cause when usage storage and settlement also fail', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  const prepare = f.env.DB.prepare.bind(f.env.DB); let unavailable = true, calls = 0;
+  t.mock.method(f.env.DB, 'prepare', (sql: string) => {
+    const statement = prepare(sql);
+    if (!unavailable || !sql.includes("SET status = 'reported', cost_micro_usd")) return statement;
+    return { bind(...args: unknown[]) { statement.bind(...args); return { async run() { throw new Error('usage storage unavailable'); } }; } } as unknown as D1PreparedStatement;
+  });
+  f.env.AI = { async run() { calls++; return chunks(event({ usage: { prompt_tokens: 100, completion_tokens: 50 } })
+    + event({ error: { code: 'rate_limit_exceeded', message: 'private provider details' } })); } } as unknown as Ai;
+  await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(data.app.turns[0].failureOperationId, 'text-0'); assert.match(data.app.turns[0].errorExplanation, /provider rejected.*rate_limit_exceeded/);
+  assert.equal(data.app.turns[0].outputTokens, 50); assert.ok(!JSON.stringify(data).includes('private provider details')); assert.equal(calls, 1);
+  const inference = await readBuildOperation(f.env, { params: f.params, id: 'text-0' });
+  assert.equal(JSON.parse(inference!.result_json!).failure.providerCode, 'rate_limit_exceeded');
+  const persistence = await readBuildOperation(f.env, { params: f.params, id: 'usage-text-0' });
+  assert.match(JSON.parse(persistence!.result_json!).failure.details, /usage storage unavailable/);
+  unavailable = false;
+  const fetch = f.controller.fetch.bind(f.controller); let settlementUnavailable = true;
+  t.mock.method(f.controller, 'fetch', async (request: Request) => {
+    const body = request.method === 'POST' ? await request.clone().json() as any : null;
+    if (settlementUnavailable && body?.action === 'settle') throw new Error('settlement unavailable');
+    return fetch(request);
+  });
+  const { settleReportedBuildUsage } = await import('../lib/build-billing');
+  await assert.rejects(settleReportedBuildUsage(f.env, f.turnId), /settlement unavailable/);
+  assert.equal((await readBuildOperation(f.env, { params: f.params, id: 'settle-text-0' }))!.status, 'unknown');
+  settlementUnavailable = false; await settleReportedBuildUsage(f.env, f.turnId);
+  assert.equal(f.sqlite.prepare('SELECT status FROM build_ai_usage').get()!.status, 'settled'); assert.equal(calls, 1);
+  assert.equal(f.sqlite.prepare('SELECT failure_operation_id FROM build_turns WHERE id = ?').get(f.turnId)!.failure_operation_id, 'text-0');
+});
 
 test('original images are generated once, streamed as metadata, ownership-checked and exported as portable JPEGs', async t => {
   const f = await fixture(t); let calls = 0;
@@ -184,7 +322,7 @@ test('a failed image request gives the model a recovery message and still saves 
   const step = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return operation(); }, async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
   await runBuildAgent(f.env, f.params, step, Date.now());
   const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
-  assert.equal(data.app.turns[0].activity.find((item: any) => item.text === 'Generate Forest').status, 'failed');
+  assert.equal(data.app.turns[0].activity.find((item: any) => item.text === 'Generate Forest').status, 'unknown');
   assert.equal(data.app.turns[0].images.length, 0);
   const source = await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/source'), f.env)).json() as any;
   assert.match(source.files['src/App.tsx'], /Forest guide/);
@@ -206,7 +344,7 @@ test('durable activity replaces partial messages, preserves order and respects o
   assert.equal(response.headers.get('access-control-allow-credentials'), 'true');
   const text = await response.text();
   assert.match(text, /event: app/); assert.match(text, /I’ll build your app/);
-  assert.match(text, /"text":"Write src\/App.tsx","status":"failed"/);
+  assert.match(text, /"text":"Write src\/App.tsx","status":"unknown"/);
   f.sqlite.prepare('DELETE FROM build_apps WHERE id = ?').run(f.appId);
   assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_activity').get() as any).count, 0);
 });
@@ -370,8 +508,9 @@ test('inference failures survive Workflow serialization and Codex cleanup runs i
   assert.equal(data.app.activeTurnId, null);
   assert.equal(data.app.turns[0].status, 'failed');
   assert.equal(data.app.turns[0].error, 'build_inference_timeout');
-  assert.equal(data.app.turns[0].log, 'Previous compiler output.\n\nThe model did not respond in 240 seconds.');
-  assert.equal(data.app.turns[0].activity[0].status, 'failed');
+  assert.equal(data.app.turns[0].log, '', 'raw diagnostics stay outside normal snapshots');
+  assert.equal(f.sqlite.prepare('SELECT log FROM build_turns WHERE id = ?').get(f.turnId)!.log, 'Previous compiler output.\n\nThe model did not respond in 240 seconds.');
+  assert.equal(data.app.turns[0].activity[0].status, 'unknown');
   assert.equal(inferences, 1, 'failed inference must not be replayed');
   assert.equal(cleanups, 1);
   assert.deepEqual(cleanupSteps, ['Close local inference'], 'cleanup I/O belongs to a durable Workflow step');
@@ -392,7 +531,8 @@ test('unexpected provider exceptions survive Workflow serialization and are retu
   assert.equal(data.app.activeTurnId, null);
   assert.equal(data.app.turns[0].status, 'failed');
   assert.equal(data.app.turns[0].error, 'build_failed');
-  assert.equal(data.app.turns[0].log.trim(), message);
+  assert.equal(data.app.turns[0].log, '');
+  assert.equal(String(f.sqlite.prepare('SELECT log FROM build_turns WHERE id = ?').get(f.turnId)!.log).trim(), message);
 });
 
 
