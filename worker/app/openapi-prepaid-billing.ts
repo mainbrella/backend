@@ -21,10 +21,10 @@ export function registerPrepaidBillingRoutes(api: OpenAPIApi, handler: LegacyHan
     responses: { 200: jsonResponse(result), ...errors(401, 403, 503) },
   }, handler);
   register(api, 'post', '/billing/topups', {
-    operationId: 'createPrepaidTopup', tags: ['Billing'], summary: 'Create or recover hosted Stripe Checkout for a one-time balance purchase', security: cookieSecurity,
-    description: 'Requires browser cookie and trusted Origin. Send a fresh UUID per purchase and retain it until Checkout returns; repeating the same UUID recovers the same purchase and cannot change its amount. Payment is verified before crediting. No subscription is created. Each dollar paid adds one dollar of balance, with the same compute prices and account limits for every purchase amount. Client-supplied credit amounts never authorize funding.',
+    operationId: 'createPrepaidTopup', tags: ['Billing'], summary: 'Create or recover embedded Stripe Checkout for a one-time balance purchase', security: cookieSecurity,
+    description: 'Requires browser cookie, trusted Origin and configured Stripe publishable key. Send a fresh UUID per purchase and retain it until Checkout returns; repeating the same UUID recovers the same purchase and cannot change its amount. Payment is verified before crediting. No subscription is created. Each dollar paid adds one dollar of balance, with the same compute prices and account limits for every purchase amount. Client-supplied credit amounts never authorize funding.',
     request: { headers: z.object({ Origin: z.string() }), ...requestBody(z.object({ amountCents: amount, requestId: z.uuid() })) },
-    responses: { 200: jsonResponse(z.object({ url: z.url(), sessionId: z.string() })), ...errors(400, 401, 403, 409, 503) },
+    responses: { 200: jsonResponse(z.object({ client_secret: z.string(), publishable_key: z.string(), sessionId: z.string() })), ...errors(400, 401, 403, 409, 503) },
   }, handler);
   register(api, 'post', '/billing/topups/complete', {
     operationId: 'completePrepaidTopup', tags: ['Billing'], summary: 'Verify owned Checkout and apply confirmed prepaid funding once', security: cookieSecurity,

@@ -8,7 +8,7 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
   const cors = authCorsHeaders(request);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-  if (path === '/billing/config' && request.method === 'GET') return authJson({ configured: prepaidBillingConfigured(env), minTopupCents: MIN_TOPUP_CENTS, maxTopupCents: MAX_TOPUP_CENTS }, 200, cors);
+  if (path === '/billing/config' && request.method === 'GET') return authJson({ configured: prepaidBillingConfigured(env) && Boolean(env.STRIPE_PUBLISHABLE_KEY), minTopupCents: MIN_TOPUP_CENTS, maxTopupCents: MAX_TOPUP_CENTS }, 200, cors);
   if (!['/billing/balance', '/billing/topups', '/billing/topups/complete', '/billing/settings'].includes(path)) return authJson({ error: 'not_found' }, 404, cors);
   if (request.method !== (path === '/billing/balance' ? 'GET' : 'POST')) return authJson({ error: 'method_not_allowed' }, 405, cors);
   if (request.method === 'POST' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
@@ -20,6 +20,7 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
     const body = await readJSON(request, 4096);
     if (!body) return authJson({ error: 'invalid_request' }, 400, cors);
     if (!prepaidBillingConfigured(env)) return authJson({ error: 'billing_unavailable' }, 503, cors);
+    if (path === '/billing/topups' && !env.STRIPE_PUBLISHABLE_KEY) return authJson({ error: 'billing_unavailable' }, 503, cors);
     if (path === '/billing/topups' && (!validTopupAmount(body.amountCents) || typeof body.requestId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId))) return authJson({ error: 'invalid_topup' }, 400, cors);
     if (path === '/billing/topups/complete' && !stripeID(body.sessionId, 'cs')) return authJson({ error: 'invalid_request' }, 400, cors);

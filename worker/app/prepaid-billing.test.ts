@@ -43,7 +43,7 @@ async function fixture(t: test.TestContext, owned = true) {
     created: Math.floor(Date.now() / 1000), payment_method: 'pm_card', metadata: { mainbrella_user_id: TEST_USER, mainbrella_kind: 'prepaid_topup', mainbrella_request_id: requestId },
     latest_charge: { id: 'ch_prepaid', customer: TEST_CUSTOMER, payment_intent: 'pi_prepaid', paid: true, captured: true, status: 'succeeded',
       amount: 2000, currency: 'usd', amount_refunded: 0, refunded: false, disputed: false, payment_method_details: { type: 'card' } } };
-  const checkout = { id: 'cs_prepaid', url: 'https://checkout.stripe.com/c/pay/prepaid', mode: 'payment', status: 'complete', payment_status: 'paid', currency: 'usd',
+  const checkout = { id: 'cs_prepaid', url: null, mode: 'payment', ui_mode: 'custom', client_secret: 'cs_secret_prepaid', status: 'complete', payment_status: 'paid', currency: 'usd',
     amount_total: 2000, customer: TEST_CUSTOMER, client_reference_id: TEST_USER, payment_intent: 'pi_prepaid', metadata: { mainbrella_request_id: requestId } };
   let rechargeIntent: any = null; let createRechargeStatus = 'succeeded';
   const price = { id: 'price_prepaid', active: true, type: 'one_time', currency: 'usd', unit_amount: 500, recurring: null as unknown, product: { id: 'prod_prepaid', active: true } };
@@ -51,6 +51,7 @@ async function fixture(t: test.TestContext, owned = true) {
     if (url.pathname === '/v1/customers/search') return Response.json({ data: [], has_more: false });
     if (url.pathname === '/v1/prices/price_prepaid') return Response.json(price);
     if (url.pathname === '/v1/checkout/sessions/cs_prepaid') return Response.json(checkout);
+    if (url.pathname === '/v1/checkout/sessions/cs_prepaid/expire' && init?.method === 'POST') return Response.json({ ...checkout, status: 'expired' });
     if (url.pathname === '/v1/payment_intents/pi_prepaid') return Response.json(intent);
     if (url.pathname === '/v1/payment_methods/pm_card') return Response.json({ id: 'pm_card', customer: TEST_CUSTOMER, type: 'card' });
     if (url.pathname === '/v1/charges/ch_prepaid') return Response.json(intent.latest_charge);
@@ -99,15 +100,65 @@ test('topups create payment Checkout with a single Product, validated amount and
   const f = await fixture(t);
   f.sqlite.prepare('DELETE FROM prepaid_topups').run();
   const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 2000, requestId }), f.env);
-  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { url: f.checkout.url, sessionId: 'cs_prepaid' });
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { client_secret: 'cs_secret_prepaid', publishable_key: 'pk_test', sessionId: 'cs_prepaid' });
   const write = f.calls.find(call => call.url.pathname === '/v1/checkout/sessions' && call.init?.method === 'POST')!;
-  assert.equal(write.params.get('mode'), 'payment'); assert.equal(write.params.get('line_items[0][price_data][product]'), 'prod_prepaid');
+  assert.equal(write.params.get('mode'), 'payment'); assert.equal(write.params.get('ui_mode'), 'custom');
+  assert.equal(write.params.get('return_url'), 'https://mainbrella.com/pricing/usage?topup_return=1&session_id={CHECKOUT_SESSION_ID}');
+  assert.equal(write.params.has('success_url'), false); assert.equal(write.params.has('cancel_url'), false);
+  assert.equal(write.params.get('line_items[0][price_data][product]'), 'prod_prepaid');
   assert.equal(write.params.get('line_items[0][price_data][unit_amount]'), '2000');
   assert.equal(write.params.get('payment_intent_data[metadata][mainbrella_kind]'), 'prepaid_topup');
   assert.equal(write.params.has('payment_intent_data[setup_future_usage]'), false);
   assert.equal(f.funding.size, 0);
   assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 5000, requestId }), f.env)).status, 409);
   for (const amountCents of [499, 100001, 500.5, '2000']) assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents, requestId: crypto.randomUUID() }), f.env)).status, 400);
+});
+
+test('an existing custom Checkout is recovered with its original secret and request identity', async t => {
+  const f = await fixture(t);
+  f.checkout.status = 'open';
+  const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 2000, requestId }), f.env);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { client_secret: 'cs_secret_prepaid', publishable_key: 'pk_test', sessionId: 'cs_prepaid' });
+  assert.equal(f.calls.some(call => call.url.pathname === '/v1/checkout/sessions' && call.init?.method === 'POST'), false);
+  assert.equal(f.funding.size, 0);
+});
+
+test('a missing publishable key disables new purchases before customer creation but leaves billing reads available', async t => {
+  const f = await fixture(t, false); const env = { ...f.env, STRIPE_PUBLISHABLE_KEY: '' };
+  assert.deepEqual(await (await handlePrepaidBillingRequest(billingRequest('/billing/config'), env)).json(), { configured: false, minTopupCents: 500, maxTopupCents: 100000 });
+  const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 2000, requestId }), env);
+  assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'billing_unavailable' });
+  assert.equal(f.calls.length, 0);
+  assert.equal((await handlePrepaidBillingRequest(billingRequest('/billing/settings', { spendLimitCents: 5000 }), env)).status, 200);
+});
+
+test('an old hosted session is expired before a fresh request identity is required', async t => {
+  const f = await fixture(t); f.sqlite.prepare('DELETE FROM prepaid_topups').run();
+  const previous = f.state.override!;
+  f.state.override = (url, init) => {
+    if (url.pathname === '/v1/checkout/sessions' && init?.method === 'GET') return Response.json({ data: [{ ...f.checkout, ui_mode: 'hosted', url: 'https://checkout.stripe.com/c/pay/old', status: 'open' }], has_more: false });
+    return previous(url, init);
+  };
+  const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 2000, requestId }), f.env);
+  assert.equal(response.status, 409); assert.deepEqual(await response.json(), { error: 'topup_expired' });
+  assert.equal(f.calls.filter(call => call.url.pathname === '/v1/checkout/sessions/cs_prepaid/expire' && call.init?.method === 'POST').length, 1);
+  assert.equal(f.calls.some(call => call.url.pathname === '/v1/checkout/sessions' && call.init?.method === 'POST'), false);
+  assert.equal(f.funding.size, 0);
+});
+
+test('an uncertain hosted-session expiry fails closed without replacement or funding', async t => {
+  const f = await fixture(t); f.sqlite.prepare('DELETE FROM prepaid_topups').run(); t.mock.method(console, 'error', () => {});
+  const previous = f.state.override!;
+  f.state.override = (url, init) => {
+    if (url.pathname === '/v1/checkout/sessions' && init?.method === 'GET') return Response.json({ data: [{ ...f.checkout, ui_mode: 'hosted', url: 'https://checkout.stripe.com/c/pay/old', status: 'open' }], has_more: false });
+    if (url.pathname === '/v1/checkout/sessions/cs_prepaid/expire') return Response.json({ ...f.checkout, status: 'open' });
+    return previous(url, init);
+  };
+  const response = await handlePrepaidBillingRequest(billingRequest('/billing/topups', { amountCents: 2000, requestId }), f.env);
+  assert.equal(response.status, 503);
+  assert.equal(f.calls.some(call => call.url.pathname === '/v1/checkout/sessions' && call.init?.method === 'POST'), false);
+  assert.equal(f.funding.size, 0);
 });
 
 test('first prepaid purchase persists customer ownership without creating a subscription', async t => {

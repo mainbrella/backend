@@ -25,8 +25,13 @@ Configure `STRIPE_PREPAID_PRICE_ID`, matching the Stripe secret key's mode:
 
 Checkout validates the active reference Price and Product. A $5 purchase uses
 the reference Price; other amounts use inline pricing on the same Product.
-No additional recurring or per-amount Stripe Prices are needed. Hosted
-Checkout handles card entry; this flow does not require a publishable key.
+No additional recurring or per-amount Stripe Prices are needed. Stripe's
+embedded Checkout handles card entry inside the usage billing page. Configure
+`STRIPE_PUBLISHABLE_KEY` with the matching test or live mode so the browser can
+mount the Checkout form; the secret key still creates sessions and verifies
+payments on the server. New purchases are unavailable until both keys and the
+reference Price are configured. Balance, completion verification and billing
+settings remain available without the publishable key.
 Configure `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` separately for each
 mode. Send signed events to `/subscription/webhook`, including
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,

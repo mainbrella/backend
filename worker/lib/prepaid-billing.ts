@@ -28,7 +28,7 @@ interface PaymentIntent {
 export interface PrepaidCheckout {
   id: string; url: string | null; mode: string; status: string; payment_status: string; currency: string;
   amount_total: number; customer: string; client_reference_id: string; payment_intent: string | null;
-  metadata: Record<string, string>;
+  metadata: Record<string, string>; ui_mode?: string; client_secret?: string;
 }
 interface Topup { request_id: string; user_id: string; stripe_customer_id: string; amount_cents: number; checkout_session_id: string | null; created_at: number }
 interface ReferencePrice { id: string; active: boolean; type: string; currency: string; unit_amount: number; recurring: unknown; product: { id: string; active: boolean } }
@@ -135,7 +135,8 @@ export async function enableRechargePaymentMethod(env: BillingEnv, account: Prep
   if (funding && !funding.refundedCents && !funding.disputed) await saveRechargePaymentMethod(env, account, intent);
 }
 
-export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAccount, amountCents: number, requestId: string, origin: string): Promise<{ url: string; sessionId: string }> {
+export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAccount, amountCents: number, requestId: string, origin: string): Promise<{ client_secret: string; publishable_key: string; sessionId: string }> {
+  if (!env.STRIPE_PUBLISHABLE_KEY) throw new Error('billing_unavailable');
   await env.DB.prepare('INSERT INTO prepaid_topups (request_id,user_id,stripe_customer_id,amount_cents,created_at) VALUES (?,?,?,?,?) ON CONFLICT(request_id) DO NOTHING')
     .bind(requestId, account.user_id, account.stripe_customer_id, amountCents, Date.now()).run();
   const entry = await env.DB.prepare('SELECT request_id,user_id,stripe_customer_id,amount_cents,checkout_session_id,created_at FROM prepaid_topups WHERE request_id = ?').bind(requestId).first<Topup>();
@@ -158,14 +159,13 @@ export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAcc
     if (Date.now() - entry.created_at >= 23 * 3600000) throw new Error('billing_reconciliation_required');
     const { balance } = await accountBillingRequest(env, account.user_id, '/billing/balance');
     const price = await prepaidReferencePrice(env);
-    const fields = new URLSearchParams({ mode: 'payment', customer: account.stripe_customer_id,
+    const fields = new URLSearchParams({ mode: 'payment', ui_mode: 'custom', customer: account.stripe_customer_id,
       client_reference_id: account.user_id, 'payment_method_types[0]': 'card',
       'line_items[0][quantity]': '1',
       'metadata[mainbrella_request_id]': requestId, 'metadata[mainbrella_user_id]': account.user_id,
       'payment_intent_data[metadata][mainbrella_request_id]': requestId, 'payment_intent_data[metadata][mainbrella_user_id]': account.user_id,
       'payment_intent_data[metadata][mainbrella_kind]': 'prepaid_topup',
-      success_url: `${origin}/pricing/usage?topup_return=1&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/pricing/usage?topup_canceled=1`,
+      return_url: `${origin}/pricing/usage?topup_return=1&session_id={CHECKOUT_SESSION_ID}`,
     });
     if (amountCents === MIN_TOPUP_CENTS) fields.set('line_items[0][price]', price.id);
     else {
@@ -181,8 +181,16 @@ export async function createPrepaidCheckout(env: BillingEnv, account: PrepaidAcc
     || session.metadata?.mainbrella_request_id !== requestId) throw new Error('checkout_not_owned');
   await env.DB.prepare('UPDATE prepaid_topups SET checkout_session_id = ? WHERE request_id = ?').bind(session.id, requestId).run();
   if (session.status === 'complete') throw new Error('topup_already_complete');
-  if (session.status !== 'open' || !session.url || !session.url.startsWith('https://checkout.stripe.com/')) throw new Error('topup_expired');
-  return { url: session.url, sessionId: session.id };
+  if (session.status !== 'open') throw new Error('topup_expired');
+  if (session.ui_mode !== 'custom') {
+    // A previously created hosted session cannot be mounted in Elements. End
+    // it before telling the client to start a new, separately identified topup.
+    const expired = await stripeRequest<PrepaidCheckout>(env, `/checkout/sessions/${encodeURIComponent(session.id)}/expire`, new URLSearchParams());
+    if (expired.id !== session.id || expired.status !== 'expired') throw new Error('billing_unavailable');
+    throw new Error('topup_expired');
+  }
+  if (!session.client_secret) throw new Error('billing_unavailable');
+  return { client_secret: session.client_secret, publishable_key: env.STRIPE_PUBLISHABLE_KEY, sessionId: session.id };
 }
 export async function completePrepaidCheckout(env: BillingEnv, account: PrepaidAccount, sessionId: string): Promise<{ balance: PrepaidBalance }> {
   const receipt = await env.DB.prepare('SELECT request_id,user_id,stripe_customer_id,amount_cents,checkout_session_id,created_at FROM prepaid_topups WHERE checkout_session_id = ?')

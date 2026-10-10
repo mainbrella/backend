@@ -175,6 +175,9 @@ test('prepaid schemas expose one-time funding, payment verification and consent-
   assert.deepEqual(paths['/billing/balance'].get.security, [{ cookieAuth: [] }]);
   const purchase = paths['/billing/topups'].post;
   assert.deepEqual(purchase.security, [{ cookieAuth: [] }]);
+  assert.match(purchase.summary, /embedded Stripe Checkout/);
+  assert.match(purchase.description, /publishable key/);
+  assert.deepEqual(Object.keys(purchase.responses['200'].content['application/json'].schema.properties).sort(), ['client_secret', 'publishable_key', 'sessionId'].sort());
   assert.match(purchase.description, /No subscription is created/);
   assert.match(purchase.description, /client-supplied credit amounts never authorize/i);
   const body = purchase.requestBody.content['application/json'].schema;
