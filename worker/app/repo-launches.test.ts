@@ -15,7 +15,8 @@ const api = (path: string, method = 'GET', body?: unknown, key = 'launch-one', s
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t, { [USER_ONE]: [], [USER_TWO]: [] });
   t.after(() => f.close());
-  f.sqlite.exec(readFileSync(new URL('../../migrations/013_repo_launches.sql', import.meta.url), 'utf8'));
+  for (const migration of ['013_repo_launches.sql', '021_acquisition.sql', '022_acquisition_sources.sql'])
+    f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billingFetch = globalThis.fetch;
   let githubMode = 'public';
   let manifests = ['package.json'];
@@ -300,6 +301,8 @@ test('terminal-only launch resumes through clone inspection and never reruns com
   assert.equal(state.phase, 'ready'); assert.ok(state.shellReadyAt); assert.equal(state.previewReadyAt, null);
   state = await f.step(state); assert.equal(state.phase, 'ready');
   assert.equal(f.creations.size, 1); assert.equal(f.executionKeys.size, 1);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='workspace.started'").get() as any).n, 1);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='workload.activated'").get() as any).n, 0);
 });
 
 test('lost allocation and execution responses reconcile stable keys without duplicated starts or commands', async t => {
@@ -321,6 +324,9 @@ test('preview workflow persists clone/install/start IDs, readiness and separate 
   state = await f.step(state); f.complete(state, 'setup'); state = await f.step(state); assert.equal(state.phase, 'starting');
   state = await f.step(state); f.complete(state, 'starting'); state = await f.step(state); assert.equal(state.phase, 'ready');
   assert.ok(state.previewReadyAt); assert.equal(f.executionKeys.size, 3);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='workspace.started'").get() as any).n, 1);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='workload.activated'").get() as any).n, 1);
+  assert.equal(JSON.parse((f.sqlite.prepare("SELECT payload FROM acquisition_events WHERE event_type='workload.activated'").get() as any).payload).basis, 'http_preview_ready');
   const startRequest = f.executionCalls.filter(call => call.method === 'POST').at(-1)!;
   const startBody = await startRequest.json() as { command: string; timeoutMs: number };
   assert.match(startBody.command, /tmux new-session -d -s mainbrella-preview/); assert.match(startBody.command, /http:\/\/127\.0\.0\.1:3000/);
@@ -333,6 +339,8 @@ test('setup failure preserves shell and retained logs and cannot silently rerun 
   state = await f.step(state); f.complete(state, 'setup', 'failed'); state = await f.step(state);
   assert.equal(state.phase, 'failed'); assert.equal(state.error, 'setup_failed'); assert.ok(state.shellReadyAt); assert.ok(state.container);
   state = await f.step(state); assert.equal(f.executionKeys.size, 2);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='launch.failed'").get() as any).n, 1);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS n FROM acquisition_events WHERE event_type='workload.activated'").get() as any).n, 0);
 });
 
 test('expired history and uncertain execution retention never trigger automatic replay', async t => {

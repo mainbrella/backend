@@ -1,6 +1,7 @@
 import { validPreviewId, validPreviewToken } from '../containers/preview-contract.js';
 import { handleProjectGateway } from './project-gateway';
 import type { ProjectHostingEnv } from './lib/project-hosting';
+import { reportPreviewDocument } from './lib/acquisition-sources';
 import { previewDomain, previewOrigin, previewsConfigured, previewTokenHash, prunePreviewRoutes, validPreviewGeneration,
   type PreviewRoute, type PreviewRoutingEnv } from './lib/preview-routing';
 
@@ -11,7 +12,7 @@ function unavailable(status = 404): Response {
   } });
 }
 
-export async function handlePreviewGateway(request: Request, env: PreviewRoutingEnv): Promise<Response> {
+export async function handlePreviewGateway(request: Request, env: PreviewRoutingEnv, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const domain = previewDomain(env);
   const host = request.headers.get('host');
@@ -53,7 +54,15 @@ export async function handlePreviewGateway(request: Request, env: PreviewRouting
     const stub = env.USER_CONTAINER!.get(env.USER_CONTAINER!.idFromName(route.container_name));
     // Preserve streaming bodies and Worker WebSocket responses. The private
     // runtime owns response sanitization, timeouts and active revocation.
-    return await stub.fetch(forwarded);
+    const response = await stub.fetch(forwarded);
+    if (request.method === 'GET' && ['document', 'iframe', 'frame'].includes(request.headers.get('sec-fetch-dest') ?? '')
+      && response.ok && ![204, 205].includes(response.status)
+      && /^text\/html(?:;|$)/i.test(response.headers.get('content-type') ?? '')) {
+      const observation = reportPreviewDocument(env, route);
+      if (ctx) ctx.waitUntil(observation);
+      else await observation;
+    }
+    return response;
   } catch {
     // Never log the request URL, hostname, token, DB exceptions or routing data.
     return unavailable(503);
@@ -71,10 +80,10 @@ export default {
 
 // Keep bearer preview traffic on its existing path and policy. Stable project
 // hosts and registered customer hosts use separate publication authorization.
-export async function handleApplicationGateway(request: Request, env: ProjectHostingEnv): Promise<Response> {
+export async function handleApplicationGateway(request: Request, env: ProjectHostingEnv, ctx?: ExecutionContext): Promise<Response> {
   const hostname = new URL(request.url).hostname;
   const domain = previewDomain(env);
   const label = domain && hostname.endsWith(`.${domain}`) ? hostname.slice(0, -(domain.length + 1)) : '';
-  if (hostname === domain || validPreviewToken(label)) return handlePreviewGateway(request, env);
+  if (hostname === domain || validPreviewToken(label)) return handlePreviewGateway(request, env, ctx);
   return handleProjectGateway(request, env);
 }

@@ -67,8 +67,7 @@ async function github(path: string, missing: string, token?: string): Promise<an
 }
 
 export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.', token?: string): Promise<ResolvedRepo> {
-  const metadata = await github(`/repos/${repo}`, 'public_repo_not_found', token);
-  if (metadata.private !== false || metadata.disabled || !repoName.safeParse(metadata.full_name).success) throw new LaunchError('public_repo_not_found', 400);
+  const metadata = await publicRepoMetadata(repo, token);
   const canonical = metadata.full_name as string;
   const resolvedRef = ref ?? metadata.default_branch;
   if (!repoRef.safeParse(resolvedRef).success) throw new LaunchError('repo_ref_not_found', 400);
@@ -89,6 +88,19 @@ export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.', t
   const matches = candidates.filter(([, manifests]) => manifests.some(file => files.has(file)));
   return { repo: canonical, ref: resolvedRef, commit: commit.sha, suggestedCatalogId: matches.length === 1 ? matches[0][0] : 'node',
     manifests: candidates.flatMap(([, manifests]) => [...manifests]).filter(file => files.has(file)) };
+}
+
+export async function verifyPublicRepo(repo: string, token?: string): Promise<string> {
+  const metadata = await publicRepoMetadata(repo, token);
+  return metadata.full_name as string;
+}
+
+async function publicRepoMetadata(repo: string, token?: string): Promise<any> {
+  const metadata = await github(`/repos/${repo}`, 'public_repo_not_found', token);
+  if (metadata.private !== false || metadata.disabled || !repoName.safeParse(metadata.full_name).success) {
+    throw new LaunchError('public_repo_not_found', 400);
+  }
+  return metadata;
 }
 
 export const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";

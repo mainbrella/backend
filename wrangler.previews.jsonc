@@ -8,6 +8,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
+    "ACQUISITION_ENABLED": "true",
     "PREVIEWS_ENABLED": "true",
     "PREVIEW_DOMAIN": "mainbrella.dev",
     "PROJECT_HOSTING_ENABLED": "true",

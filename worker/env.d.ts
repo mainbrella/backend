@@ -30,5 +30,7 @@ interface Env {
   SUPABASE_URL?: string;
   BUCKET?: R2Bucket;
   ANONYMOUS_SIGNUP_LIMIT?: RateLimit;
+  ACQUISITION_ENABLED?: string;
+  ACQUISITION_SUBMISSION_LIMIT?: RateLimit;
   APP_STATE?: DurableObjectNamespace;
 }

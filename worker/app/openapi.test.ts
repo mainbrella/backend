@@ -48,6 +48,8 @@ const endpointMethods: Record<string, string[]> = {
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
   "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
   '/admin/accounting/ledger': ['get'], '/admin/accounting/closes': ['get', 'post'], '/admin/accounting/policies': ['get', 'post'],
+  '/acquisition/repositories': ['post'], '/acquisition/link': ['post'],
+  '/admin/acquisition/leads': ['get'], '/admin/acquisition/events': ['get'],
 };
 
 async function document() {

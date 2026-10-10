@@ -1,6 +1,7 @@
 import { entitlementHeaders, type Entitlement } from '../../containers/plan-policy.js';
 import { machineName, validContainerId } from '../../containers/container-account-core.js';
 import { resolveEntitlement } from './entitlements';
+import { observeRunningWorkspaces } from './acquisition-sources';
 
 export type ContainerState = { plan: string | null; active: boolean; containers: { id: string; createdAt: string; expiresAt: string; status: string }[] };
 export type ContainerImageSelection = { name?: string; imageKey?: string; imageId?: string; imageName?: string; size?: string; internet?: boolean; workspaceId?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string };
@@ -10,10 +11,17 @@ export async function accountResponse(env: Env, userId: string, entitlement: Ent
   const url = new URL('https://internal/containers');
   if (id) url.searchParams.set('id', id);
   if (createdAt) url.searchParams.set('createdAt', createdAt);
-  return account.fetch(new Request(url, { method,
+  const response = await account.fetch(new Request(url, { method,
     headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': userId, ...(method === 'POST' && idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}), ...(method === 'DELETE' ? { 'x-mainbrella-cleanup': '1' } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
     ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
   }));
+  if (response.ok && (method === 'GET' || method === 'POST') && env.ACQUISITION_ENABLED === 'true') {
+    try {
+      const state = await response.clone().json() as ContainerState;
+      if (Array.isArray(state.containers)) await observeRunningWorkspaces(env, userId, state.containers);
+    } catch { console.error('acquisition_workspace_observation_failed'); }
+  }
+  return response;
 }
 export async function syncAccountEntitlement(env: Env, userId: string, entitlement: Entitlement): Promise<void> {
   const response = await accountResponse(env, userId, entitlement, 'PUT');
