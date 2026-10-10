@@ -256,7 +256,9 @@ export async function startCodexBridge({ executable = process.env.CODEX_PATH || 
       const input = added.filter(message => message.role === 'user').map(message => ({ type: 'text', text: message.content, text_elements: [] }));
       if (!input.length) throw failure('invalid_model_response');
       session.active = true; session.turnId = null;
-      const result = await rpc.request('turn/start', { threadId: session.threadId, input });
+      // Match the build agent's low-effort inference within its four-minute
+      // deadline, independently of personal CLI reasoning preferences.
+      const result = await rpc.request('turn/start', { threadId: session.threadId, input, effort: 'low' });
       if (!sessions.has(session.id)) {
         await rpc.request('turn/interrupt', { threadId: session.threadId, turnId: result.turn.id }, 1000).catch(() => {});
         return;

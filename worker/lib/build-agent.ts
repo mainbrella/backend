@@ -3,9 +3,9 @@ import { accountResponse, runningContainer } from './container-service';
 import { resolveEntitlement } from './entitlements';
 import { handleOwnedPreviewRequest } from '../app/previews';
 import { failBuildTurn } from '../app/build';
-import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildToolCall } from './build-ai';
+import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
 import { buildToolLabel, saveBuildActivity } from './build-activity';
-import { closeCodexInference } from './build-codex';
+import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
@@ -187,20 +187,28 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       if (initial.turn.mode === 'build') {
         const remaining = BUILD_OUTPUT_BUDGET - outputTokens;
         if (remaining < 1024 || inputTokens >= BUILD_INPUT_BUDGET || new TextEncoder().encode(JSON.stringify(messages)).length > 192 * 1024) throw new BuildError('build_budget_exceeded');
-        const result = await step.do(`AI ${round}`, noRetry, async () => {
-          if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
-          await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
-          const result = await buildInference(env, messages, Math.min(8192, remaining), async (text, calls) => {
-            if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
-            for (const [index, call] of calls.entries()) {
-              if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
-                { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
-            }
-          }, params.turnId);
-          if (result.message.content) await saveBuildActivity(env, params, round * 10,
-            { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
-          return result;
+        const result = await step.do(`AI ${round}`, noRetry, async (): Promise<BuildAIResult | { error: string }> => {
+          try {
+            if (Date.now() - startedAt > 30 * 60_000) throw new BuildError('build_budget_exceeded');
+            await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
+            const result = await buildInference(env, messages, Math.min(8192, remaining), async (text, calls) => {
+              if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
+              for (const [index, call] of calls.entries()) {
+                if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
+                  { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
+              }
+            }, params.turnId);
+            if (result.message.content) await saveBuildActivity(env, params, round * 10,
+              { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
+            return result;
+          } catch (error) {
+            // Workflow RPC drops custom Error prototypes. Persist expected
+            // failures as data, then restore BuildError outside the step.
+            if (error instanceof BuildError) return { error: error.message };
+            throw error;
+          }
         });
+        if ('error' in result) throw new BuildError(result.error);
         inputTokens += result.inputTokens; outputTokens += result.outputTokens;
         messages.push(result.message);
         await step.do(`Record AI usage ${round}`, retry, async () => {
@@ -271,6 +279,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
     await step.do('Record build failure', retry, async () => failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code));
   } finally {
-    await closeCodexInference(env, params.turnId);
+    if (localCodexConfigured(env)) await step.do('Close local inference', { ...noRetry, timeout: '10 seconds' },
+      async () => closeCodexInference(env, params.turnId));
   }
 }

@@ -74,8 +74,10 @@ npm run dev -- --ai=codex
 
 The launcher starts a private loopback Node bridge to `codex app-server` over
 stdio, using the model in your Codex configuration. Set `CODEX_PATH` if the CLI
-is outside your PATH. Codex inference runs remotely and uses your Codex account;
-this mode does not exercise the production Workers AI model. The app-server
+is outside your PATH. Build turns use low reasoning effort, independently of
+your CLI preference, to fit the four-minute inference deadline. Codex inference
+runs remotely and uses your Codex account; this mode does not exercise the
+production Workers AI model. The app-server
 [dynamic-tool protocol](https://learn.chatgpt.com/docs/app-server) is experimental
 and the bridge enables `experimentalApi`.
 

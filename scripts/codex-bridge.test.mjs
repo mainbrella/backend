@@ -62,6 +62,8 @@ test('Codex pauses for all six Worker tools, preserves tool failure and starts c
   assert.equal(thread.config.features.shell_tool, false);
   assert.equal(records.filter(record => record.method === 'thread/start').length, 1);
   assert.equal(records.filter(record => record.method === 'turn/start').length, 2);
+  assert.ok(records.filter(record => record.method === 'turn/start').every(record => record.params.effort === 'low'),
+    'bounded build inference must not inherit a personal high reasoning setting');
   assert.equal(records.filter(record => record.result?.contentItems)[4].result.success, false);
   assert.ok(records.some(record => record.method === 'turn/interrupt'));
 });

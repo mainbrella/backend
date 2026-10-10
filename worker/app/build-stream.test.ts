@@ -220,3 +220,37 @@ test('Codex variables cannot select local inference outside local dev, and tool 
   await assert.rejects(buildInference(env, [{ role: 'user', content: 'Test' }], 1024, undefined, 'session'), /build_unavailable/);
   assert.equal(calls, 1);
 });
+
+test('inference failures survive Workflow serialization and Codex cleanup runs in a step', async t => {
+  const f = await fixture(t);
+  Object.assign(f.env, { LOCAL_DEV: 'true', BUILD_CODEX_URL: 'http://127.0.0.1:1234', BUILD_CODEX_TOKEN: 'local-token' });
+  const steps: string[] = [], cleanupSteps: string[] = [], errors: unknown[] = [];
+  let currentStep = '', inferences = 0, cleanups = 0;
+  t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
+  t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, options?: RequestInit) => {
+    if (options?.method === 'DELETE') {
+      cleanups++;
+      cleanupSteps.push(currentStep);
+      return new Response(null, { status: 204 });
+    }
+    inferences++;
+    return new Response(chunks(delta({ content: 'Starting the app.' }) + event({ error: { code: 'build_inference_timeout' } })));
+  });
+  const step = { async do(name: string, _options: unknown, operation: () => Promise<unknown>) {
+    steps.push(name); currentStep = name;
+    try { return structuredClone(await operation()); }
+    catch (error) { throw new Error((error as Error).message); } // RPC drops custom Error prototypes.
+    finally { currentStep = ''; }
+  }, async sleep() { assert.fail('no sandbox should be started after inference fails'); } } as unknown as Parameters<typeof runBuildAgent>[2];
+  await runBuildAgent(f.env, f.params, step, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(data.app.activeTurnId, null);
+  assert.equal(data.app.turns[0].status, 'failed');
+  assert.equal(data.app.turns[0].error, 'build_inference_timeout');
+  assert.equal(data.app.turns[0].activity[0].status, 'failed');
+  assert.equal(inferences, 1, 'failed inference must not be replayed');
+  assert.equal(cleanups, 1);
+  assert.deepEqual(cleanupSteps, ['Close local inference'], 'cleanup I/O belongs to a durable Workflow step');
+  assert.equal(steps.at(-1), 'Close local inference');
+  assert.deepEqual(errors, [['build_turn_failed', { appId: f.appId, turnId: f.turnId, error: 'build_inference_timeout' }]]);
+});
