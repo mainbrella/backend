@@ -9,6 +9,7 @@ import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { settleReportedBuildUsage } from './build-billing';
 import { buildFailure, failureError, proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation,
   retainBuildSource, type OperationResult, type OperationStatus } from './build-journal';
+import { storeBuildSource, readBuildSource, readBuildText, canonicalBuildSource } from './build-storage';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from './build-git';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
@@ -144,10 +145,11 @@ async function materialize(env: Env, params: BuildParams, container: BuildContai
     await writeGuestFile(env, params.userId, container, '/workspace/mainbrella-build-server.cjs', buildStaticServer);
   });
 }
-async function saveSource(env: Env, params: BuildParams, files: BuildFiles) {
+async function saveSource(env: Env, params: BuildParams, files: BuildFiles, retained?: string) {
   validateBuildFiles(files);
+  const source = retained ?? await storeBuildSource(env, params, files);
   await env.DB.prepare('UPDATE build_apps SET source_json = ?, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
-    .bind(JSON.stringify(files), new Date().toISOString(), params.appId, params.userId, params.turnId).run();
+    .bind(source, new Date().toISOString(), params.appId, params.userId, params.turnId).run();
 }
 async function executeTool(env: Env, params: BuildParams, container: BuildContainer | undefined, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string; succeeded: boolean; state?: OperationStatus }> {
   const schema = buildToolSchemas[call.function.name as keyof typeof buildToolSchemas];
@@ -190,8 +192,8 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
     const ref = { params, id: `${label}-source` };
     await proposeBuildOperation(env, ref, 'source', `Save ${args.path}`);
     await recordBuildOperation(env, ref, { status: 'unknown', started: true });
-    await retainBuildSource(env, ref, next, [args.path]);
-    await saveSource(env, params, next);
+    const retained = await retainBuildSource(env, ref, next, [args.path]);
+    await saveSource(env, params, next, retained);
     await recordBuildOperation(env, ref, { status: 'succeeded', finished: true });
   });
   if (call.function.name === 'delete_file' && container) {
@@ -249,7 +251,9 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const { results: images } = await env.DB.prepare('SELECT id, label FROM build_images WHERE app_id = ? ORDER BY rowid').bind(params.appId).all<{ id: string; label: string }>();
       return { app, turn, images };
     });
-    currentTurn = initial.turn; originalSource = initial.app.source_json;
+    currentTurn = initial.turn;
+    const initialFiles = await readBuildSource(env, params, initial.app.source_json);
+    originalSource = canonicalBuildSource(initialFiles);
     const restored = initial.turn.restore_version_id ? await buildGitVersion(env, params.appId, initial.turn.restore_version_id) : null;
     if (initial.turn.restore_version_id && !restored) throw new BuildError('version_not_found', 404);
     const parent = initial.app.git_version_id ? await buildGitVersion(env, params.appId, initial.app.git_version_id) : null;
@@ -266,13 +270,13 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const reset = await runCommand(env, params, container, step, 'reset-source', `mkdir -p ${root} && find ${root} -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf -- {} +`, 30_000);
       if (reset.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
       await hydrateBuildGit(env, params, gitRuntime(container), parent, initial.turn);
-      const lockfile = (restored ?? parent)?.lockfile;
-      if (lockfile) await step.do('Restore npm lockfile', retry, async () => writeGuestFile(env, params.userId, container!, `${root}/package-lock.json`, lockfile));
+      const storedLockfile = (restored ?? parent)?.lockfile;
+      if (storedLockfile) await step.do('Restore npm lockfile', retry, async () => writeGuestFile(env, params.userId, container!, `${root}/package-lock.json`, await readBuildText(env, params, storedLockfile)));
       return container;
     }
-    let files = JSON.parse(restored?.source_json ?? initial.app.source_json) as BuildFiles;
+    let files = restored ? await readBuildSource(env, params, restored.source_json) : initialFiles;
     let inputTokens = 0, outputTokens = 0, logs = '', summary = restored ? `Restored version ${restored.commit_id.slice(0, 12)}.` : 'Preview restarted from saved source.';
-    const starterContext = JSON.stringify(files) === JSON.stringify(buildStarter)
+    const starterContext = canonicalBuildSource(files) === canonicalBuildSource(buildStarter)
       ? `\nStarter source (already supplied; begin editing without listing or reading these files):\n${JSON.stringify(files)}\n` : '';
     const messages: BuildAIMessage[] = [{ role: 'system', content: `${buildSystemPrompt}${initial.turn.base_revision === 0 ? `\n${buildFirstVersionPrompt}` : ''}` },
       { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}${starterContext}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
@@ -342,7 +346,11 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
             const activity = { id: `tool-${round}-${index}`, type: 'tool' as const, text: buildToolLabel(call.function.name, call.function.arguments) };
             currentOperation = activity.id;
             await step.do(`Tool stage ${round}-${index}`, retry, async () => {
-              await startBuildOperation(env, { params, id: activity.id }, 'tool', activity.text, { toolName: call.function.name, arguments: call.function.arguments.slice(0, 4000) });
+              let argumentsSummary = call.function.arguments.slice(0, 4000);
+              if (env.BUCKET && call.function.name === 'write_file') {
+                try { const args = JSON.parse(call.function.arguments); argumentsSummary = JSON.stringify({ path: args.path, contentBytes: new TextEncoder().encode(args.content ?? '').length }); } catch { argumentsSummary = 'Invalid JSON'; }
+              }
+              await startBuildOperation(env, { params, id: activity.id }, 'tool', activity.text, { toolName: call.function.name, arguments: argumentsSummary });
               await stage(env, params, activity.text);
               try { await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: 'running' }); } catch { /* Optional display. */ }
             });
@@ -355,7 +363,8 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
             await step.do(`Tool complete ${round}-${index}`, retry, async () => {
               const state = output.state ?? (output.succeeded ? 'succeeded' : 'failed');
               await recordBuildOperation(env, { params, id: activity.id }, { status: state, finished: true,
-                evidence: { output: output.output.slice(-6000) }, result: { ok: true, value: { succeeded: output.succeeded } } });
+                evidence: { output: env.BUCKET && call.function.name === 'read_file' ? 'Source retained in R2.' : output.output.slice(-6000) },
+                result: { ok: true, value: { succeeded: output.succeeded, ...(call.function.name === 'read_file' ? { output: output.output } : {}) } } });
               try { await saveBuildActivity(env, params, round * 10 + index + 1, { ...activity, status: state }); } catch { /* Optional display. */ }
             });
             if (toolSettlementFailure) throw failureError(toolSettlementFailure);
@@ -365,7 +374,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
           continue;
         }
         summary = inference.message.content || 'App updated.';
-        if (JSON.stringify(files) === initial.app.source_json && initial.app.revision === 0) {
+        if (canonicalBuildSource(files) === originalSource && initial.app.revision === 0) {
           messages.push({ role: 'user', content: 'You have not edited any files yet. Implement the requested app using write_file before finishing.' });
           continue;
         }
@@ -387,7 +396,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       { outputTokens, inputTokens, rounds: BUILD_MAX_ROUNDS });
     const ready = await sandbox();
     currentOperation = 'git-save';
-    const savedVersion = initial.turn.mode === 'build' || restored || !parent || parent.source_json !== JSON.stringify(files) ? await checkpoint(ready, files, true) : parent;
+    const savedVersion = initial.turn.mode === 'build' || restored || !parent || canonicalBuildSource(await readBuildSource(env, params, parent.source_json)) !== canonicalBuildSource(files) ? await checkpoint(ready, files, true) : parent;
     await step.do('Preview stage', retry, async () => stage(env, params, 'Starting preview'));
     currentOperation = 'start-preview';
     const launched = await runCommand(env, params, ready, step, 'start-preview', startPreview, 60_000);
@@ -402,11 +411,12 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       const now = new Date().toISOString();
       const changed = initial.turn.mode === 'build' || Boolean(restored);
       const revision = initial.app.revision + (changed ? 1 : 0);
+      const source = await storeBuildSource(env, params, files);
       await env.DB.batch([
         ...(changed ? [env.DB.prepare('INSERT INTO build_revisions (app_id, revision, turn_id, source_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO NOTHING')
-          .bind(params.appId, revision, params.turnId, JSON.stringify(files), now)] : []),
+          .bind(params.appId, revision, params.turnId, source, now)] : []),
         env.DB.prepare('UPDATE build_apps SET source_json = ?, revision = ?, preview_json = ?, active_turn_id = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
-          .bind(JSON.stringify(files), revision, JSON.stringify(preview), now, params.appId, params.userId, params.turnId),
+          .bind(source, revision, JSON.stringify(preview), now, params.appId, params.userId, params.turnId),
         ...(savedVersion ? [env.DB.prepare('UPDATE build_apps SET verified_git_version_id = ? WHERE id = ? AND user_id = ? AND git_version_id = ?')
           .bind(savedVersion.id, params.appId, params.userId, savedVersion.id),
           env.DB.prepare('UPDATE build_git_versions SET verified = 1 WHERE id = ? AND app_id = ?').bind(savedVersion.id, params.appId)] : []),
@@ -421,9 +431,9 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     if (env.BUCKET && currentTurn && code !== 'build_git_unavailable') {
       try {
         const app = await ownedBuildApp(env, params.userId, params.appId);
-        if (app?.active_turn_id === params.turnId && app.source_json !== originalSource && !await buildGitVersion(env, params.appId, params.turnId)) {
+        const files = app ? await readBuildSource(env, params, app.source_json) : null;
+        if (app?.active_turn_id === params.turnId && files && canonicalBuildSource(files) !== originalSource && !await buildGitVersion(env, params.appId, params.turnId)) {
           container ??= await step.do('Allocate checkpoint sandbox', retry, () => allocate(env, params));
-          const files = JSON.parse(app.source_json) as BuildFiles;
           await materialize(env, params, container, files, step, 'checkpoint-source');
           await checkpoint(container, files, false);
         }

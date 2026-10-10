@@ -14,12 +14,13 @@ import { localCodexConfigured } from '../lib/build-codex';
 import { BUILD_AI_MARKUP_PERCENT, buildTokenPrices } from '../lib/build-pricing';
 import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
-import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, type BuildImageRow } from '../lib/build-images';
+import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, buildImageEntries, serveBuildImage, type BuildImageRow } from '../lib/build-images';
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
-import { BUILD_GIT_IGNORE, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
+import { buildGitEntries, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
+import { buildSourceEntries, readBuildSource, storeBuildSource, readBuildText, serveBuildFile, type BuildFileInfo } from '../lib/build-storage';
 
 export function buildConfigured(env: Env) {
-  return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
+  return env.BUILD_ENABLED === 'true' && Boolean(env.BUCKET && (localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
 }
 function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = [], images: Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>[] = [], costs: Record<string, number> = {}, operations: OperationRow[] = []) {
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;
@@ -136,14 +137,14 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
   const diagnostic = /^\/build\/apps\/([a-f0-9-]{36})\/turns\/([a-f0-9-]{36})\/diagnostics$/.exec(url.pathname);
-  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
+  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|files|file|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]
     || ['images', 'diagnostics'].includes(match[3]) && !match[4] || match[4] && (!['images', 'diagnostics', 'versions'].includes(match[3]) || !validExecutionId(match[4]))) return authJson({ error: 'not_found' }, 404, cors);
-  const allowed = match[1] === 'config' || ['source', 'export', 'events', 'images', 'diagnostics', 'versions', 'repository'].includes(match[3]) ? ['GET']
+  const allowed = match[1] === 'config' || ['source', 'files', 'file', 'export', 'events', 'images', 'diagnostics', 'versions', 'repository'].includes(match[3]) ? ['GET']
     : match[3] ? ['POST'] : match[2] ? ['GET', 'PATCH', 'DELETE'] : ['GET', 'POST'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: `${allowed.join(', ')}, OPTIONS` });
   if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
-  if (url.search) return authJson({ error: 'invalid_request' }, 400, cors);
+  if (url.search && !['files', 'file'].includes(match[3])) return authJson({ error: 'invalid_request' }, 400, cors);
   try {
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
@@ -160,22 +161,32 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     if (id) {
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
+      const owner = { userId: user.id, appId: id };
+      const fileInfo = ({ path, size, type }: BuildFileInfo) => ({ path, size, type });
+      if (['files', 'file'].includes(match[3])) {
+        const versionId = url.searchParams.get('versionId'), path = url.searchParams.get('path');
+        const allowedQuery = match[3] === 'files' ? ['versionId'] : ['versionId', 'path'];
+        if ([...url.searchParams.keys()].some(key => !allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1)
+          || versionId !== null && !validExecutionId(versionId) || match[3] === 'file' && (!path || path.length > 160)) return authJson({ error: 'invalid_request' }, 400, cors);
+        const version = versionId ? await buildGitVersion(env, id, versionId) : null;
+        if (versionId && !version) return authJson({ error: 'version_not_found' }, 404, cors);
+        const entries = version ? await buildGitEntries(env, owner, version) : [...await buildSourceEntries(env, owner, app.source_json), ...await buildImageEntries(env, owner)];
+        if (match[3] === 'files') return authJson({ revision: app.revision, version: version ? publicGitVersion(version) : null, files: entries.map(fileInfo) }, 200, cors);
+        const entry = entries.find(entry => entry.path === path);
+        if (!entry) return authJson({ error: 'file_not_found' }, 404, cors);
+        if (entry.type === 'image') return await serveBuildImage(env, owner, entry.path.split('/').at(-1)!.replace(/\.jpg$/, ''), cors);
+        return await serveBuildFile(env, owner, entry, cors);
+      }
       if (match[3] === 'versions') {
         if (match[4]) {
           const version = await buildGitVersion(env, id, match[4]);
           if (!version) return authJson({ error: 'version_not_found' }, 404, cors);
           const parent = version.parent_version_id ? await buildGitVersion(env, id, version.parent_version_id) : null;
-          const files = JSON.parse(version.source_json) as Record<string, string>, before = JSON.parse(parent?.source_json ?? '{}') as Record<string, string>;
-          const changes: { path: string; type: string; before: string | null; after: string | null }[] = [...new Set([...Object.keys(before), ...Object.keys(files)])].sort().filter(path => before[path] !== files[path])
-            .map(path => ({ path, type: !Object.hasOwn(before, path) ? 'added' : !Object.hasOwn(files, path) ? 'deleted' : 'modified', before: before[path] ?? null, after: files[path] ?? null }));
-          if ((parent?.lockfile ?? null) !== version.lockfile) changes.push({ path: 'package-lock.json', type: !parent?.lockfile ? 'added' : !version.lockfile ? 'deleted' : 'modified', before: parent?.lockfile ?? null, after: version.lockfile });
-          const oldAssets = JSON.parse(parent?.assets_json ?? '[]') as string[], assets = JSON.parse(version.assets_json) as string[];
-          for (const imageId of [...new Set([...oldAssets, ...assets])]) if (oldAssets.includes(imageId) !== assets.includes(imageId)) changes.push({ path: `public${buildImagePath(imageId)}`, type: assets.includes(imageId) ? 'added' : 'deleted', before: null, after: null });
-          files['.gitignore'] = BUILD_GIT_IGNORE;
-          if (version.lockfile !== null) files['package-lock.json'] = version.lockfile;
-          if (!parent) changes.push({ path: '.gitignore', type: 'added', before: null, after: BUILD_GIT_IGNORE });
-          return authJson({ version: publicGitVersion(version), files,
-            assets: assets.map(imageId => ({ path: `public${buildImagePath(imageId)}`, imageId })), changes }, 200, cors);
+          const files = await buildGitEntries(env, owner, version), before = parent ? await buildGitEntries(env, owner, parent) : [];
+          const old = new Map(before.map(file => [file.path, file])), next = new Map(files.map(file => [file.path, file]));
+          const changes = [...new Set([...old.keys(), ...next.keys()])].sort().filter(path => old.get(path)?.sha256 !== next.get(path)?.sha256)
+            .map(path => ({ path, type: !old.has(path) ? 'added' : !next.has(path) ? 'deleted' : 'modified', fileType: (next.get(path) ?? old.get(path))!.type }));
+          return authJson({ version: publicGitVersion(version), files: files.map(fileInfo), changes }, 200, cors);
         }
         const { results } = await env.DB.prepare('SELECT * FROM build_git_versions WHERE app_id = ? ORDER BY rowid DESC LIMIT 100').bind(id).all<BuildGitVersion>();
         return authJson({ versions: results.map(publicGitVersion), versionId: app.git_version_id ?? null, verifiedVersionId: app.verified_git_version_id ?? null }, 200, cors);
@@ -194,23 +205,18 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
           .bind(turn.id, user.id).all();
         return authJson({ schemaVersion: 1, turnId: turn.id, status: turn.status, error: turn.error, log: turn.log, failureOperationId: turn.failure_operation_id ?? null,
           errorExplanation: operations.find(op => op.operation_id === turn.failure_operation_id) ? operationExplanation(operations.find(op => op.operation_id === turn.failure_operation_id)!) : null,
-          operations: operations.map(({ evidence_json, result_json, source_json, ...op }) => ({ ...op, explanation: operationExplanation({ ...op, evidence_json, result_json, source_json }), evidence: JSON.parse(evidence_json),
-            result: result_json ? JSON.parse(result_json) : null, source: source_json ? JSON.parse(source_json) : null })), billing }, 200, cors);
+          operations: await Promise.all(operations.map(async ({ evidence_json, result_json, source_json, ...op }) => ({ ...op, explanation: operationExplanation({ ...op, evidence_json, result_json, source_json }), evidence: JSON.parse(evidence_json),
+            result: result_json ? JSON.parse(await readBuildText(env, owner, result_json)) : null, source: source_json ? await readBuildSource(env, owner, source_json) : null }))), billing }, 200, cors);
       }
       if (match[3] === 'images') {
-        const image = await env.DB.prepare('SELECT data FROM build_images WHERE id = ? AND app_id = ?')
-          .bind(match[4], id).first<{ data: string }>();
-        if (!image) return authJson({ error: 'image_not_found' }, 404, cors);
-        const bytes = buildImageBytes(image.data);
-        return new Response(bytes, { headers: { ...cors, 'Content-Type': 'image/jpeg',
-          'Content-Length': String(bytes.length), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+        return await serveBuildImage(env, owner, match[4], cors);
       }
       if (request.method === 'GET') {
         if (match[3] === 'events') return buildAppStream(request, () => detail(env, user.id, id), cors);
-        if (match[3] === 'source') return authJson({ revision: app.revision, files: JSON.parse(app.source_json) }, 200, cors);
+        if (match[3] === 'source') return authJson({ revision: app.revision, files: await readBuildSource(env, owner, app.source_json) }, 200, cors);
         if (match[3] === 'export') {
           const assets = Object.fromEntries((await savedBuildImages(env, id)).map(image => [`public${buildImagePath(image.id)}`, buildImageBytes(image.data)]));
-          return new Response(buildSourceZip(JSON.parse(app.source_json), assets), { headers: { ...cors,
+          return new Response(buildSourceZip(await readBuildSource(env, owner, app.source_json), assets), { headers: { ...cors,
           'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="mainbrella-app.zip"',
           'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
         }
@@ -281,7 +287,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     }
     const statements = !id ? [env.DB.prepare(`INSERT INTO build_apps
       (id, user_id, create_key, initial_prompt, name, source_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(appId, user.id, key, prompt, buildName(prompt), JSON.stringify(buildStarter), now, now)] : [];
+      .bind(appId, user.id, key, prompt, buildName(prompt), await storeBuildSource(env, { appId, userId: user.id }, buildStarter), now, now)] : [];
     statements.push(turnInsert(env, appId, user.id, turnId, key!, prompt, mode, 'revision' in data ? data.revision : 0, now, options.model, options.effort, restoreId));
     statements.push(env.DB.prepare('UPDATE build_apps SET active_turn_id = ?, preview_json = NULL, updated_at = ? WHERE id = ? AND user_id = ?').bind(turnId, now, appId, user.id));
     await env.DB.batch(statements);

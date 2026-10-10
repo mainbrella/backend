@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
 import { readBuildInference, buildInference, buildFirstVersionPrompt, type BuildToolCall } from '../lib/build-ai';
@@ -17,6 +19,7 @@ import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/build-images';
 import { proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation, retainBuildSource } from '../lib/build-journal';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
+import { readBuildSource, storeBuildSource, buildSourceEntries } from '../lib/build-storage';
 
 const event = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\r\n\r\n`;
 const delta = (value: unknown) => event({ choices: [{ delta: value, finish_reason: null }] });
@@ -376,6 +379,10 @@ test('original images are generated once, streamed as metadata, ownership-checke
   const image = await generateBuildImage(f.env, f.params, 'tool-0-0', 'Forest canopy', 'An original moody forest with ancient trees.');
   assert.deepEqual(await generateBuildImage(f.env, f.params, 'tool-0-0', 'Forest canopy', 'An original moody forest with ancient trees.'), image);
   assert.equal(calls, 1, 'replayed workflow steps reuse the stored asset');
+  const storedImage = f.sqlite.prepare('SELECT data FROM build_images WHERE id = ?').get(image.id)!.data as string;
+  const imageRef = JSON.parse(storedImage);
+  assert.ok(imageRef.$r2); assert.ok(!storedImage.includes(jpegBase64));
+  assert.deepEqual(f.storage.objects.get(imageRef.$r2), jpeg, 'D1 holds a reference to the original R2 bytes');
   const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
   assert.deepEqual(data.app.turns[0].images, [image]);
   assert.ok(!JSON.stringify(data).includes(jpegBase64), 'image bytes never bloat SSE snapshots');
@@ -392,6 +399,56 @@ test('original images are generated once, streamed as metadata, ownership-checke
   assert.deepEqual(exported.slice(30 + nameLength, 30 + nameLength + jpeg.length), jpeg);
   f.sqlite.prepare('DELETE FROM build_apps WHERE id = ?').run(f.appId);
   assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_images').get() as any).count, 0);
+});
+
+test('file listing reads only the manifest and opening a file streams one R2 object, including files larger than a D1 row', async t => {
+  const f = await fixture(t), large = 'a'.repeat(3 * 1024 * 1024), small = '<script>private source</script>';
+  const stored = await storeBuildSource(f.env, f.params, { 'src/large.txt': large, 'src/small.ts': small });
+  f.sqlite.prepare('UPDATE build_apps SET source_json = ? WHERE id = ?').run(stored, f.appId);
+  assert.ok(stored.length < 512, 'the database record is independent of file size');
+  const manifestKey = JSON.parse(stored).$r2;
+  f.storage.reads.length = 0;
+  const listed = await (await handleBuildRequest(request(f.appId, SESSION_ONE, '/files'), f.env)).json() as any;
+  assert.deepEqual(listed.files, [{ path: 'src/large.txt', size: large.length, type: 'text' }, { path: 'src/small.ts', size: small.length, type: 'text' }]);
+  assert.deepEqual(f.storage.reads.map(read => read.key), [manifestKey]);
+  const response = await handleBuildRequest(request(f.appId, SESSION_ONE, '/file?path=src%2Flarge.txt'), f.env);
+  assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(await response.text(), large);
+  const entries = JSON.parse(new TextDecoder().decode(f.storage.objects.get(manifestKey)!)).files;
+  assert.deepEqual(f.storage.reads.map(read => read.key), [manifestKey, manifestKey, entries[0].$r2]);
+  assert.equal(f.storage.reads.at(-1)!.buffered, false); assert.equal(f.storage.reads.at(-1)!.streamed, true);
+  for (const suffix of ['/files', '/file?path=src%2Fsmall.ts']) {
+    assert.equal((await handleBuildRequest(request(f.appId, SESSION_TWO, suffix), f.env)).status, 404);
+    assert.equal((await handleBuildRequest(request(f.appId, 'expired', suffix), f.env)).status, 401);
+  }
+  for (const suffix of ['/file?path=..%2Fsecret', '/file?path=missing.ts'])
+    assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, suffix), f.env)).status, 404);
+  for (const suffix of ['/file', '/file?path=src%2Fsmall.ts&path=src%2Flarge.txt', '/files?key=other-object', '/files?versionId=invalid'])
+    assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, suffix), f.env)).status, 400);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, `/files?versionId=${crypto.randomUUID()}`), f.env)).status, 404);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, `/file?path=src%2Fsmall.ts&versionId=${crypto.randomUUID()}`), f.env)).status, 404);
+  f.storage.objects.delete(entries[0].$r2);
+  assert.equal((await handleBuildRequest(request(f.appId, SESSION_ONE, '/file?path=src%2Flarge.txt'), f.env)).status, 503);
+});
+
+test('R2 source objects deduplicate across snapshots, enforce owner scope and never fall back to inline D1 storage', async t => {
+  const f = await fixture(t), files = { 'src/App.tsx': 'original source', 'src/style.css': 'body {}' };
+  const first = await storeBuildSource(f.env, f.params, files), count = f.storage.objects.size;
+  assert.equal(await storeBuildSource(f.env, f.params, files), first);
+  assert.equal(f.storage.objects.size, count);
+  const next = await storeBuildSource(f.env, f.params, { ...files, 'src/App.tsx': 'changed source' });
+  assert.equal(f.storage.objects.size, count + 2, 'one changed file and one manifest; unchanged file bytes are shared');
+  assert.equal((await readBuildSource(f.env, f.params, first))['src/App.tsx'], 'original source');
+  assert.equal((await readBuildSource(f.env, f.params, next))['src/App.tsx'], 'changed source');
+  await assert.rejects(readBuildSource(f.env, { ...f.params, userId: USER_TWO }, first), /build_source_unavailable/);
+  const entry = (await buildSourceEntries(f.env, f.params, next))[0];
+  f.storage.objects.set(entry.$r2, new TextEncoder().encode('corrupt source'));
+  await assert.rejects(readBuildSource(f.env, f.params, next), /build_source_unavailable/);
+  Reflect.deleteProperty(f.env, 'BUCKET');
+  assert.equal(buildConfigured(f.env), false);
+  await assert.rejects(storeBuildSource(f.env, f.params, files), /build_source_unavailable/);
 });
 
 test('image generation rejects invalid output, enforces asset budgets and checks active ownership', async t => {
@@ -517,7 +574,11 @@ test('public build snapshots show draft progress without file contents or privat
   const completed = after.app.turns[0].activity.find((item: any) => item.type === 'tool');
   assert.equal(completed.text, 'Write src/App.tsx');
   assert.equal(completed.status, 'succeeded');
-  assert.equal(JSON.parse((f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId) as { source_json: string }).source_json)['src/App.tsx'], source);
+  const saved = (f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId) as { source_json: string }).source_json;
+  assert.equal((await readBuildSource(f.env, f.params, saved))['src/App.tsx'], source);
+  assert.ok(!saved.includes('PRIVATE_SOURCE_BODY'));
+  for (const row of f.sqlite.prepare('SELECT source_json, result_json, evidence_json FROM build_operations WHERE turn_id = ?').all(f.turnId))
+    assert.ok(!JSON.stringify(row).includes('PRIVATE_SOURCE_BODY'), 'file bodies and provider tool arguments live in R2');
 });
 
 test('an interrupted partial write stays a draft and never saves its file contents', async t => {
@@ -620,6 +681,9 @@ test('local Codex runs through the existing source, command, compiler repair and
     return statement;
   } } as D1Database;
   const commands: string[] = [], guestFiles = new Map<string, string>();
+  const disk = mkdtempSync(join(tmpdir(), 'mainbrella-codex-git-'));
+  t.after(() => rmSync(disk, { recursive: true, force: true }));
+  const localPath = (path: string) => join(disk, path.replace(/^\/workspace\//, ''));
   const guestImages = new Map<string, Uint8Array>();
   const executions = new Map<string, { id: string; status: string; stdout: string; stderr: string }>();
   let compiles = 0;
@@ -627,15 +691,29 @@ test('local Codex runs through the existing source, command, compiler repair and
     const url = new URL(request.url);
     if (url.pathname === '/files' && request.method === 'PUT') {
       const path = url.searchParams.get('path')!;
-      if (path.endsWith('.jpg')) guestImages.set(path, new Uint8Array(await request.arrayBuffer()));
-      else guestFiles.set(path, await request.text());
+      let bytes = new Uint8Array(await request.arrayBuffer());
+      if (path.endsWith('.jpg')) guestImages.set(path, bytes);
+      else guestFiles.set(path, new TextDecoder().decode(bytes));
+      if (path.endsWith('/mainbrella-git/input.json')) {
+        const input = JSON.parse(new TextDecoder().decode(bytes)); input.worktree = localPath(input.worktree);
+        bytes = new TextEncoder().encode(JSON.stringify(input));
+      }
+      mkdirSync(dirname(localPath(path)), { recursive: true }); writeFileSync(localPath(path), bytes);
       return Response.json({ saved: true });
+    }
+    if (url.pathname === '/files' && request.method === 'GET') {
+      try { return new Response(new Uint8Array(readFileSync(localPath(url.searchParams.get('path')!)))); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Response(null, { status: 404 }); throw error; }
     }
     if (url.pathname === '/executions' && request.method === 'POST') {
       const { command } = await request.json() as { command: string }; commands.push(command);
       const failed = command.includes('tsc --noEmit') && ++compiles <= 2;
       const id = `execution-${commands.length}`;
       const result = { id, status: failed ? 'failed' : 'succeeded', stdout: '', stderr: failed ? 'Compiler error: fix src/App.tsx' : '' };
+      if (command.includes('/workspace/mainbrella-git')) {
+        const native = spawnSync('bash', ['-c', command.replaceAll('/workspace', disk)], { cwd: disk, encoding: 'utf8' });
+        result.status = native.status === 0 ? 'succeeded' : 'failed'; result.stdout = native.stdout; result.stderr = native.stderr;
+      }
       executions.set(id, result); return Response.json(result);
     }
     if (url.pathname.startsWith('/executions/')) return Response.json(executions.get(url.pathname.split('/').at(-1)!));
@@ -662,7 +740,7 @@ test('local Codex runs through the existing source, command, compiler repair and
   assert.equal(source.files['src/App.tsx'], 'repaired'); assert.equal(source.files['src/old.ts'], undefined);
   assert.equal(guestFiles.get('/workspace/app/src/App.tsx'), 'repaired');
   const revision = f.sqlite.prepare('SELECT source_json FROM build_revisions WHERE app_id = ?').get(f.appId) as { source_json: string };
-  assert.equal(JSON.parse(revision.source_json)['src/App.tsx'], 'repaired');
+  assert.equal((await readBuildSource(f.env, f.params, revision.source_json))['src/App.tsx'], 'repaired');
   assert.ok(commands.some(command => command.includes('npm install --no-audit')));
   assert.ok(commands.some(command => command.includes('mainbrella-build-preview')));
 });

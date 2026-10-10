@@ -2,8 +2,10 @@ import { readFileSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import { ContainerAccountController } from '../../containers/container-account-core.js';
 import { appendAccountingEvent } from '../lib/accounting-ledger';
+import { buildStorageFixture } from './build-storage-test-helpers';
 
 export async function buildBillingFixture(env: Env, sqlite: DatabaseSync, userId: string) {
+  const storage = buildStorageFixture(env);
   for (const name of ['020_accounting_ledger.sql', '026_build_ai_billing.sql'])
     sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   const stored = new Map<string, unknown>(), billingCalls: ReturnType<Request['clone']>[] = [];
@@ -30,5 +32,5 @@ export async function buildBillingFixture(env: Env, sqlite: DatabaseSync, userId
       return original.fetch(request);
     } };
   }) as typeof env.CONTAINER_ACCOUNT.get;
-  return { controller, stored, billingCalls };
+  return { controller, stored, billingCalls, storage };
 }

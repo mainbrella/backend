@@ -2,6 +2,7 @@ import { BuildError, ownedBuildApp, type BuildParams } from './build-contract';
 import { meteredBuildInference } from './build-billing';
 import { BUILD_IMAGE_COST_MICRO_USD, BUILD_IMAGE_STEPS, buildImageCostMicroUsd } from './build-pricing';
 import { proposeBuildOperation, startBuildOperation, recordBuildOperation, buildFailure } from './build-journal';
+import { buildObjectRef, storeBuildObject, readBuildObject, serveBuildFile, buildContentHash, buildStoragePrefix, type BuildStorageOwner, type BuildStoredFile } from './build-storage';
 
 export const BUILD_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
 export const BUILD_IMAGE_MAX_BYTES = 1024 * 1024;
@@ -12,7 +13,7 @@ export const publicBuildImage = (image: Omit<BuildImageRow, 'data' | 'prompt' | 
   ({ id: image.id, toolId: image.tool_id, label: image.label, path: buildImagePath(image.id) });
 
 export function buildImageBytes(data: string): Uint8Array<ArrayBuffer> {
-  // Keep each D1 row comfortably below its 2 MiB limit. Only JPEGs are served.
+  // Validate provider output and legacy inline records. Only JPEGs are served.
   if (!data || data.length > Math.ceil(BUILD_IMAGE_MAX_BYTES / 3) * 4) throw new BuildError('build_image_invalid');
   let bytes: Uint8Array<ArrayBuffer>;
   try { bytes = Uint8Array.from(atob(data), char => char.charCodeAt(0)); }
@@ -81,10 +82,11 @@ export async function generateBuildImage(env: Env, params: BuildParams, toolId: 
   if (typeof result.image !== 'string') throw new BuildError('build_image_invalid');
   buildImageBytes(result.image);
   const id = crypto.randomUUID();
+  const data = JSON.stringify(await storeBuildObject(env, params, buildImageBytes(result.image), 'image/jpeg'));
   // The active-turn guard also prevents late inference from reviving a stopped build.
   const saved = await env.DB.prepare(`INSERT INTO build_images (id, app_id, turn_id, tool_id, label, prompt, data)
     SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM build_apps WHERE id = ? AND user_id = ? AND active_turn_id = ?)`)
-    .bind(id, params.appId, params.turnId, toolId, label, prompt, result.image, params.appId, params.userId, params.turnId).run();
+    .bind(id, params.appId, params.turnId, toolId, label, prompt, data, params.appId, params.userId, params.turnId).run();
   if (!saved.meta.changes) throw new BuildError('build_interrupted');
   const image = { id, toolId, label, path: buildImagePath(id) };
   await recordBuildOperation(env, ref, { status: 'succeeded', finished: true, result: { ok: true, value: image } });
@@ -99,5 +101,44 @@ export async function generateBuildImage(env: Env, params: BuildParams, toolId: 
 
 export async function savedBuildImages(env: Env, appId: string) {
   const { results } = await env.DB.prepare('SELECT * FROM build_images WHERE app_id = ? ORDER BY rowid').bind(appId).all<BuildImageRow>();
+  if (!results.length) return results;
+  const app = await env.DB.prepare('SELECT user_id FROM build_apps WHERE id = ?').bind(appId).first<{ user_id: string }>();
+  if (!app) throw new BuildError('app_not_found', 404);
+  for (const image of results) {
+    let ref = null;
+    try { ref = buildObjectRef(JSON.parse(image.data)); } catch { /* Legacy base64. */ }
+    if (ref) image.data = buildImageBase64(await readBuildObject(env, { appId, userId: app.user_id }, ref));
+  }
   return results;
+}
+export function buildImageBase64(bytes: Uint8Array) {
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += 32768) chunks.push(String.fromCharCode(...bytes.subarray(i, i + 32768)));
+  return btoa(chunks.join(''));
+}
+export async function buildImageEntries(env: Env, owner: BuildStorageOwner, ids?: string[]): Promise<BuildStoredFile[]> {
+  const { results } = await env.DB.prepare('SELECT id, data FROM build_images WHERE app_id = ?').bind(owner.appId).all<{ id: string; data: string }>();
+  const entries: BuildStoredFile[] = [];
+  for (const image of results) {
+    if (ids && !ids.includes(image.id)) continue;
+    let ref = null;
+    try { ref = buildObjectRef(JSON.parse(image.data)); } catch { /* Legacy base64. */ }
+    if (!ref) {
+      const bytes = buildImageBytes(image.data), sha256 = await buildContentHash(bytes);
+      ref = { $r2: `${buildStoragePrefix(owner)}objects/${sha256}`, size: bytes.length, sha256 };
+    }
+    entries.push({ path: `public${buildImagePath(image.id)}`, type: 'image', ...ref });
+  }
+  if (ids && entries.length !== new Set(ids).size) throw new BuildError('build_source_unavailable');
+  return entries;
+}
+export async function serveBuildImage(env: Env, owner: BuildStorageOwner, imageId: string, cors: HeadersInit) {
+  const image = await env.DB.prepare('SELECT data FROM build_images WHERE id = ? AND app_id = ?').bind(imageId, owner.appId).first<{ data: string }>();
+  if (!image) throw new BuildError('image_not_found', 404);
+  let ref = null;
+  try { ref = buildObjectRef(JSON.parse(image.data)); } catch { /* Legacy base64. */ }
+  if (ref) return serveBuildFile(env, owner, { ...ref, path: `public${buildImagePath(imageId)}`, type: 'image' }, cors);
+  const bytes = buildImageBytes(image.data);
+  return new Response(bytes, { headers: { ...cors, 'Content-Type': 'image/jpeg', 'Content-Length': String(bytes.length),
+    'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 }

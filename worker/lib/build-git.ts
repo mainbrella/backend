@@ -1,6 +1,7 @@
 import { BuildError, ownedBuildApp, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
-import { buildImageBytes, buildImagePath, savedBuildImages } from './build-images';
+import { buildImageBytes, buildImagePath, savedBuildImages, buildImageEntries } from './build-images';
 import { buildGitProgram } from './build-git-program';
+import { storeBuildSource, storeBuildText, storeBuildObject, buildSourceEntries, buildTextEntry, buildObjectRef, type BuildStorageOwner, type BuildStoredFile } from './build-storage';
 
 export const BUILD_GIT_ROOT = '/workspace/mainbrella-git';
 export const BUILD_GIT_IGNORE = 'node_modules/\ndist/\n.env\n.env.*\n';
@@ -54,7 +55,7 @@ export async function hydrateBuildGit(env: Env, params: BuildParams, runtime: Bu
   if (result.status !== 'succeeded') throw new BuildError('build_git_unavailable', 503, result.stderr);
 }
 export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime: BuildGitRuntime, turn: BuildTurnRow, files: BuildFiles, verified: boolean) {
-  if (!env.BUCKET) return null; // Older installations keep their existing D1 source persistence.
+  if (!env.BUCKET) throw new BuildError('build_git_unavailable');
   validateBuildFiles(files);
   const existing = await buildGitVersion(env, params.appId, params.turnId);
   if (existing) return existing;
@@ -93,6 +94,10 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
     // A Workflow step retries this callback, not the surrounding function. D1
     // may have committed before its response was lost, so reconcile on every attempt.
     if (await buildGitVersion(env, params.appId, params.turnId)) return;
+    const source = await storeBuildSource(env, params, files);
+    const storedLockfile = lockfile === null ? null : await storeBuildText(env, params, lockfile);
+    for (const [path, content] of Object.entries(snapshot)) if (path === '.gitignore' || content instanceof Uint8Array)
+      await storeBuildObject(env, params, typeof content === 'string' ? new TextEncoder().encode(content) : content, path === '.gitignore' ? 'text/plain; charset=utf-8' : 'image/jpeg');
     const parts: Part[] = [];
     for (const [index, part] of output.parts.entries()) {
       const response = await runtime.read(`${BUILD_GIT_ROOT}/output/${index}`);
@@ -111,12 +116,22 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO build_git_versions (id, app_id, parent_version_id, commit_id, bundle_key, source_json, lockfile, assets_json, message, verified, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(params.turnId, params.appId, app.git_version_id ?? null, output.commitId, bundleKey,
-        JSON.stringify(files), lockfile, JSON.stringify(assets.map(image => image.id)), message, verified ? 1 : 0, turn.created_at),
+        source, storedLockfile, JSON.stringify(assets.map(image => image.id)), message, verified ? 1 : 0, turn.created_at),
       env.DB.prepare('UPDATE build_apps SET git_version_id = ? WHERE id = ? AND user_id = ? AND active_turn_id = ? AND git_version_id IS ?')
         .bind(params.turnId, params.appId, params.userId, params.turnId, app.git_version_id ?? null),
     ]);
   });
   return (await buildGitVersion(env, params.appId, params.turnId))!;
+}
+export async function buildGitEntries(env: Env, owner: BuildStorageOwner, version: BuildGitVersion): Promise<BuildStoredFile[]> {
+  const entries = await buildSourceEntries(env, owner, version.source_json);
+  const ignore = await buildTextEntry(owner, '.gitignore', BUILD_GIT_IGNORE);
+  // New snapshots persist this platform-authored file as an R2 object too.
+  if (buildObjectRef(JSON.parse(version.source_json))) delete ignore.inline;
+  entries.push(ignore);
+  if (version.lockfile !== null) entries.push(await buildTextEntry(owner, 'package-lock.json', version.lockfile));
+  const images = await buildImageEntries(env, owner, JSON.parse(version.assets_json));
+  return [...entries.filter(entry => !images.some(image => image.path === entry.path)), ...images].sort((a, b) => a.path.localeCompare(b.path));
 }
 export async function exportBuildGit(env: Env, userId: string, appId: string, version: BuildGitVersion, headers: HeadersInit) {
   const bundle = await readBundle(env, userId, appId, version);

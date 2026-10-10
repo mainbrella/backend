@@ -1,4 +1,5 @@
 import { BuildError, validateBuildFiles, type BuildParams, type BuildFiles } from './build-contract';
+import { storeBuildSource, storeBuildText, canonicalBuildSource } from './build-storage';
 
 export type OperationStatus = 'proposed' | 'skipped' | 'blocked' | 'succeeded' | 'failed' | 'unknown';
 export type OperationKind = 'text' | 'image' | 'tool' | 'command' | 'source' | 'billing' | 'cleanup';
@@ -66,13 +67,17 @@ export async function recordBuildOperation(env: Env, ref: OperationRef, update: 
   const entries = Object.entries(evidence);
   // json_patch removes nulls. json_set keeps missing provider values explicitly unknown.
   const merge = entries.length ? `json_set(evidence_json,${entries.map(() => '?,json(?)').join(',')})` : 'evidence_json';
+  const result = update.result === undefined ? null : boundedJSON(update.result, 512 * 1024);
+  // Failure summaries stay in D1 for routine status reads. Successful provider
+  // results can contain complete write_file arguments, so retain those in R2.
+  const storedResult = result && (update.result as { ok?: boolean })?.ok === true ? await storeBuildText(env, ref.params, result) : result;
   const saved = await durable(() => env.DB.prepare(`UPDATE build_operations SET status = COALESCE(?,status), updated_at = ?,
     started_at = CASE WHEN ? THEN COALESCE(started_at,?) ELSE started_at END,
     finished_at = CASE WHEN ? THEN COALESCE(finished_at,?) ELSE finished_at END,
     dispatch_attempted = COALESCE(?,dispatch_attempted), evidence_json = ${merge}, result_json = COALESCE(?,result_json)
     WHERE turn_id = ? AND operation_id = ? AND attempt_id = ?`)
     .bind(update.status ?? null, Date.now(), update.started ? 1 : 0, Date.now(), update.finished ? 1 : 0, Date.now(), update.dispatchAttempted === undefined ? null : Number(update.dispatchAttempted),
-      ...entries.flatMap(([name, value]) => [`$.${name}`, JSON.stringify(value)]), update.result === undefined ? null : boundedJSON(update.result, 512 * 1024), ...key(ref)).run());
+      ...entries.flatMap(([name, value]) => [`$.${name}`, JSON.stringify(value)]), storedResult, ...key(ref)).run());
   if (!saved.meta.changes) throw new BuildError('build_journal_unavailable');
 }
 export async function checkpointBuildOperation(env: Env, ref: OperationRef, evidence: Record<string, unknown>) {
@@ -81,8 +86,8 @@ export async function checkpointBuildOperation(env: Env, ref: OperationRef, evid
 }
 export async function retainBuildSource(env: Env, ref: OperationRef, files: BuildFiles, changedPaths: string[] = []) {
   validateBuildFiles(files);
-  const source = JSON.stringify(Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))));
-  const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const text = canonicalBuildSource(files), source = await storeBuildSource(env, ref.params, files);
+  const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
   const saved = await durable(() => env.DB.prepare(`UPDATE build_operations SET source_json = ?,
     evidence_json = json_set(evidence_json,'$.sourceDigest',?,'$.changedPaths',json(?))
     WHERE turn_id = ? AND operation_id = ? AND attempt_id = ? AND source_json IS NULL`)
@@ -91,6 +96,7 @@ export async function retainBuildSource(env: Env, ref: OperationRef, files: Buil
     const row = await readBuildOperation(env, ref);
     if (row?.source_json !== source) throw new BuildError('build_source_snapshot_conflict');
   }
+  return source;
 }
 export async function buildOperationTimeline(env: Env, turnId: string) {
   const { results } = await env.DB.prepare('SELECT * FROM build_operations WHERE turn_id = ? ORDER BY created_at, rowid').bind(turnId).all<OperationRow>();

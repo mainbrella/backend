@@ -9,6 +9,7 @@ const endpointMethods: Record<string, string[]> = {
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
+  '/build/apps/{appId}/files': ['get'], '/build/apps/{appId}/file': ['get'],
   '/build/apps/{appId}/images/{imageId}': ['get'],
   '/build/apps/{appId}/turns/{turnId}/diagnostics': ['get'],
   '/build/apps/{appId}/versions': ['get'], '/build/apps/{appId}/versions/{versionId}': ['get'],
@@ -129,16 +130,24 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.match(update.description, /project owned by the signed-in user/);
 });
 
-test('Build repository browsing documents complete text files and authenticated image references', async () => {
-  const { paths } = await document();
+test('Build repository browsing documents manifests and authenticated individual R2 file streams', async () => {
+  const { paths, components } = await document();
   const operation = paths['/build/apps/{appId}/versions/{versionId}'].get;
   assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
   assert.match(operation.description, /without extracting the R2 bundle/);
   const schema = operation.responses[200].content['application/json'].schema;
-  assert.ok(schema.required.includes('assets'));
-  assert.deepEqual(schema.properties.assets.items.required, ['path', 'imageId']);
-  assert.equal(schema.properties.assets.items.properties.imageId.format, 'uuid');
-  assert.equal(schema.properties.files.additionalProperties.type, 'string');
+  assert.equal(schema.properties.files.type, 'array');
+  assert.equal(schema.properties.files.items.$ref, '#/components/schemas/BuildFile');
+  assert.deepEqual(components.schemas.BuildFile.required, ['path', 'size', 'type']);
+  assert.ok(!schema.properties.changes.items.properties.before);
+  for (const path of ['/build/apps/{appId}/files', '/build/apps/{appId}/file']) {
+    assert.deepEqual(paths[path].get.security, [{ cookieAuth: [] }]);
+    assert.equal(paths[path].get.parameters.find((param: any) => param.name === 'versionId').schema.format, 'uuid');
+  }
+  const stream = paths['/build/apps/{appId}/file'].get;
+  assert.equal(stream.parameters.find((param: any) => param.name === 'path').required, true);
+  assert.ok(stream.responses[200].content['text/plain']);
+  assert.ok(stream.responses[200].content['image/jpeg']);
 });
 
 test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {

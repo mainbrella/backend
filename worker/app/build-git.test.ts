@@ -12,6 +12,7 @@ import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
 import { BUILD_GIT_ROOT, buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
 import { buildImagePath } from '../lib/build-images';
+import { readBuildSource, readBuildText } from '../lib/build-storage';
 
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t);
@@ -35,7 +36,7 @@ async function fixture(t: TestContext) {
   const bucket = {
     async get(key: string) {
       const bytes = objects.get(key);
-      return bytes ? { size: bytes.byteLength, arrayBuffer: async () => bytes.slice().buffer,
+      return bytes ? { size: bytes.byteLength, get body() { return new Response(bytes.slice()).body; }, arrayBuffer: async () => bytes.slice().buffer,
         json: async () => JSON.parse(new TextDecoder().decode(bytes)) } : null;
     },
     async put(key: string, value: string | ArrayBuffer, options?: R2PutOptions) {
@@ -192,7 +193,7 @@ test('R2 versions export valid Git history with lockfiles and referenced images,
   await f.runtime.write('/workspace/app/.env', 'PRIVATE_SECRET=ignored');
   await f.runtime.write('/workspace/app/untracked.txt', 'not authored source');
   const version = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), files, true);
-  assert.equal(version!.verified, 1); assert.equal(version!.lockfile, lockfile);
+  assert.equal(version!.verified, 1); assert.equal(await readBuildText(f.env, f.params, version!.lockfile!), lockfile);
   assert.deepEqual(JSON.parse(version!.assets_json), [imageId]);
   assert.equal(f.app().git_version_id, version!.id);
   const clone = await f.cloneRepository();
@@ -202,11 +203,14 @@ test('R2 versions export valid Git history with lockfiles and referenced images,
   assert.deepEqual(new Uint8Array(readFileSync(join(clone, `public${buildImagePath(imageId)}`))), jpeg);
   const paths = git(['ls-tree', '-r', '--name-only', 'HEAD'], clone).split('\n');
   const detail = await (await handleBuildRequest(request(f.params.appId, `/versions/${version!.id}`), f.env)).json() as {
-    files: Record<string, string>; assets: { path: string; imageId: string }[];
+    files: { path: string; size: number; type: string }[];
   };
-  assert.deepEqual([...Object.keys(detail.files), ...detail.assets.map(asset => asset.path)].sort(), paths.sort());
-  assert.equal(detail.files['package-lock.json'], lockfile);
-  assert.deepEqual(detail.assets, [{ path: `public${buildImagePath(imageId)}`, imageId }]);
+  assert.deepEqual(detail.files.map(file => file.path).sort(), paths.sort());
+  assert.ok(detail.files.some(file => file.path === `public${buildImagePath(imageId)}` && file.type === 'image' && file.size === jpeg.length));
+  const fileResponse = await handleBuildRequest(request(f.params.appId, `/file?versionId=${version!.id}&path=package-lock.json`), f.env);
+  assert.equal(await fileResponse.text(), lockfile);
+  assert.ok(!version!.source_json.includes(files['src/App.tsx']));
+  assert.ok(!version!.lockfile!.includes('lockfileVersion'));
   assert.ok(!paths.includes(`public${buildImagePath(unusedImageId)}`));
   assert.ok(!paths.includes('.env')); assert.ok(!paths.includes('untracked.txt'));
 });
@@ -227,7 +231,7 @@ test('lost D1 save acknowledgements retry the persistence callback without dupli
     const beforeAttempts = f.attempts.get('Persist Git bundle') ?? 0, beforePuts = f.puts.length;
     const version = await saveBuildGitVersion(f.env, params, f.runtime, f.turn(params), files, true);
     assert.equal(f.attempts.get('Persist Git bundle')! - beforeAttempts, 2);
-    assert.equal(batches, 1); assert.equal(f.puts.length - beforePuts, 2);
+    assert.equal(batches, 1); assert.equal(f.puts.slice(beforePuts).filter(key => key.includes('/parts/') || key.includes('/bundles/')).length, 2);
     assert.equal(f.app().git_version_id, params.turnId);
     assert.equal(version!.parent_version_id, parent?.id ?? null);
     assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_versions').get()!.n, withParent ? 2 : 1);
@@ -235,7 +239,7 @@ test('lost D1 save acknowledgements retry the persistence callback without dupli
     assert.equal(git(['rev-list', '--count', 'HEAD'], clone), withParent ? '2' : '1');
     const beforeCommands = f.commands.length;
     await saveBuildGitVersion(f.env, params, f.runtime, f.turn(params), files, true);
-    assert.equal(f.commands.length, beforeCommands); assert.equal(f.puts.length - beforePuts, 2);
+    assert.equal(f.commands.length, beforeCommands); assert.equal(f.puts.slice(beforePuts).filter(key => key.includes('/parts/') || key.includes('/bundles/')).length, 2);
   });
 });
 
@@ -251,7 +255,7 @@ test('lost R2 part and manifest acknowledgements reconcile immutable uploads bef
     });
     const version = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
     assert.ok(lost); assert.equal(f.attempts.get('Persist Git bundle'), 2);
-    assert.equal(f.objects.size, 2); assert.equal(f.app().git_version_id, version!.id);
+    assert.equal([...f.objects.keys()].filter(key => key.includes('/parts/') || key.includes('/bundles/')).length, 2); assert.equal(f.app().git_version_id, version!.id);
     await f.cloneRepository();
   });
 });
@@ -261,7 +265,7 @@ test('unavailable R2 storage leaves the previous Git head and history intact', a
   const parent = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
   const params = f.startTurn();
   t.mock.method(f.bucket, 'put', async () => { throw new Error('R2 unavailable'); });
-  await assert.rejects(saveBuildGitVersion(f.env, params, f.runtime, f.turn(params), { ...buildStarter, 'src/new.ts': 'new file' }, true), /R2 unavailable/);
+  await assert.rejects(saveBuildGitVersion(f.env, params, f.runtime, f.turn(params), { ...buildStarter, 'src/new.ts': 'new file' }, true), /build_source_unavailable/);
   assert.equal(f.app().git_version_id, parent!.id);
   assert.equal(await buildGitVersion(f.env, params.appId, params.turnId), null);
   const clone = await f.cloneRepository();
@@ -326,7 +330,7 @@ test('the build workflow succeeds after a lost Git save acknowledgement and chec
   assert.equal(f.turn(params).status, 'failed');
   const checkpoint = await buildGitVersion(f.env, params.appId, params.turnId);
   assert.equal(checkpoint!.verified, 0); assert.equal(checkpoint!.parent_version_id, f.params.turnId);
-  assert.equal(JSON.parse(checkpoint!.source_json)['src/App.tsx'], edited);
+  assert.equal((await readBuildSource(f.env, params, checkpoint!.source_json))['src/App.tsx'], edited);
   assert.equal(f.app().git_version_id, params.turnId);
   assert.equal(f.app().verified_git_version_id, f.params.turnId);
   const clone = await f.cloneRepository();
@@ -355,7 +359,7 @@ test('restore rebuilds an older source and lockfile as a new commit, retaining i
   await f.run(restoring);
   assert.equal(f.turn(restoring).status, 'succeeded');
   const restored = await buildGitVersion(f.env, restoring.appId, restoring.turnId);
-  assert.equal(restored!.parent_version_id, second.turnId); assert.equal(restored!.lockfile, lockfile);
+  assert.equal(restored!.parent_version_id, second.turnId); assert.equal(await readBuildText(f.env, restoring, restored!.lockfile!), lockfile);
   assert.equal(f.app().revision, body.revision + 1); assert.equal(f.app().verified_git_version_id, restored!.id);
   const clone = await f.cloneRepository();
   assert.equal(readFileSync(join(clone, 'src/App.tsx'), 'utf8'), original);
