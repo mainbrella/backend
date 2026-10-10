@@ -2,13 +2,15 @@ import { authCorsHeaders, authJson } from './auth-core';
 import { containerUser } from './container-auth';
 import { handleContainersRequest } from './containers';
 import { handleExecutionRequest } from './executions';
+import { downloadGitPack, githubUserToken, resolveUserRepository, suggestedPrivateSetup } from '../lib/github-import';
+import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 import { resolveEntitlement } from '../lib/entitlements';
 import { containerError, runningContainer } from '../lib/container-service';
 import { validIdempotencyKey } from '../../containers/container-account-core.js';
 import { readCommandBody } from '../../containers/command-contract.js';
 import { validExecutionId } from '../../containers/execution-contract.js';
 import { cloneCommand, launchErrorDetails, launchOptionsSchema, LaunchError, previewCommand, repoCwd, repoName, repoRef,
-  resolvePublicRepo, setupCommand, type LaunchOptions, type ResolvedRepo } from '../lib/repo-launch';
+  importPartPath, privateCloneCommand, resolveRepository, setupCommand, type LaunchOptions, type ResolvedRepo } from '../lib/repo-launch';
 
 export type LaunchPhase = 'allocating' | 'cloning' | 'setup' | 'starting' | 'ready' | 'failed' | 'stopped';
 export interface RepoLaunch {
@@ -17,6 +19,7 @@ export interface RepoLaunch {
   executions: Partial<Record<'cloning' | 'setup' | 'starting', string>>;
   attempts: Partial<Record<LaunchPhase, number>>;
   createdAt: number; shellReadyAt: number | null; previewReadyAt: number | null; error: string | null;
+  importParts?: number;
 }
 interface Row { state_json: string; request_json: string }
 interface LaunchDiagnosticContext {
@@ -74,6 +77,10 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
     }
     if (terminalPhases.includes(state.phase)) return state;
     if (state.phase === 'allocating') {
+      if (state.repository.private) {
+        diagnostics.stage = 'verify_private_repository_access';
+        await resolveRepository(state.repository.repo, state.repository.commit, state.options.cwd, await githubUserToken(env, owner), true);
+      }
       // The coordinator retains allocation keys for 24h. Never replay beyond it.
       if (state.attempts.allocating && Date.now() - state.attempts.allocating > 23 * 60 * 60_000) {
         state.phase = 'failed'; state.error = 'allocation_reconciliation_required'; await save(); return state;
@@ -101,9 +108,35 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
       if (state.attempts[phase] && Date.now() - state.attempts[phase]! > 55 * 60_000) {
         state.phase = 'failed'; state.error = 'execution_reconciliation_required'; await save(); return state;
       }
+      if (phase === 'cloning' && state.repository.private && !state.importParts) {
+        diagnostics.stage = 'import_private_repository';
+        const githubToken = await githubUserToken(env, owner);
+        redactions.push(githubToken, btoa(`x-access-token:${githubToken}`));
+        await resolveRepository(state.repository.repo, state.repository.commit, state.options.cwd, githubToken, true);
+        const pack = await downloadGitPack(state.repository.repo, state.repository.commit, githubToken);
+        const target = await runningContainer(env, owner, state.container!.id);
+        if (!target.container || target.container.createdAt !== state.container!.createdAt) throw new LaunchError('container_not_running', 409);
+        const parts = Math.ceil(pack.byteLength / MAX_FILE_BYTES);
+        for (let index = 0; index < parts; index++) {
+          // Long imports retain the launch lease and exact container generation.
+          const renewed = await env.DB.prepare('UPDATE repo_launches SET lock_until = ? WHERE id = ? AND user_id = ? AND lock_token = ?')
+            .bind(Date.now() + 60_000, id, owner, token).run();
+          if (!renewed.meta.changes) throw new LaunchError('launch_busy', 409);
+          const upload = new URL('https://internal/files');
+          upload.searchParams.set('path', importPartPath(id, index));
+          const response = await target.stub!.fetch(new Request(upload, { method: 'PUT',
+            headers: { 'Content-Type': 'application/octet-stream', 'x-exec-created-at': state.container!.createdAt,
+              'x-exec-expires-at': String(Date.parse(target.container.expiresAt)) },
+            body: pack.slice(index * MAX_FILE_BYTES, (index + 1) * MAX_FILE_BYTES) }));
+          if (!response.ok) throw new LaunchError('repository_import_failed');
+        }
+        state.importParts = parts;
+        await save();
+      }
       state.attempts[phase] ??= Date.now();
       await save();
-      const command = phase === 'cloning' ? cloneCommand(state.repository) : phase === 'setup' ? setupCommand(state.options) : previewCommand(state.options);
+      const command = phase === 'cloning' ? state.repository.private ? privateCloneCommand(state.repository, id, state.importParts!) : cloneCommand(state.repository)
+        : phase === 'setup' ? setupCommand(state.options) : previewCommand(state.options);
       const timeoutMs = phase === 'cloning' ? 300_000 : phase === 'setup' ? 900_000 : 240_000;
       diagnostics.stage = 'start_execution';
       const execution = await responseData(await handleExecutionRequest(internalRequest(request, `/containers/executions?${identity}`, 'POST',
@@ -171,7 +204,9 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
       const cwd = repoCwd.safeParse(url.searchParams.get('cwd') ?? '.');
       if (!repo.success || !ref.success || !cwd.success) return authJson({ error: 'invalid_request' }, 400, cors);
       diagnostics.stage = 'resolve_repository';
-      return authJson(await resolvePublicRepo(repo.data, ref.data, cwd.data, env.REPO_RUN_GITHUB_TOKEN), 200, cors);
+      const repository = await resolveUserRepository(env, user.id, repo.data, ref.data, cwd.data);
+      const suggestedConfiguration = repository.private ? await suggestedPrivateSetup(env, user.id, repository, cwd.data) : undefined;
+      return authJson({ ...repository, ...(suggestedConfiguration ? { suggestedConfiguration } : {}) }, 200, cors);
     }
     if (match[1]) {
       if (request.method === 'POST') return authJson(await advance(request, env, user.id, match[1], diagnostics, redactions, ctx), 200, cors);
@@ -198,7 +233,7 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
     diagnostics.stage = 'check_entitlement';
     if (!(await resolveEntitlement(env, user.id)).active) return authJson({ error: 'subscription_required' }, 402, cors);
     diagnostics.stage = 'resolve_repository';
-    const repository = await resolvePublicRepo(options.data.repo, options.data.ref, options.data.cwd, env.REPO_RUN_GITHUB_TOKEN);
+    const repository = await resolveUserRepository(env, user.id, options.data.repo, options.data.ref, options.data.cwd);
     const state: RepoLaunch = { id: crypto.randomUUID(), phase: 'allocating', options: options.data, repository, container: null,
       executions: {}, attempts: {}, createdAt: receivedAt, shellReadyAt: null, previewReadyAt: null, error: null };
     diagnostics.stage = 'persist_launch';

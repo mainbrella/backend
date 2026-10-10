@@ -1,4 +1,5 @@
 import { registerRepoLaunchRoutes } from "./openapi-repo-launches";
+import { registerGithubImportRoutes } from './openapi-github-import';
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
@@ -53,6 +54,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     api.registry.registerComponent("securitySchemes", name, scheme);
   }
   registerRepoLaunchRoutes(api, handler);
+  registerGithubImportRoutes(api, handler);
   registerBuildRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);

@@ -10,3 +10,4 @@ __pycache__/
 /sdk/python/build/
 /sdk/python/dist/
 /ingress/.env
+.github-import-secrets.json

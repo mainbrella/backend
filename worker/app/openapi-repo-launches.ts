@@ -2,20 +2,20 @@ import { z } from 'zod';
 import { containerSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 import { launchOptionsSchema, repoCwd, repoName, repoRef } from '../lib/repo-launch';
 
-const repository = z.object({ repo: repoName, ref: repoRef, commit: z.string().regex(/^[a-f0-9]{40}$/), suggestedCatalogId: z.string(), manifests: z.array(z.string()) }).openapi('ResolvedRepository');
+const repository = z.object({ repo: repoName, ref: repoRef, commit: z.string().regex(/^[a-f0-9]{40}$/), suggestedCatalogId: z.string(), manifests: z.array(z.string()), private: z.boolean().optional() }).openapi('ResolvedRepository');
 const launch = z.object({ id: z.uuid(), phase: z.enum(['allocating', 'cloning', 'setup', 'starting', 'ready', 'failed', 'stopped']),
   options: launchOptionsSchema, repository, container: z.object({ id: z.string(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime() }).nullable(),
   executions: z.object({ cloning: z.uuid().optional(), setup: z.uuid().optional(), starting: z.uuid().optional() }),
-  attempts: z.record(z.string(), z.number()), createdAt: z.number(), shellReadyAt: z.number().nullable(), previewReadyAt: z.number().nullable(), error: z.string().nullable(),
+  attempts: z.record(z.string(), z.number()), createdAt: z.number(), shellReadyAt: z.number().nullable(), previewReadyAt: z.number().nullable(), error: z.string().nullable(), importParts: z.number().int().optional(),
 }).openapi('RepositoryLaunch');
 const headers = z.object({ Origin: z.string().optional() });
 const params = z.object({ launchId: z.uuid() });
 export function registerRepoLaunchRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/repo-launches/resolve', {
-    operationId: 'resolvePublicRepository', tags: ['Containers'], summary: 'Validate a public GitHub repository and suggest a runtime', security: containerSecurity,
-    description: 'Read-only. Resolves a branch, tag or commit to an immutable commit and detects manifests in cwd. Uses an optional server-side GitHub token; only public repositories are accepted. No allocation or execution. GitHub rate limits may return 429. GitHub redirects are not followed and return github_unavailable (503).',
+    operationId: 'resolvePublicRepository', tags: ['Containers'], summary: 'Validate an accessible GitHub repository and suggest a runtime', security: containerSecurity,
+    description: 'Read-only. Resolves a branch, tag or commit to an immutable commit and detects manifests in cwd. Public lookups use an optional server-side token. Private repositories require an owner-scoped read-only Import app connection; user tokens enforce the intersection of user and app access. Inaccessible repositories may be private and return a connection/access error. No payment, allocation or execution. GitHub rate limits may return 429. GitHub redirects are not followed and return github_unavailable (503).',
     request: { query: z.object({ repo: repoName, ref: repoRef.optional(), cwd: repoCwd.optional() }), headers },
-    responses: { 200: jsonResponse(repository), ...errors(400, 401, 403, 429, 503) },
+    responses: { 200: jsonResponse(repository.extend({ suggestedConfiguration: launchOptionsSchema.optional() })), ...errors(400, 401, 403, 429, 503) },
   }, handler);
   register(api, 'post', '/repo-launches', {
     operationId: 'createRepositoryLaunch', tags: ['Containers'], summary: 'Create an owner-scoped repository launch', security: containerSecurity,

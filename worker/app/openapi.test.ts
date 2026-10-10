@@ -4,6 +4,8 @@ import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
 
 const endpointMethods: Record<string, string[]> = {
+  '/github/import/config': ['get'], '/github/import/connect': ['post'], '/github/import/connection': ['get', 'delete'],
+  '/github/import/callback': ['get'], '/github/import/setup': ['get'],
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],

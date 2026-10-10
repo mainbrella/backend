@@ -12,7 +12,7 @@ export const launchOptionsSchema = z.object({
   setupCommand: command.optional(), startCommand: command.optional(), port: z.number().int().min(1024).max(65535).optional(),
 }).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' });
 export type LaunchOptions = z.infer<typeof launchOptionsSchema>;
-export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[] }
+export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[]; private?: boolean }
 interface GithubDiagnostic {
   dependency: 'github'; operation: 'repository' | 'commit' | 'tree';
   upstreamStatus?: number; upstreamRequestId?: string | null;
@@ -58,7 +58,7 @@ async function github(path: string, missing: string, token?: string): Promise<an
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { message?: unknown } | null;
     if (typeof body?.message === 'string') diagnostics.upstreamMessage = body.message.slice(0, 1000);
-    const error = response.status === 404 || response.status === 409 || response.status === 422 ? missing
+    const error = response.status === 401 && missing === 'github_repository_access_required' ? 'github_connection_required' : response.status === 404 || response.status === 409 || response.status === 422 ? missing
       : response.status === 403 || response.status === 429 ? 'github_rate_limited' : 'github_unavailable';
     throw new LaunchError(error, error === missing ? 400 : error === 'github_rate_limited' ? 429 : 503, { diagnostics });
   }
@@ -68,6 +68,18 @@ async function github(path: string, missing: string, token?: string): Promise<an
 
 export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.', token?: string): Promise<ResolvedRepo> {
   const metadata = await publicRepoMetadata(repo, token);
+  return resolveRepoMetadata(metadata, ref, cwd, token);
+}
+
+export async function resolveRepository(repo: string, ref: string | undefined, cwd: string, token: string, allowPrivate: boolean): Promise<ResolvedRepo> {
+  const metadata = await github(`/repos/${repo}`, 'github_repository_access_required', token);
+  if (typeof metadata.private !== 'boolean' || metadata.disabled || !repoName.safeParse(metadata.full_name).success || metadata.private && !allowPrivate) {
+    throw new LaunchError('github_repository_access_required', 400);
+  }
+  return resolveRepoMetadata(metadata, ref, cwd, token);
+}
+
+async function resolveRepoMetadata(metadata: any, ref?: string, cwd = '.', token?: string): Promise<ResolvedRepo> {
   const canonical = metadata.full_name as string;
   const resolvedRef = ref ?? metadata.default_branch;
   if (!repoRef.safeParse(resolvedRef).success) throw new LaunchError('repo_ref_not_found', 400);
@@ -87,7 +99,7 @@ export async function resolvePublicRepo(repo: string, ref?: string, cwd = '.', t
     ['rust', ['Cargo.toml']], ['go', ['go.mod']], ['devops', ['main.tf', 'terraform.tf']] ] as const;
   const matches = candidates.filter(([, manifests]) => manifests.some(file => files.has(file)));
   return { repo: canonical, ref: resolvedRef, commit: commit.sha, suggestedCatalogId: matches.length === 1 ? matches[0][0] : 'node',
-    manifests: candidates.flatMap(([, manifests]) => [...manifests]).filter(file => files.has(file)) };
+    manifests: candidates.flatMap(([, manifests]) => [...manifests]).filter(file => files.has(file)), ...(metadata.private ? { private: true } : {}) };
 }
 
 export async function verifyPublicRepo(repo: string, token?: string): Promise<string> {
@@ -113,6 +125,24 @@ git init -q
 git remote add origin ${shellQuote(`https://github.com/${repo.repo}.git`)}
 git -c credential.helper= fetch --depth=1 origin ${shellQuote(repo.commit)}
 git checkout -q --detach FETCH_HEAD
+tmux new-session -d -s main -c /workspace/repo /bin/bash
+printf 'Repository ready at %s\\n' ${shellQuote(repo.commit)}`;
+}
+
+export const importPartPath = (launchId: string, index: number) => `/workspace/.mainbrella-import-${launchId}-${String(index).padStart(3, '0')}`;
+export function privateCloneCommand(repo: ResolvedRepo, launchId: string, parts: number): string {
+  if (!/^[a-f0-9-]{36}$/.test(launchId) || !Number.isSafeInteger(parts) || parts < 1 || parts > 32 || !/^[a-f0-9]{40}$/.test(repo.commit) || !repoName.safeParse(repo.repo).success) throw new LaunchError('invalid_request', 400);
+  const paths = Array.from({ length: parts }, (_, index) => shellQuote(importPartPath(launchId, index))).join(' ');
+  return `set -eu
+export GIT_TERMINAL_PROMPT=0
+mkdir -p /workspace/repo
+cd /workspace/repo
+git init -q
+git remote add origin ${shellQuote(`https://github.com/${repo.repo}.git`)}
+trap ${shellQuote(`rm -f -- ${paths}`)} EXIT
+cat -- ${paths} | git index-pack --stdin
+printf '%s\\n' ${shellQuote(repo.commit)} > .git/shallow
+git checkout -q --detach ${shellQuote(repo.commit)}
 tmux new-session -d -s main -c /workspace/repo /bin/bash
 printf 'Repository ready at %s\\n' ${shellQuote(repo.commit)}`;
 }

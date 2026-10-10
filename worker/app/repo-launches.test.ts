@@ -5,6 +5,7 @@ import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 import { cloneCommand, launchOptionsSchema, previewCommand, setupCommand } from '../lib/repo-launch';
 import type { RepoLaunch } from './repo-launches';
+import { sealGithubCredentials } from '../lib/github-import';
 const commit = 'a'.repeat(40), tree = 'b'.repeat(40);
 const defaultOptions = { repo: 'acme/demo' };
 const api = (path: string, method = 'GET', body?: unknown, key = 'launch-one', session = SESSION_ONE, origin: string | null = 'https://mainbrella.com') => new Request(`https://api.mainbrella.com${path}`, {
@@ -15,8 +16,10 @@ const api = (path: string, method = 'GET', body?: unknown, key = 'launch-one', s
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t, { [USER_ONE]: [], [USER_TWO]: [] });
   t.after(() => f.close());
-  for (const migration of ['013_repo_launches.sql', '021_acquisition.sql', '022_acquisition_sources.sql'])
+  for (const migration of ['013_repo_launches.sql', '021_acquisition.sql', '022_acquisition_sources.sql', '028_github_import.sql'])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  Object.assign(f.env, { GITHUB_IMPORT_CLIENT_ID: 'test-client', GITHUB_IMPORT_CLIENT_SECRET: 'test-secret',
+    GITHUB_IMPORT_APP_SLUG: 'mainbrella-import', GITHUB_IMPORT_ENCRYPTION_KEY: 'e'.repeat(64) });
   const billingFetch = globalThis.fetch;
   let githubMode = 'public';
   let manifests = ['package.json'];
@@ -34,11 +37,17 @@ async function fixture(t: TestContext) {
   const executions = new Map<string, { id: string; status: string; stdout: string; stderr: string }>();
   const executionKeys = new Map<string, string>();
   const executionCalls: Request[] = [];
+  const uploadedFiles = new Map<string, Uint8Array>();
   let loseExecution = false;
   f.env.USER_CONTAINER = {
     idFromName(name: string) { f.machineNames.push(name); return name; },
     get(name: string) { return { async fetch(request: Request) {
       f.machineCalls.push({ name, request }); executionCalls.push(request);
+      if (request.method === 'PUT') {
+        const path = new URL(request.url).searchParams.get('path')!;
+        uploadedFiles.set(path, new Uint8Array(await request.arrayBuffer()));
+        return Response.json({ path });
+      }
       if (request.method === 'POST') {
         const key = request.headers.get('Idempotency-Key')!;
         let id = executionKeys.get(key);
@@ -83,7 +92,7 @@ async function fixture(t: TestContext) {
   };
   const complete = (state: RepoLaunch, phase: 'cloning' | 'setup' | 'starting', status = 'succeeded') => { executions.get(state.executions[phase]!)!.status = status; };
   const mutate = (state: RepoLaunch) => f.sqlite.prepare('UPDATE repo_launches SET state_json = ? WHERE id = ?').run(JSON.stringify(state), state.id);
-  return { ...f, create, step, complete, mutate, githubCalls, executions, executionKeys, executionCalls, creations,
+  return { ...f, create, step, complete, mutate, githubCalls, executions, executionKeys, executionCalls, creations, uploadedFiles,
     githubMode(value: string) { githubMode = value; }, manifests(value: string[]) { manifests = value; }, loseAllocation() { loseAllocation = true; }, loseExecution() { loseExecution = true; } };
 }
 
@@ -178,15 +187,62 @@ for (const authenticated of [false, true]) test(`GitHub lookups ${authenticated 
   assert.equal(f.accountCalls.length, 0);
 });
 
-test('authenticated lookups still reject private repositories', async t => {
+test('the operator public-lookup token never authorizes private repositories', async t => {
   const f = await fixture(t);
   f.env.REPO_RUN_GITHUB_TOKEN = 'repo-lookup-test-token';
   f.githubMode('private');
   const response = await handleRequest(api('/repo-launches', 'POST', defaultOptions), f.env);
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: 'public_repo_not_found' });
+  assert.deepEqual(await response.json(), { error: 'github_connection_required' });
   assert.equal(f.githubCalls.length, 1);
   assert.equal(f.accountCalls.length, 0);
+});
+
+test('private launch uses only the owner’s Import credentials, uploads Git objects, and reconciles lost execution replies without another import', async t => {
+  const f = await fixture(t);
+  f.githubMode('private');
+  const token = 'ghu_private-user-one';
+  f.sqlite.prepare('INSERT INTO github_import_connections (user_id, github_user_id, github_login, credentials, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .run(USER_ONE, '1', 'github-one', await sealGithubCredentials(f.env, USER_ONE, { access_token: token }), Date.now() + 86400000);
+  const delegate = globalThis.fetch;
+  let packCalls = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/git-upload-pack')) {
+      packCalls++;
+      assert.equal(new Headers(init?.headers).get('Authorization'), `Basic ${btoa(`x-access-token:${token}`)}`);
+      const data = Buffer.concat([Buffer.from([1]), Buffer.from('PACK'), Buffer.alloc(40)]);
+      const packet = Buffer.concat([Buffer.from((data.length + 4).toString(16).padStart(4, '0')), data, Buffer.from('0000')]);
+      return new Response(packet, { headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+    }
+    return delegate(input, init);
+  });
+  const state = await f.create();
+  assert.equal(state.repository.private, true);
+  const other = await handleRequest(api('/repo-launches/resolve?repo=acme/demo', 'GET', undefined, 'k', SESSION_TWO), f.env);
+  assert.equal(other.status, 400); assert.deepEqual(await other.json(), { error: 'github_connection_required' });
+  const allocated = await f.step(state);
+  f.loseExecution();
+  assert.equal((await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env)).status, 503);
+  const resumed = await f.step(allocated);
+  assert.equal(packCalls, 1); assert.equal(f.uploadedFiles.size, 1); assert.equal(resumed.importParts, 1);
+  const commandRequest = f.executionCalls.find(request => request.method === 'POST')!;
+  const command = (await commandRequest.clone().json() as any).command;
+  assert.match(command, /git index-pack --stdin/); assert.match(command, /git checkout -q --detach/);
+  assert.doesNotMatch(JSON.stringify(resumed) + command, /ghu_|Authorization|x-access-token/);
+  f.complete(resumed, 'cloning');
+  assert.equal((await f.step(resumed)).phase, 'ready');
+});
+
+test('revoked private access prevents allocation even after a launch record was created', async t => {
+  const f = await fixture(t); f.githubMode('private');
+  f.sqlite.prepare('INSERT INTO github_import_connections (user_id, github_user_id, github_login, credentials, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .run(USER_ONE, '1', 'github-one', await sealGithubCredentials(f.env, USER_ONE, { access_token: 'ghu_private-user-one' }), Date.now() + 86400000);
+  const state = await f.create();
+  f.sqlite.prepare('DELETE FROM github_import_connections WHERE user_id = ?').run(USER_ONE);
+  const denied = await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env);
+  assert.equal(denied.status, 400); assert.deepEqual(await denied.json(), { error: 'github_connection_required' });
+  assert.equal(f.accountCalls.length, 0); assert.equal(f.uploadedFiles.size, 0);
 });
 
 test('invalid GitHub credentials fail without an unauthenticated retry and are redacted from logs', async t => {

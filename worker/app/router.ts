@@ -1,4 +1,5 @@
 import { handleRepoLaunchRequest } from "./repo-launches";
+import { handleGithubImportRequest } from './github-import';
 import { handleAPIKeysRequest } from "./api-keys";
 import { handleProjectsRequest } from "./projects";
 import { handleProjectEndpointRequest, handleProjectDomainsRequest } from './project-hosting';
@@ -36,6 +37,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/') || url.pathname === '/admin/acquisition/leads' || url.pathname === '/admin/acquisition/events') return handleAcquisitionRequest(request, env);
   if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);

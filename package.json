@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "github:register-import": "node scripts/github-import-registration.mjs",
     "coupon:create": "node scripts/create-trial-coupon.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:all": "npm run dev -- --all-images",
