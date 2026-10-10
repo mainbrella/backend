@@ -201,6 +201,12 @@ test('R2 versions export valid Git history with lockfiles and referenced images,
   assert.equal(readFileSync(join(clone, 'package-lock.json'), 'utf8'), lockfile);
   assert.deepEqual(new Uint8Array(readFileSync(join(clone, `public${buildImagePath(imageId)}`))), jpeg);
   const paths = git(['ls-tree', '-r', '--name-only', 'HEAD'], clone).split('\n');
+  const detail = await (await handleBuildRequest(request(f.params.appId, `/versions/${version!.id}`), f.env)).json() as {
+    files: Record<string, string>; assets: { path: string; imageId: string }[];
+  };
+  assert.deepEqual([...Object.keys(detail.files), ...detail.assets.map(asset => asset.path)].sort(), paths.sort());
+  assert.equal(detail.files['package-lock.json'], lockfile);
+  assert.deepEqual(detail.assets, [{ path: `public${buildImagePath(imageId)}`, imageId }]);
   assert.ok(!paths.includes(`public${buildImagePath(unusedImageId)}`));
   assert.ok(!paths.includes('.env')); assert.ok(!paths.includes('untracked.txt'));
 });

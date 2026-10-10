@@ -129,6 +129,18 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.match(update.description, /project owned by the signed-in user/);
 });
 
+test('Build repository browsing documents complete text files and authenticated image references', async () => {
+  const { paths } = await document();
+  const operation = paths['/build/apps/{appId}/versions/{versionId}'].get;
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+  assert.match(operation.description, /without extracting the R2 bundle/);
+  const schema = operation.responses[200].content['application/json'].schema;
+  assert.ok(schema.required.includes('assets'));
+  assert.deepEqual(schema.properties.assets.items.required, ['path', 'imageId']);
+  assert.equal(schema.properties.assets.items.properties.imageId.format, 'uuid');
+  assert.equal(schema.properties.files.additionalProperties.type, 'string');
+});
+
 test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {
   const { paths } = await document();
   const config = paths['/build/config'].get;

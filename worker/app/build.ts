@@ -16,7 +16,7 @@ import { settleReportedBuildUsage } from '../lib/build-billing';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, type BuildImageRow } from '../lib/build-images';
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
-import { buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
+import { BUILD_GIT_IGNORE, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
 
 export function buildConfigured(env: Env) {
   return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
@@ -171,7 +171,11 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
           if ((parent?.lockfile ?? null) !== version.lockfile) changes.push({ path: 'package-lock.json', type: !parent?.lockfile ? 'added' : !version.lockfile ? 'deleted' : 'modified', before: parent?.lockfile ?? null, after: version.lockfile });
           const oldAssets = JSON.parse(parent?.assets_json ?? '[]') as string[], assets = JSON.parse(version.assets_json) as string[];
           for (const imageId of [...new Set([...oldAssets, ...assets])]) if (oldAssets.includes(imageId) !== assets.includes(imageId)) changes.push({ path: `public${buildImagePath(imageId)}`, type: assets.includes(imageId) ? 'added' : 'deleted', before: null, after: null });
-          return authJson({ version: publicGitVersion(version), files, changes }, 200, cors);
+          files['.gitignore'] = BUILD_GIT_IGNORE;
+          if (version.lockfile !== null) files['package-lock.json'] = version.lockfile;
+          if (!parent) changes.push({ path: '.gitignore', type: 'added', before: null, after: BUILD_GIT_IGNORE });
+          return authJson({ version: publicGitVersion(version), files,
+            assets: assets.map(imageId => ({ path: `public${buildImagePath(imageId)}`, imageId })), changes }, 200, cors);
         }
         const { results } = await env.DB.prepare('SELECT * FROM build_git_versions WHERE app_id = ? ORDER BY rowid DESC LIMIT 100').bind(id).all<BuildGitVersion>();
         return authJson({ versions: results.map(publicGitVersion), versionId: app.git_version_id ?? null, verifiedVersionId: app.verified_git_version_id ?? null }, 200, cors);

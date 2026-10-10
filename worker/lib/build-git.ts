@@ -3,6 +3,7 @@ import { buildImageBytes, buildImagePath, savedBuildImages } from './build-image
 import { buildGitProgram } from './build-git-program';
 
 export const BUILD_GIT_ROOT = '/workspace/mainbrella-git';
+export const BUILD_GIT_IGNORE = 'node_modules/\ndist/\n.env\n.env.*\n';
 export type BuildGitVersion = {
   id: string; app_id: string; parent_version_id: string | null; commit_id: string; bundle_key: string;
   source_json: string; lockfile: string | null; assets_json: string; message: string; verified: number; created_at: string;
@@ -62,8 +63,7 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
   const parent = app.git_version_id ? await buildGitVersion(env, params.appId, app.git_version_id) : null;
   if (app.git_version_id && !parent) throw new BuildError('build_git_unavailable');
   const bundle = await prepare(env, params, runtime, parent, 'git-save');
-  const snapshot: Record<string, string | Uint8Array<ArrayBuffer>> = { ...files,
-    '.gitignore': 'node_modules/\ndist/\n.env\n.env.*\n' };
+  const snapshot: Record<string, string | Uint8Array<ArrayBuffer>> = { ...files, '.gitignore': BUILD_GIT_IGNORE };
   const lock = await runtime.read('/workspace/app/package-lock.json');
   if (!lock.ok && lock.status !== 404) throw new BuildError('build_git_unavailable');
   const lockfile = lock.ok ? await lock.text() : null;
