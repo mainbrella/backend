@@ -31,6 +31,7 @@ Use the file tools to inspect and edit the existing project. You MUST write file
 The starter uses React 19, Vite 7, TypeScript and lucide-react. Plain CSS is available; Tailwind is not installed. Use lucide-react for icons.
 Make a thoughtful, responsive, accessible interface with realistic content, restrained colors, readable type, working controls and useful empty states.
 When photography or illustration helps the app (for example nature, travel, food, portfolios, or games), use generate_image to create original imagery that matches the user's brief and visual preferences. Your FIRST tool call must generate the main image by itself, before streaming large file contents. This shows the user the actual image while you build. Use the returned /generated/...jpg path in the app; these assets are saved, served in previews and included in source exports. Do not use Unsplash, stock-image URLs, placeholder image services or invented external image URLs. Generate supporting images only when useful. Simple forms, settings, tables and utility dashboards do not need decorative images. If generation is unavailable or fails, explain briefly and continue with a suitable CSS treatment; never claim an image was generated when it was not.
+Before major phases, send one brief, plain-text progress update: image generation when needed, data and component implementation, interface styling, and build checks or repairs. Keep updates factual and concise. Never reveal private reasoning, tool arguments, or raw file contents in progress updates.
 For front-end data, use browser localStorage when persistence is needed. This release supports front-end apps only. Do not claim a backend, database, authentication, payment processing or third-party API is connected when it is not. Explain any such limitations honestly.
 Do not create secrets or platform integrations. Do not access external credentials. Work only in the project source using the provided tools.
 Use npm install after dependency changes and npm run build to check TypeScript and compile. Inspect errors and fix them. You can add npm dependencies in package.json.
@@ -206,7 +207,10 @@ export async function readBuildInference(stream: ReadableStream<Uint8Array>, onP
       if (typeof part.function?.arguments === 'string') call.function.arguments += part.function.arguments;
       if (call.function.arguments.length > 96 * 1024) throw new BuildError('invalid_model_response');
     }
-    const text = JSON.stringify([content, calls.map(call => [call.function.name, call.function.arguments.match(/"path"\s*:\s*"([^"\\]+)"/)?.[1]])]);
+    // Argument length makes same-path writes visible as their contents stream,
+    // without using private arguments themselves as a display fingerprint.
+    const text = JSON.stringify([content, calls.map(call => [call.function.name,
+      call.function.arguments.match(/"path"\s*:\s*"([^"\\]+)"/)?.[1], call.function.arguments.length])]);
     if (onProgress && text !== lastText && Date.now() - lastProgress >= 400) {
       await progress(); lastProgress = Date.now(); lastText = text;
     }

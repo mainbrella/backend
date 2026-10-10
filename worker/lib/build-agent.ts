@@ -4,7 +4,7 @@ import { resolveEntitlement } from './entitlements';
 import { handleOwnedPreviewRequest } from '../app/previews';
 import { failBuildTurn } from '../app/build';
 import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
-import { buildToolLabel, saveBuildActivity } from './build-activity';
+import { buildToolDraftLabel, buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { settleReportedBuildUsage } from './build-billing';
 import { buildFailure, failureError, proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation,
@@ -255,12 +255,28 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
             if (elapsedMs > 30 * 60_000) await stopForLimit('elapsed-time', 30 * 60_000, `The build ran for ${Math.floor(elapsedMs / 60_000)} minutes, above its 30 minute time limit.`, elapsedMs,
               { outputTokens, inputTokens, rounds: round, elapsedMs });
             await stage(env, params, round === 0 ? 'Building your app' : 'Editing and checking');
+            const publicLabels = new Map<string, string>();
+            const proposedTools = new Set<string>();
             const result = await buildInference(env, messages, Math.min(8192, remaining), async (text, calls) => {
-              if (text) await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
+              if (text && publicLabels.get(`ai-${round}`) !== text) {
+                await saveBuildActivity(env, params, round * 10, { id: `ai-${round}`, type: 'message', text, status: 'running' });
+                publicLabels.set(`ai-${round}`, text);
+              }
               for (const [index, call] of calls.entries()) {
-                if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
-                  { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'proposed' });
-                if (call?.function.name) await proposeBuildOperation(env, { params, id: `tool-${round}-${index}` }, 'tool', buildToolLabel(call.function.name, call.function.arguments), { toolName: call.function.name, inferenceOperationId: `text-${round}` });
+                if (!call?.function.name) continue;
+                const id = `tool-${round}-${index}`;
+                const display = buildToolDraftLabel(call.function.name, call.function.arguments);
+                if (publicLabels.get(id) !== display) {
+                  await saveBuildActivity(env, params, round * 10 + index + 1,
+                    { id, type: 'tool', text: display, status: 'proposed' });
+                  publicLabels.set(id, display);
+                }
+                const proposalKey = `${id}:${call.function.name}`;
+                if (call.id && !proposedTools.has(proposalKey)) {
+                  await proposeBuildOperation(env, { params, id }, 'tool', buildToolLabel(call.function.name, call.function.arguments),
+                    { toolName: call.function.name, inferenceOperationId: `text-${round}` });
+                  proposedTools.add(proposalKey);
+                }
               }
             }, params.turnId, { params, operation: `text-${round}`, model: initial.turn.model, effort: initial.turn.effort });
             if (result.message.content) {

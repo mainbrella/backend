@@ -1,4 +1,4 @@
-import type { BuildParams } from './build-contract';
+import { validBuildPath, type BuildParams } from './build-contract';
 
 export type BuildActivity = { id: string; type: 'message' | 'tool'; text: string; status: 'proposed' | 'running' | 'skipped' | 'blocked' | 'succeeded' | 'failed' | 'unknown'; explanation?: string | null };
 export type BuildActivityRow = BuildActivity & { turn_id: string };
@@ -21,6 +21,42 @@ export function buildToolLabel(name: string, argumentsJSON: string) {
   return ({ list_files: 'Inspect project files', read_file: `Read ${path}`, write_file: `Write ${path}`,
     delete_file: `Delete ${path}`, run_command: args?.command === 'npm install' ? 'Install dependencies' : 'Type-check and compile',
     get_logs: 'Read build output', generate_image: `Generate ${typeof args?.label === 'string' ? args.label : 'original imagery'}` } as Record<string, string>)[name] || 'Update the app';
+}
+
+/** A public-only label for an incomplete write request; file contents stay private. */
+export function buildToolDraftLabel(name: string, argumentsJSON: string) {
+  if (name !== 'write_file') return buildToolLabel(name, argumentsJSON);
+  const match = argumentsJSON.match(/"path"\s*:\s*"([^"\\]+)"/);
+  const path = match?.[1] && validBuildPath(match[1]) && !match[1].startsWith('public/generated/') ? match[1] : 'source file';
+  const content = argumentsJSON.match(/"content"\s*:\s*"/);
+  if (!content) return `Drafting ${path}`;
+
+  // Decode only enough of the partial JSON string to count characters and
+  // logical line breaks. This never returns or persists any file text.
+  let characters = 0, lineBreaks = 0, previousWasCR = false;
+  const end = content.index! + content[0].length;
+  for (let index = end; index < argumentsJSON.length; index++) {
+    let character = argumentsJSON[index];
+    if (character === '"') break;
+    if (character === '\\') {
+      const escape = argumentsJSON[++index];
+      if (escape === undefined) break;
+      if (escape === 'u' && /^[\da-f]{4}$/i.test(argumentsJSON.slice(index + 1, index + 5))) {
+        character = String.fromCharCode(parseInt(argumentsJSON.slice(index + 1, index + 5), 16));
+        index += 4;
+      } else {
+        character = ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' } as Record<string, string>)[escape] ?? escape;
+      }
+    }
+    if (!(character.charCodeAt(0) >= 0xdc00 && character.charCodeAt(0) <= 0xdfff)) characters++;
+    if (character === '\r') { lineBreaks++; previousWasCR = true; }
+    else if (character === '\n') { if (!previousWasCR) lineBreaks++; previousWasCR = false; }
+    else previousWasCR = false;
+  }
+  const lines = Math.max(1, lineBreaks + 1);
+  return lines > 1
+    ? `Drafting ${path} · ${lines.toLocaleString()} lines`
+    : `Drafting ${path} · ${characters.toLocaleString()} characters`;
 }
 
 /** A bounded stream of durable snapshots. Reconnecting never restarts a build. */

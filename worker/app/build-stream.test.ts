@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
-import { readBuildInference, buildInference } from '../lib/build-ai';
-import { buildAppStream, saveBuildActivity, buildToolLabel } from '../lib/build-activity';
+import { readBuildInference, buildInference, type BuildToolCall } from '../lib/build-ai';
+import { buildAppStream, saveBuildActivity, buildToolDraftLabel, buildToolLabel } from '../lib/build-activity';
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
 import { buildTokenPrices } from '../lib/build-pricing';
@@ -63,6 +63,38 @@ test('inference uses streaming, keeps usage accounting and rejects truncated or 
     await assert.rejects(readBuildInference(chunks(text)), /model_response_incomplete/);
   await assert.rejects(readBuildInference(chunks(delta({ tool_calls: [{ index: 8 }] }) + finished)), /invalid_model_response/);
   await assert.rejects(readBuildInference(chunks(event('{invalid'))), /invalid_model_response/);
+});
+
+test('same-path write arguments emit throttled progress as content grows', async t => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>, now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+  const snapshots: BuildToolCall[][] = [];
+  const result = readBuildInference(stream, async (_text, calls) => { snapshots.push(structuredClone(calls)); });
+  const send = async (value: string) => { controller.enqueue(new TextEncoder().encode(value)); await new Promise(resolve => setImmediate(resolve)); };
+  await send(delta({ tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'write_file', arguments: '{"path":"src/App.tsx","content":"a' } }] }));
+  assert.equal(snapshots.length, 1);
+  now += 100;
+  await send(delta({ tool_calls: [{ index: 0, function: { arguments: 'bc' } }] }));
+  assert.equal(snapshots.length, 1, 'updates inside the throttle window are coalesced');
+  now += 500;
+  await send(delta({ tool_calls: [{ index: 0, function: { arguments: '\\nline' } }] }));
+  assert.equal(snapshots.length, 2, 'same-path argument growth triggers another update');
+  assert.equal(snapshots[1][0].function.arguments.length, snapshots[0][0].function.arguments.length + 8);
+  controller.enqueue(new TextEncoder().encode(finished)); controller.close();
+  await result;
+});
+
+test('write draft labels expose only a safe path and aggregate escaped content counts', () => {
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"src/App.tsx","content":"one\\ntwo\\\\nthree 🌍'),
+    'Drafting src/App.tsx · 2 lines');
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"src/App.tsx","content":"say \\"hello\\"'),
+    'Drafting src/App.tsx · 11 characters');
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"src/App.tsx","content":"a\\r\\n\\uD83C\\uDF0D'), 'Drafting src/App.tsx · 2 lines');
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"src/App.tsx","content":"\\uD83C\\uDF0D'), 'Drafting src/App.tsx · 1 characters');
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"src/App.tsx"'), 'Drafting src/App.tsx');
+  assert.equal(buildToolDraftLabel('write_file', '{"path":"public/generated/image.jpg","content":"secret'), 'Drafting source file · 6 characters');
+  assert.equal(buildToolDraftLabel('run_command', '{"command":"npm run build"}'), 'Type-check and compile');
 });
 
 test('inference stream failures retain provider codes and messages as failure details', async () => {
@@ -386,6 +418,71 @@ test('durable activity replaces partial messages, preserves order and respects o
   assert.match(text, /"text":"Write src\/App.tsx","status":"unknown"/);
   f.sqlite.prepare('DELETE FROM build_apps WHERE id = ?').run(f.appId);
   assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_activity').get() as any).count, 0);
+});
+
+test('public build snapshots show draft progress without file contents or private reasoning', async t => {
+  const f = await fixture(t); f.setAccountStatus(503);
+  Object.assign(f.env, { VERSION_METADATA: { id: 'deployment-test' }, BUILD_AI_GATEWAY: 'test-gateway' });
+  t.mock.method(console, 'error', () => {});
+  let controller!: ReadableStreamDefaultController<Uint8Array>, calls = 0, resolveStream!: () => void;
+  const streamReady = new Promise<void>(resolve => { resolveStream = resolve; });
+  const source = 'export const marker = "PRIVATE_SOURCE_BODY";';
+  const serialized = JSON.stringify({ path: 'src/App.tsx', content: source });
+  const splitAt = serialized.indexOf('PRIVATE_SOURCE_BODY') + 8;
+  f.env.AI = { async run() {
+    if (calls++ === 0) return new ReadableStream<Uint8Array>({ start(value) { controller = value; resolveStream(); } });
+    return { choices: [{ finish_reason: 'stop', message: { content: 'The app is ready for a build check.' } }], usage: { prompt_tokens: 8, completion_tokens: 5 } };
+  } } as unknown as Ai;
+  const running = runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  await streamReady;
+  controller.enqueue(new TextEncoder().encode(delta({ reasoning_content: 'PRIVATE_REASONING', content: 'Building the page.',
+    tool_calls: [{ index: 0, id: 'write-1', type: 'function', function: { name: 'write_file', arguments: serialized.slice(0, splitAt) } }] })));
+  for (let attempt = 0; attempt < 50 && !f.sqlite.prepare("SELECT id FROM build_activity WHERE turn_id = ? AND id = 'tool-0-0'").get(f.turnId); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 2));
+  const during = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  const draft = during.app.turns[0].activity.find((item: any) => item.type === 'tool');
+  assert.match(draft.text, /^Drafting src\/App\.tsx · \d+ characters$/);
+  assert.equal(draft.status, 'proposed');
+  assert.ok(!JSON.stringify(during).includes('PRIVATE_SOURCE_BODY'));
+  assert.ok(!JSON.stringify(during).includes('PRIVATE_REASONING'));
+  assert.deepEqual(JSON.parse((f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId) as { source_json: string }).source_json), {});
+
+  controller.enqueue(new TextEncoder().encode(delta({ tool_calls: [{ index: 0, function: { arguments: serialized.slice(splitAt) } }] })
+    + event({ choices: [{ finish_reason: 'tool_calls' }], usage: { prompt_tokens: 8, completion_tokens: 5 } }) + event('[DONE]')));
+  controller.close();
+  await running;
+  const after = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  const completed = after.app.turns[0].activity.find((item: any) => item.type === 'tool');
+  assert.equal(completed.text, 'Write src/App.tsx');
+  assert.equal(completed.status, 'succeeded');
+  assert.equal(JSON.parse((f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId) as { source_json: string }).source_json)['src/App.tsx'], source);
+});
+
+test('an interrupted partial write stays a draft and never saves its file contents', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  Object.assign(f.env, { VERSION_METADATA: { id: 'deployment-test' }, BUILD_AI_GATEWAY: 'test-gateway' });
+  let controller!: ReadableStreamDefaultController<Uint8Array>, resolveStream!: () => void;
+  const streamReady = new Promise<void>(resolve => { resolveStream = resolve; });
+  const privateContent = 'PRIVATE_UNSAVED_SOURCE';
+  f.env.AI = { async run() { return new ReadableStream<Uint8Array>({ start(value) { controller = value; resolveStream(); } }); } } as unknown as Ai;
+  const running = runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  await streamReady;
+  controller.enqueue(new TextEncoder().encode(delta({ reasoning_content: 'PRIVATE_REASONING', tool_calls: [{ index: 0, id: 'write-1', type: 'function',
+    function: { name: 'write_file', arguments: `{"path":"src/App.tsx","content":"${privateContent}` } }] })));
+  for (let attempt = 0; attempt < 50 && !f.sqlite.prepare("SELECT id FROM build_activity WHERE turn_id = ? AND id = 'tool-0-0'").get(f.turnId); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 2));
+  const during = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.match(during.app.turns[0].activity[0].text, /^Drafting src\/App\.tsx · \d+ characters$/);
+  assert.ok(!JSON.stringify(during).includes(privateContent));
+  assert.ok(!JSON.stringify(during).includes('PRIVATE_REASONING'));
+  controller.error(new Error('stream disconnected'));
+  await running;
+  const after = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  assert.equal(after.app.turns[0].activity[0].status, 'skipped');
+  assert.match(after.app.turns[0].activity[0].text, /^Drafting src\/App\.tsx/);
+  assert.deepEqual(JSON.parse((f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId) as { source_json: string }).source_json), {});
+  assert.ok(!JSON.stringify(after).includes(privateContent));
+  assert.ok(!JSON.stringify(after).includes('PRIVATE_REASONING'));
 });
 
 test('disconnecting the progress stream stops snapshot reads', async () => {
