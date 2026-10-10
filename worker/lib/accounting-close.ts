@@ -66,7 +66,8 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       if (item.event_type === 'funding_state') revoked.set(fact.fundingId, Math.max(revoked.get(fact.fundingId) ?? 0, fact.revokedCents));
       if (item.event_type === 'refund') refunded.set(fact.fundingId, (refunded.get(fact.fundingId) ?? 0) + fact.amountCents);
     }
-    const checkpointUsed = evidence.filter(r => r.event_type === 'compute' || r.event_type === 'legacy_usage').reduce((sum, r) => sum + BigInt(JSON.parse(r.payload).unitMs), 0n);
+    const checkpointUsed = evidence.filter(r => ['compute', 'inference', 'legacy_usage'].includes(r.event_type))
+      .reduce((sum, r) => sum + (r.event_type === 'inference' ? BigInt(JSON.parse(r.payload).costMicroUsd) * 180n : BigInt(JSON.parse(r.payload).unitMs)), 0n);
     if (checkpointUsed !== BigInt(d.usedUnitMs)) issues.add(`wallet_usage_mismatch:${userId}`);
     for (const funding of d.fundings) {
       if (allFunding.get(funding.id) !== funding.creditCents) issues.add(`wallet_funding_missing_or_mismatched:${funding.id}`);
@@ -82,7 +83,7 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       if (expectedCredit !== refundedCredit) issues.add(`refund_credit_not_reconciled:${funding.fundingId}`);
     }
   }
-  for (const userId of new Set(rows.filter(r => r.event_type === 'funding' || r.event_type === 'compute').map(r => r.user_id))) {
+  for (const userId of new Set(rows.filter(r => ['funding', 'compute', 'inference'].includes(r.event_type)).map(r => r.user_id))) {
     if (!checkpoints.has(userId)) issues.add(`wallet_checkpoint_missing:${userId}`);
   }
   // Split source intervals at receipts, revocations, the close boundary and
@@ -132,14 +133,14 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       const revoked = BigInt(d.revokedCents) * UNIT_MS_PER_CENT;
       creditRevoked += max(0n, revoked - lot.revoked); lot.revoked = max(revoked, lot.revoked);
       lot.disputed ||= d.disputed;
-    } else if (row.event_type === 'compute' || row.event_type === 'legacy_usage') {
-      let consumed = BigInt(d.unitMs);
+    } else if (['compute', 'inference', 'legacy_usage'].includes(row.event_type)) {
+      let consumed = row.event_type === 'inference' ? BigInt(d.costMicroUsd) * 180n : BigInt(d.unitMs);
       if (row.event_type === 'compute') {
         if (d.unitMsPerCent !== Number(UNIT_MS_PER_CENT)) issues.add(`unrecognized_compute_rate:${row.event_key}`);
         // Intervals spanning a cutoff are prorated using integer CU-ms. The
         // wallet splits UTC months; later checkpoints may end past this cutoff.
         if (d.endAt > end) consumed = consumed * BigInt(end - d.startAt) / BigInt(d.endAt - d.startAt);
-      } else legacyUsed += consumed;
+      } else if (row.event_type === 'legacy_usage') legacyUsed += consumed;
       used += consumed;
       let remaining = consumed;
       for (const lot of userLots.get(row.user_id) ?? []) {

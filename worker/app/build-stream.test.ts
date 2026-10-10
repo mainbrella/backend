@@ -7,7 +7,8 @@ import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
 import { readBuildInference, buildInference } from '../lib/build-ai';
 import { buildAppStream, saveBuildActivity, buildToolLabel } from '../lib/build-activity';
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
-import { buildStarter } from '../lib/build-contract';
+import { BUILD_MODEL, buildStarter } from '../lib/build-contract';
+import { buildBillingFixture } from './build-billing-test-helpers';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/build-images';
@@ -65,19 +66,21 @@ async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
   for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
     .run(appId, USER_ONE, 'create', 'Hello world', 'Hello world', '{}', now, now);
   f.sqlite.prepare("INSERT INTO build_turns (id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at) VALUES(?,?,?,?,?,'build',0,'running','Building','model',?)")
     .run(turnId, appId, USER_ONE, 'turn', 'Hello world', now);
   f.sqlite.prepare('UPDATE build_apps SET active_turn_id = ? WHERE id = ?').run(turnId, appId);
-  return { ...f, appId, turnId, params: { appId, turnId, userId: USER_ONE } };
+  f.sqlite.prepare('UPDATE build_turns SET model = ? WHERE id = ?').run(BUILD_MODEL, turnId);
+  return { ...f, ...billing, appId, turnId, params: { appId, turnId, userId: USER_ONE } };
 }
 function request(id: string, session = SESSION_ONE, suffix = '') {
   return new Request(`https://api.mainbrella.com/build/apps/${id}${suffix}`, { headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${session}` } });
 }
 
-const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 2, 0xff, 0xd9]);
+const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 4, 0, 4, 0, 0, 0xff, 0xd9]);
 const jpegBase64 = btoa(String.fromCharCode(...jpeg));
 
 test('original images are generated once, streamed as metadata, ownership-checked and exported as portable JPEGs', async t => {
@@ -113,7 +116,7 @@ test('image generation rejects invalid output, enforces asset budgets and checks
   await assert.rejects(generateBuildImage(f.env, { ...f.params, userId: USER_TWO }, 'one', 'Tree', 'Tree'), /build_interrupted/);
   assert.equal(calls, 0);
   for (output of [undefined, 'not an image', btoa('not a JPEG')]) {
-    await assert.rejects(generateBuildImage(f.env, f.params, 'one', 'Tree', 'Tree'), /build_image_invalid/);
+    await assert.rejects(generateBuildImage(f.env, f.params, `bad-${calls}`, 'Tree', 'Tree'), /build_image_invalid/);
   }
   assert.throws(() => buildImageBytes('a'.repeat(1_400_001)), /build_image_invalid/);
   output = jpegBase64;

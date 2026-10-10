@@ -13,7 +13,7 @@ const resource = z.object({ id: z.string(), containerId: z.string(), name: z.str
   size: z.enum(['lite', 'small', 'medium', 'large', 'xl']), startAt: z.number(), endAt: z.number().nullable(), runtimeMs: z.number(),
   computeUnitHours: z.number(), usedCents: z.number(), reservedCents: z.number(), hourlyCents: z.number(), active: z.boolean() });
 const history = z.object({ asOf: z.number(), balance: prepaidBalanceSchema,
-  totals: z.object({ fundedCents: z.number(), revokedCents: z.number(), usedCents: z.number(), unattributedUsedCents: z.number() }),
+  totals: z.object({ fundedCents: z.number(), revokedCents: z.number(), usedCents: z.number(), unattributedUsedCents: z.number(), inferenceUsedCents: z.number() }),
   currentHourlyCents: z.number(), activeResources: z.array(resource), resources: z.array(resource),
   fundings: z.array(z.object({ id: z.string(), createdAt: z.number(), amountCents: z.number(), revokedCents: z.number(), reason: z.enum(['refund', 'dispute']).nullable() })),
   nextResourceCursor: z.string().nullable(), nextFundingCursor: z.string().nullable(), historyTruncated: z.boolean(), retainedResourceLimit: z.literal(256) }).openapi('PrepaidHistory');

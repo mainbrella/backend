@@ -21,7 +21,7 @@ export interface PrepaidResourceUsage {
 }
 export interface PrepaidHistory {
   asOf: number; balance: PrepaidBalance;
-  totals: { fundedCents: number; revokedCents: number; usedCents: number; unattributedUsedCents: number };
+  totals: { fundedCents: number; revokedCents: number; usedCents: number; unattributedUsedCents: number; inferenceUsedCents: number };
   currentHourlyCents: number; activeResources: PrepaidResourceUsage[]; resources: PrepaidResourceUsage[];
   fundings: { id: string; createdAt: number; amountCents: number; revokedCents: number; reason: 'refund' | 'dispute' | null }[];
   nextResourceCursor: string | null; nextFundingCursor: string | null; historyTruncated: boolean; retainedResourceLimit: 256;

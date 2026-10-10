@@ -252,7 +252,7 @@ test('funding history reports original credits and current deductions with purch
   f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 100 });
   f.wallet.applyFunding(f.state, { ...f.payment, id: 'cs_free', createdAt: f.now() + 1, disputed: true });
   const first = f.wallet.history(f.state, { limit: 1 });
-  assert.deepEqual(first.totals, { fundedCents: 1000, revokedCents: 600, usedCents: 0, unattributedUsedCents: 0 });
+  assert.deepEqual(first.totals, { fundedCents: 1000, revokedCents: 600, usedCents: 0, unattributedUsedCents: 0, inferenceUsedCents: 0 });
   assert.deepEqual(first.fundings[0], { id: 'cs_free', createdAt: f.now() + 1, amountCents: 500, revokedCents: 500, reason: 'dispute' });
   const second = f.wallet.history(f.state, { limit: 1, fundingCursor: first.nextFundingCursor });
   assert.deepEqual(second.fundings[0], { id: 'pi_paid', createdAt: f.payment.createdAt, amountCents: 500, revokedCents: 100, reason: 'refund' });

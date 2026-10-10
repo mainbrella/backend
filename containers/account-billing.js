@@ -52,7 +52,7 @@ export class AccountBilling {
     if (prepaidState(state)) {
       const m = this.wallet.metrics(state), balance = this.wallet.status(state);
       const percent = balance.monthlyUsageCents / balance.spendLimitCents * 100;
-      return { ...balance, periodStart: m.periodStart, periodEnd: m.periodEnd, computeUnitHours: m.monthly / 3600000,
+      return { ...balance, periodStart: m.periodStart, periodEnd: m.periodEnd, computeUnitHours: (m.monthly - m.monthlyInference) / 3600000,
         estimatedCents: balance.monthlyUsageCents, minimumCents: 0, committedCents: Math.ceil((m.monthly + m.monthReserved) / 1800000),
         alert: percent >= 100 ? 100 : percent >= 80 ? 80 : percent >= 50 ? 50 : null,
         overagesEnabled: false, invoicingPending: false };

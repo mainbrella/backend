@@ -10,12 +10,15 @@ import { BUILD_MODEL, BUILD_MAX_APPS, BUILD_DAILY_TURNS, BuildError, buildCreate
 import { buildSourceZip } from '../lib/build-zip';
 import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
 import { localCodexConfigured } from '../lib/build-codex';
+import { BUILD_AI_MARKUP_PERCENT, buildTokenPrices } from '../lib/build-pricing';
+import { settleReportedBuildUsage } from '../lib/build-billing';
+import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, type BuildImageRow } from '../lib/build-images';
 
 export function buildConfigured(env: Env) {
-  return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI) && env.BUILD_WORKFLOW && previewsConfigured(env));
+  return env.BUILD_ENABLED === 'true' && Boolean((localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
 }
-function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = [], images: Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>[] = []) {
+function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActivityRow[] = [], images: Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>[] = [], costs: Record<string, number> = {}) {
   const preview = row.preview_json ? JSON.parse(row.preview_json) as BuildPreview : null;
   return { id: row.id, name: row.name, prompt: row.initial_prompt, revision: row.revision,
     activeTurnId: row.active_turn_id, container: row.container_json ? JSON.parse(row.container_json) as BuildContainer : null,
@@ -24,7 +27,8 @@ function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActi
       stage: turn.stage, summary: turn.summary, error: turn.error, log: turn.log, model: turn.model,
       activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => item),
       images: images.filter(image => image.turn_id === turn.id).map(publicBuildImage),
-      inputTokens: turn.input_tokens, outputTokens: turn.output_tokens, createdAt: turn.created_at, finishedAt: turn.finished_at })) } : {}),
+      inputTokens: turn.input_tokens, outputTokens: turn.output_tokens, aiCostCents: (costs[turn.id] ?? 0) / 10000,
+      createdAt: turn.created_at, finishedAt: turn.finished_at })) } : {}),
   };
 }
 async function detail(env: Env, userId: string, id: string) {
@@ -36,11 +40,17 @@ async function detail(env: Env, userId: string, id: string) {
     .bind(id, userId).all<BuildActivityRow>();
   const { results: images } = await env.DB.prepare('SELECT id, turn_id, tool_id, label FROM build_images WHERE app_id = ? ORDER BY rowid')
     .bind(id).all<Omit<BuildImageRow, 'data' | 'prompt' | 'app_id'>>();
-  return { app: publicApp(row, results, activity, images) };
+  const { results: costs } = await env.DB.prepare("SELECT turn_id, SUM(cost_micro_usd) AS cost FROM build_ai_usage WHERE app_id = ? AND user_id = ? AND status = 'settled' GROUP BY turn_id")
+    .bind(id, userId).all<{ turn_id: string; cost: number }>();
+  return { app: publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost]))) };
 }
 async function requireBuildAccess(env: Env, userId: string) {
   if (!buildConfigured(env)) throw new BuildError('build_unavailable');
   if (!(await resolveEntitlement(env, userId)).active) throw new BuildError('subscription_required', 402);
+  if (!localCodexConfigured(env)) {
+    const { balance } = await accountBillingRequest(env, userId, '/billing/balance');
+    if (balance.availableBalanceCents <= 0) throw new BuildError('insufficient_balance', 402);
+  }
 }
 export async function dispatchBuildTurn(env: Env, turn: BuildTurnRow) {
   if (!env.BUILD_WORKFLOW) throw new BuildError('build_unavailable');
@@ -65,6 +75,7 @@ export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'a
   ]);
 }
 export async function reconcileBuildTurns(env: Env) {
+  await settleReportedBuildUsage(env);
   if (!buildConfigured(env)) return;
   const { results } = await env.DB.prepare("SELECT * FROM build_turns WHERE status IN ('queued', 'running') ORDER BY created_at LIMIT 20").all<BuildTurnRow>();
   for (const turn of results) {
@@ -106,7 +117,8 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (match[1] === 'config') return authJson({ available: buildConfigured(env), model: env.BUILD_MODEL || BUILD_MODEL,
-      maxApps: BUILD_MAX_APPS, dailyTurns: BUILD_DAILY_TURNS, aiBilling: 'included', computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
+      maxApps: BUILD_MAX_APPS, dailyTurns: BUILD_DAILY_TURNS, aiBilling: localCodexConfigured(env) ? 'included' : 'prepaid',
+      aiMarkupPercent: BUILD_AI_MARKUP_PERCENT, computeUnitHourlyCents: 2, size: 'small' }, 200, cors);
     const id = match[2];
     if (request.method === 'GET' && !id) {
       const { results } = await env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT 50').bind(user.id).all<BuildAppRow>();

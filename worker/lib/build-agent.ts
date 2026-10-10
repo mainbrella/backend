@@ -6,6 +6,7 @@ import { failBuildTurn } from '../app/build';
 import { buildInference, buildSystemPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
 import { buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
+import { settleReportedBuildUsage } from './build-billing';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
@@ -210,7 +211,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
                 if (call?.function.name) await saveBuildActivity(env, params, round * 10 + index + 1,
                   { id: `tool-${round}-${index}`, type: 'tool', text: buildToolLabel(call.function.name, call.function.arguments), status: 'running' });
               }
-            }, params.turnId);
+            }, params.turnId, { params, operation: `text-${round}`, model: initial.turn.model });
             if (result.message.content) await saveBuildActivity(env, params, round * 10,
               { id: `ai-${round}`, type: 'message', text: result.message.content, status: 'succeeded' });
             return result;
@@ -221,6 +222,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
             throw error;
           }
         });
+        await step.do(`Settle AI usage ${round}`, retry, async () => settleReportedBuildUsage(env, params.turnId));
         if ('error' in result) throw new BuildError(result.error);
         inputTokens += result.inputTokens; outputTokens += result.outputTokens;
         messages.push(result.message);
@@ -240,6 +242,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
               await step.do(`Command stage ${round}-${index}`, retry, async () => stage(env, params, activity.text));
             }
             const output = await executeTool(env, params, container, files, call, step, `tool-${round}-${index}`, logs);
+            await step.do(`Settle tool usage ${round}-${index}`, retry, async () => settleReportedBuildUsage(env, params.turnId));
             await step.do(`Tool complete ${round}-${index}`, retry, async () => saveBuildActivity(env, params, round * 10 + index + 1,
               { ...activity, status: output.succeeded ? 'succeeded' : 'failed' }));
             files = output.files; logs = output.logs;
@@ -292,6 +295,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
     await step.do('Record build failure', retry, async () => failBuildTurn(env, { id: params.turnId, app_id: params.appId, user_id: params.userId }, code));
   } finally {
+    await step.do('Settle remaining AI usage', retry, async () => settleReportedBuildUsage(env, params.turnId));
     if (localCodexConfigured(env)) await step.do('Close local inference', { ...noRetry, timeout: '10 seconds' },
       async () => closeCodexInference(env, params.turnId));
   }
