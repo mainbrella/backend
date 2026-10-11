@@ -2,6 +2,8 @@
 
 Published on PyPI as `mainbrella` 0.1.0. Python 3.10+; standard-library runtime.
 
+The P1 additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+
 ```sh
 pip install mainbrella==0.1.0
 ```
@@ -154,6 +156,24 @@ client.workspaces.delete(saved["id"])
 
 `client.workspaces.list()`, `.get(id)` and `.update(id, name=…, archived=True)` manage metadata. Retry an ambiguous save with the original body and key (`error.idempotency_key`). Restore consumes one start and requires the saved image digest, size and internet policy. Filesystem bytes return in a fresh generation; RAM, processes and previews do not resume. Quotas and expiry apply. Archive retains quota; deletion revokes future restores without immediately erasing provider-held bytes.
 
+## Unreleased stateful Python interpreter
+
+Stateful Python contexts are also implemented in this checkout. Use an image
+with `python3` and check the API's `codeInterpreter` capability:
+
+```python
+with sandbox.code.create() as context:
+    context.run('values = [2, 3, 5]')
+    result = context.run('sum(values)', timeout_ms=1000)
+    print(result['results'], result['error'])
+```
+
+Contexts hold a shared operation slot for at most 15 minutes. Variables survive
+calls and Python exceptions; they are lost on stop, timeout, cancellation, or
+runtime recovery. Results contain stdout/stderr, MIME values, and structured
+errors. Rich HTML is untrusted. Code is never automatically retried. See
+[interpreter limits and lifecycle](../../docs/code-interpreter.md).
+
 ## Unreleased filesystem lifecycle and security helpers
 
 The following helpers are implemented in this checkout; they are not part of the
@@ -187,3 +207,97 @@ and HTTPS to allowed public destinations. CIDR/domain denies take precedence.
 The relay injects credentials outside the guest into the configured HTTPS host
 and header. Secret values are never readable through the SDK. Choose a trusted
 upstream and scoped tokens; an upstream can disclose transformed credentials.
+
+
+## Client-managed prewarming (unreleased)
+
+This checkout provides explicit prewarming of ordinary, billed ad-hoc sandboxes.
+There is no server pool, background refill, keepalive or reuse of acquired
+machines. Normal start, concurrency, compute, idle and session limits apply.
+
+```python
+pool = client.pool(target_size=2, create={"catalog_id": "python"})
+sandbox = None
+try:
+    pool.refill()
+    sandbox = pool.acquire()  # pool_empty if waiting generations have expired.
+    print(sandbox.commands.run("python --version"))
+    pool.refill()  # Explicit replacement; requires available account budget.
+finally:
+    try:
+        if sandbox is not None:
+            sandbox.kill()
+    finally:
+        pool.close()  # Only unassigned inventory is cleaned up.
+```
+
+Use `image_id` or `workspace_id` for a prepared environment. Calls serialize
+across threads and acquisition checks the exact generation. Uncertain creation
+retries retain their original key, exposed through `pool.state["pending"]`.
+`close()` may finish an ambiguous create before deleting it and therefore incur
+a start/compute charge. Retry cleanup failures with `close()`; acquired machines
+are the caller's responsibility.
+
+Pool bookkeeping lives only in this process and cannot be restored from `state`.
+Journal identities and pending keys in your application for crash recovery via
+normal SDK operations. Pending creation retries stop after at most one hour,
+bounded by half the API's advertised retention; `pool_creation_expired` requires
+manual reconciliation. There is no memory-preserving pause/resume.
+
+## Image builds, versions and tags (unreleased)
+
+```python
+queued = client.images.create("Agent tools",
+    "FROM mainbrella:base\nRUN python -m pip install requests")
+image = client.images.get(queued["image"]["id"])["image"]
+print(client.images.logs(image["id"]))
+# After the build reports ready:
+client.images.tags.set("agent-tools.stable", image["id"])
+resolved = client.images.tags.get("agent-tools.stable")
+with client.create(image_id=resolved["image"]["id"]) as sandbox:
+    print(sandbox.image_digest)
+```
+
+Use `images.list()`, `.delete(id)`, `.tags.list()` and `.tags.delete(tag)` for
+management. Optional build `context` contains gzip tar bytes, at most 512 KiB.
+Builds still require live `images.customBuilds`; tags require the new migration
+and backend deployment. Tags are account-scoped, capped at 30, and point only to
+ready images. Resolve once and retain the immutable image ID with the creation
+key for retries; moving a tag does not change existing containers.
+
+## Streaming transfers and directory copies
+
+Check `client.capabilities()["files"]["streamingTransfers"]` before using the new
+transfer endpoint. Files can be up to 64 MiB; input and output stay streaming.
+
+```python
+import os
+import shutil
+from threading import Event
+
+with open("./dataset.bin", "rb") as source:
+    sandbox.files.upload("/workspace/dataset.bin", source, size=os.fstat(source.fileno()).st_size)
+with sandbox.files.download("/workspace/dataset.bin") as source, open("./download.bin", "wb") as target:
+    shutil.copyfileobj(source, target, length=65536)
+
+sandbox.files.upload_directory("./project", "/workspace/project")
+sandbox.files.download_directory("/workspace/output", "./output")
+stop = Event()
+for event in sandbox.files.watch("/workspace/project", stop_event=stop):
+    print(event["type"], event["entry"]["path"])
+    stop.set()
+```
+
+Uploads require a clean, exact-length EOF before atomic replacement; `bytes`
+inputs infer their size. Downloads are context-managed readers: close them when
+finished and discard incomplete output. Configure `timeout` for the expected
+transfer duration (default 90 seconds); the runtime allows five minutes or the
+generation deadline. Transfers share execution capacity and never automatically
+retry writes. Interrupted guest processes may leave hidden temporary files.
+
+Directory copies reject symlinks and special files, keep unrelated destination
+files and bound traversal to 10,000 entries and 64 levels. Each file is atomic;
+the directory as a whole is not. Permissions are not synchronized. Keep both trees
+stable during copying. Polling `watch` starts after an initial metadata baseline;
+its default interval is one second. Transient changes and same-size rewrites within
+one second may be missed. The native server watcher capability remains unavailable.

@@ -12,14 +12,16 @@ export const capabilitiesSchema = z.object({
   execution: flags('foreground', 'streaming', 'background', 'cancellation', 'reconnect', 'pty', 'programmaticPty', 'ptyResize', 'stdin', 'signals', 'argv', 'managedProcessListing', 'processListing').extend({
     maxCommandBytes: limit, maxTimeoutMs: limit, maxOutputBytes: limit, maxConcurrentOperations: limit,
     maxManagedTimeoutMs: limit, retentionMs: limit, maxRetainedExecutions: limit, maxStdinChunkBytes: limit, maxStdinBytes: limit, maxPendingStdinBytes: limit }),
-  files: flags('read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
-    .extend({ maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
+  codeInterpreter: z.object({ supported: z.boolean(), languages: z.array(z.literal('python')), stateful: z.boolean(), memoryPersistence: z.boolean(), maxCodeBytes: limit, maxTimeoutMs: limit, maxContextMs: limit, maxResultBytes: limit }),
+  pools: flags('managed', 'sdkPrewarming'),
+  files: flags('streamingTransfers', 'read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
+    .extend({ maxTransferBytes: limit, transferTimeoutMs: limit, maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
   persistence: flags('filesystemAfterStop', 'filesystemFork', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
   observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   projects: flags('supported', 'customDomains', 'localDevelopment').extend({ apexIps: z.array(z.string()) }),
-  images: z.object({ catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
-    maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
+  images: z.object({ tags: z.boolean(), catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), limits: z.object({
+    maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit, maxTags: limit }) }),
   resources: z.array(machineSizeSchema),
   networking: flags('outboundInternet', 'internetControl', 'privateServices', 'egressPolicies', 'regionSelection'),
   secrets: flags('vault'),

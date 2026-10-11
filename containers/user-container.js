@@ -3,8 +3,10 @@ import { UserContainerController } from "./user-container-core.js";
 import { upgradeTerminal } from "./terminal.js";
 import { executeCommand } from "./commands.js";
 import { accessFile } from "./files.js";
+import { transferFile } from './file-transfers.js';
 import { accessFilesystem } from './filesystem.js';
 import { ManagedExecutions } from './executions.js';
+import { CodeContexts } from './code-contexts.js';
 import { ContainerPreviews } from './previews.js';
 import { ContainerProjectIngress } from './project-ingress.js';
 import { WorkloadWebhooks } from './webhooks.js';
@@ -36,6 +38,7 @@ export class UserContainer extends DurableObject {
     this.terminals = new Set();
     this.commands = new Set();
     this.executions = new ManagedExecutions(this.controller, this.commands, ctx);
+    this.codeContexts = new CodeContexts(this.controller, this.commands, ctx);
     this.executions.onStatus = record => this.notifyActivity({ resource: 'executions', createdAt: record.createdAt, executionId: record.id });
     this.previews = new ContainerPreviews(this.controller, { allowLocal: env.LOCAL_DEV === 'true' });
     this.previews.onChange = createdAt => this.notifyActivity({ resource: 'previews', createdAt });
@@ -60,6 +63,7 @@ export class UserContainer extends DurableObject {
     };
     ctx.blockConcurrencyWhile(async () => {
       await this.executions.recover();
+      await this.codeContexts.recover();
       if (ctx.container.running) {
         const metadata = await ctx.storage.get('builderMachine');
         await ctx.container.setInactivityTimeout(metadata?.idleTimeoutMs ?? 10 * 60_000);
@@ -91,6 +95,8 @@ export class UserContainer extends DurableObject {
     if (path === '/project' || path.startsWith('/project/')) return this.projects.forward(request);
     if (path === '/preview' || path.startsWith('/preview/')) return this.previews.forward(request);
     if (path.startsWith('/filesystem/')) return accessFilesystem(this.controller, request, this.commands);
+    if (path === '/code-contexts' || path.startsWith('/code-contexts/')) return this.codeContexts.fetch(request);
+    if (path === '/files/transfer') return transferFile(this.controller, request, this.commands);
     if (new URL(request.url).pathname === '/executions' || new URL(request.url).pathname.startsWith('/executions/')) return this.executions.fetch(request);
     if (new URL(request.url).pathname === '/files') return accessFile(this.controller, request, this.commands);
     if (new URL(request.url).pathname === '/exec') return executeCommand(this.controller, request, this.commands);

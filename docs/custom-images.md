@@ -45,3 +45,24 @@ Reconcile pending builds and any admitted generation before retrying. Leave the
 shared build secret in place for deployment-lock and callback authentication.
 Do not claim production-qualified custom builds until the customer workflow has
 passed and its cleanup evidence is retained.
+
+## Image versions and account tags (unreleased)
+
+Each successful build has an immutable image ID and digest. The source checkout
+adds `digest` to image metadata and account-scoped aliases through
+`GET /images/tags` and `GET`, `PUT`, `DELETE /images/tags/{tag}`. Apply
+`039_image_tags.sql` before deploying these routes. This does not enable builds.
+
+`PUT` takes `{ "imageId": "<ready-image-uuid>" }`. Tags contain 1–64 lowercase
+letters, digits, dots, underscores or hyphens and start with a letter or digit.
+An account may hold 30 tags. The write atomically checks image readiness and
+ownership; moving an existing tag remains possible at the limit. Deleting an
+image removes its aliases. Another account cannot resolve, move or remove your
+aliases. `DELETE` is idempotent within the requesting account.
+
+Resolve a tag, then pass its returned image ID to normal container creation.
+Resolve once and retain that ID with the creation key when retrying: a later tag
+move must not alter an in-flight creation's image selection. Existing containers
+continue using their selected digest. Private registry pulls, arbitrary base
+images, and cross-build caching remain unavailable; the bounded build recipe and
+production qualification requirements above still apply.

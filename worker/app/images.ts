@@ -2,7 +2,7 @@ import { authCorsHeaders, authJson, hashToken } from './auth-core';
 import { containerUser } from './container-auth';
 
 export const IMAGE_LIMITS = Object.freeze({ maxBuildsPerMonth: 10, maxSavedImages: 3,
-  maxContextBytes: 512 * 1024, maxDockerfileBytes: 16 * 1024, maxBuildSeconds: 300 });
+  maxContextBytes: 512 * 1024, maxDockerfileBytes: 16 * 1024, maxBuildSeconds: 300, maxTags: 30 });
 const MAX_REQUEST_BYTES = IMAGE_LIMITS.maxContextBytes + IMAGE_LIMITS.maxDockerfileBytes + 8192;
 const ACTIVE = "('queued', 'building', 'publishing')";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -12,7 +12,53 @@ export type ImageRow = { id: string; user_id: string; name: string; status: stri
   logs: string; created_at: string; updated_at: string; deadline: string };
 
 export function publicImage(row: ImageRow) {
-  return { id: row.id, name: row.name, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, name: row.name, status: row.status, digest: row.image_ref?.match(/@(?<digest>sha256:[a-f0-9]{64})$/)?.groups?.digest ?? null,
+    createdAt: row.created_at, updatedAt: row.updated_at };
+}
+
+const IMAGE_TAG = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+type ImageTagRow = { tag: string; image_id: string; updated_at: string };
+
+async function imageTags(request: Request, env: Env, userId: string, cors: Record<string, string>, tag?: string) {
+  if (tag === undefined) {
+    const rows = await env.DB.prepare(`SELECT t.tag, t.image_id, t.updated_at FROM container_image_tags t
+      JOIN container_images i ON i.id = t.image_id AND i.user_id = t.user_id
+      WHERE t.user_id = ? AND i.status = 'ready' ORDER BY t.tag`).bind(userId).all<ImageTagRow>();
+    return authJson({ tags: rows.results.map(row => ({ tag: row.tag, imageId: row.image_id, updatedAt: row.updated_at })) }, 200, cors);
+  }
+  if (request.method === 'PUT') {
+    const bytes = await boundedBody(request, 1024);
+    let body: { imageId?: unknown } | null = null;
+    try { if (bytes) body = JSON.parse(new TextDecoder().decode(bytes)); } catch {}
+    if (!body || typeof body.imageId !== 'string' || !UUID.test(body.imageId) || Object.keys(body).some(key => key !== 'imageId')) {
+      return authJson({ error: 'invalid_image_tag' }, 400, cors);
+    }
+    const image = await ownedImage(env, userId, body.imageId);
+    if (!image) return authJson({ error: 'not_found' }, 404, cors);
+    if (image.status !== 'ready') return authJson({ error: 'image_not_ready' }, 409, cors);
+    const now = new Date().toISOString();
+    try {
+      // The SELECT rechecks ownership/readiness atomically with the write. The
+      // admission trigger also caps new tags without racing simultaneous PUTs.
+      const result = await env.DB.prepare(`INSERT INTO container_image_tags (user_id, tag, image_id, updated_at)
+        SELECT ?, ?, id, ? FROM container_images WHERE id = ? AND user_id = ? AND status = 'ready'
+        ON CONFLICT(user_id, tag) DO UPDATE SET image_id = excluded.image_id, updated_at = excluded.updated_at`)
+        .bind(userId, tag, now, image.id, userId).run();
+      if (!result.meta.changes) return authJson({ error: 'image_not_ready' }, 409, cors);
+    } catch (error) {
+      if (String(error).includes('image_tag_limit')) return authJson({ error: 'image_tag_limit' }, 429, cors);
+      throw error;
+    }
+    return authJson({ tag, imageId: image.id, updatedAt: now }, 200, cors);
+  }
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM container_image_tags WHERE user_id = ? AND tag = ?').bind(userId, tag).run();
+    return authJson({ deleted: true }, 200, cors);
+  }
+  const row = await env.DB.prepare(`SELECT i.* FROM container_image_tags t JOIN container_images i
+    ON i.id = t.image_id AND i.user_id = t.user_id WHERE t.user_id = ? AND t.tag = ? AND i.status = 'ready'`)
+    .bind(userId, tag).first<ImageRow>();
+  return row ? authJson({ tag, image: publicImage(row) }, 200, cors) : authJson({ error: 'not_found' }, 404, cors);
 }
 
 // Restrict this first release to one Mainbrella-based development environment.
@@ -134,9 +180,11 @@ export async function handleImagesRequest(request: Request, env: Env) {
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const path = new URL(request.url).pathname;
+  const tagMatch = path.match(/^\/images\/tags\/([^/]+)$/);
+  const tags = path === '/images/tags' || Boolean(tagMatch && IMAGE_TAG.test(tagMatch[1]));
   const match = path.match(/^\/images\/([a-f0-9-]+)(\/logs)?$/);
-  if (path !== '/images' && (!match || !UUID.test(match[1]))) return authJson({ error: 'not_found' }, 404, cors);
-  const allowed = path === '/images' ? ['GET', 'POST'] : match?.[2] ? ['GET'] : ['GET', 'DELETE'];
+  if (path !== '/images' && !tags && (!match || !UUID.test(match[1]))) return authJson({ error: 'not_found' }, 404, cors);
+  const allowed = tags ? tagMatch ? ['GET', 'PUT', 'DELETE'] : ['GET'] : path === '/images' ? ['GET', 'POST'] : match?.[2] ? ['GET'] : ['GET', 'DELETE'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, cors);
   if (request.method !== 'GET' && !request.headers.get('Origin') && !request.headers.has('Authorization')) {
     return authJson({ error: 'origin_required' }, 403, cors);
@@ -144,6 +192,7 @@ export async function handleImagesRequest(request: Request, env: Env) {
   try {
     const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    if (tags) return await imageTags(request, env, user.id, cors, tagMatch?.[1]);
     if (path === '/images' && request.method === 'POST') return await createImage(request, env, user.id, cors);
     await expireImageBuilds(env);
     if (path === '/images') {

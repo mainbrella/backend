@@ -10,6 +10,12 @@ async function workflow(apiKey: string, size: MachineSize) {
     const result: CommandResult = await sandbox.commands.run('printf hello');
     await sandbox.files.write('/tmp/probe', new Uint8Array([0, 255]));
     const bytes: Uint8Array = await sandbox.files.read('/tmp/probe');
+    await sandbox.files.upload('/tmp/probe-large', new ReadableStream<Uint8Array>({ start(c) { c.enqueue(bytes); c.close(); } }), { size: bytes.byteLength });
+    const download: ReadableStream<Uint8Array> = await sandbox.files.download('/tmp/probe-large');
+    await download.cancel();
+    await sandbox.files.uploadDirectory('./fixtures', '/tmp/files');
+    await sandbox.files.downloadDirectory('/tmp/files', './download');
+    for await (const event of sandbox.files.watch('/tmp/files', { signal: AbortSignal.timeout(1000) })) { console.log(event.type, event.entry.path); break; }
     await sandbox.files.mkdir('/tmp/work', { recursive: true, mode: '0700' });
     const page = await sandbox.files.list('/tmp/work', { limit: 100 });
     const entry = await sandbox.files.stat('/tmp/probe');
@@ -29,6 +35,13 @@ async function workflow(apiKey: string, size: MachineSize) {
     await terminal.resize(132, 40);
     await terminal.cancel();
     const jobs = await sandbox.commands.list();
+    const codeContext = await sandbox.code.create({ language: 'python' });
+    const codeResult = await codeContext.run('values = [1, 2]\nvalues', { timeoutMs: 1000 });
+    const codeMime: string | undefined = codeResult.results[0]?.mimeType;
+    const codeError: string | undefined = codeResult.error?.message;
+    await sandbox.code.list();
+    await sandbox.code.attach(codeContext.id).close();
+    void codeMime; void codeError;
     const history = await sandbox.events({ cursor: 0, limit: 100 });
     if (capabilities.observability.metrics) await sandbox.metrics();
     if (capabilities.observability.webhooks) {
@@ -50,3 +63,18 @@ async function workflow(apiKey: string, size: MachineSize) {
   }
 }
 void workflow;
+
+async function poolAndImageWorkflow(client: Mainbrella) {
+  const queued = await client.images.create({ name: 'Tools', dockerfile: 'FROM mainbrella:base' });
+  const { image } = await client.images.get(queued.image.id);
+  const digest: string | null | undefined = image.digest;
+  if (image.status !== 'ready') return { digest, logs: await client.images.logs(image.id) };
+  await client.images.tags.set('tools.stable', image.id);
+  const resolved = await client.images.tags.get('tools.stable');
+  const pool = client.pool({ targetSize: 2, create: { imageId: resolved.image.id } });
+  await pool.refill();
+  const sandbox = await pool.acquire();
+  try { return { digest, command: await sandbox.commands.run('true'), state: pool.state }; }
+  finally { try { await sandbox.kill(); } finally { await pool.close(); } }
+}
+void poolAndImageWorkflow;

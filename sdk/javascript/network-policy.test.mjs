@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Mainbrella } from './index.js';
-import { normalizeNetworkPolicy } from './network-policy.js';
-import { normalizeNetworkPolicy as serverPolicy } from '../../containers/security-contract.js';
+const { Mainbrella } = await import(process.env.MAINBRELLA_SDK_MODULE || './index.js');
+const { normalizeNetworkPolicy } = await import(process.env.MAINBRELLA_SDK_NETWORK_POLICY || './network-policy.js');
+const { normalizeNetworkPolicy: serverPolicy } = await import(process.env.MAINBRELLA_SERVER_SECURITY || '../../containers/security-contract.js');
 
 const apiKey = `mb_${'a'.repeat(64)}`, createdAt = '2026-10-11T00:00:00.000Z';
 const secret = 'sec_d688d42a-25ef-4c13-9b28-21a0fde6e163';

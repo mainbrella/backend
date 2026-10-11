@@ -1,5 +1,6 @@
 """Synchronous Mainbrella client. No third-party runtime dependencies."""
 import json
+import io
 import hashlib
 import hmac
 import re
@@ -10,6 +11,9 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from ._network_policy import normalize_network_policy
+from ._file_transfers import FileTransfers, Download
+from ._pool import SandboxPool
+from ._images import Images
 
 _USER_AGENT = "mainbrella-python/0.1.0"
 
@@ -42,12 +46,14 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _transport(url, method, headers, body, timeout):
+def _transport(url, method, headers, body, timeout, stream=False):
     opener = build_opener(_NoRedirect())
     try:
         response = opener.open(Request(url, data=body, headers=headers, method=method), timeout=timeout)
     except HTTPError as error:
         response = error
+    if stream:
+        return response.status, response
     with response:
         return response.status, response.read()
 
@@ -72,21 +78,26 @@ class Mainbrella:
         self._transport = transport
         self.workspaces = _Workspaces(self)
         self.secrets = _Secrets(self)
+        self.images = Images(self)
 
-    def request(self, path, method="GET", body=None, headers=None, binary=False, timeout=None):
+    def request(self, path, method="GET", body=None, headers=None, binary=False, timeout=None, stream=False, raw_body=False):
         if not path.startswith("/") or path.startswith("//") or urlsplit(path).scheme:
             raise MainbrellaError("invalid_api_path")
         outgoing = dict(headers or {})
         outgoing["User-Agent"] = _USER_AGENT
         outgoing["Authorization"] = f"Bearer {self._api_key}"
         if body is not None:
-            outgoing["Content-Type"] = "application/octet-stream" if isinstance(body, bytes) else "application/json"
-            body = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+            outgoing.setdefault("Content-Type", "application/octet-stream" if isinstance(body, bytes) or raw_body else "application/json")
+            body = body if isinstance(body, bytes) or raw_body else json.dumps(body).encode("utf-8")
         try:
-            status, data = self._transport(self.base_url + path, method, outgoing, body, timeout or self.timeout)
+            options = {'stream': True} if stream and self._transport is _transport else {}
+            status, data = self._transport(self.base_url + path, method, outgoing, body, timeout or self.timeout, **options)
         except Exception:
             raise MainbrellaError("transport_unavailable") from None
         if not 200 <= status < 300:
+            if hasattr(data, 'read'):
+                with data:
+                    data = data.read(16384)
             preview_id = None
             try:
                 value = json.loads(data)
@@ -99,6 +110,15 @@ class Mainbrella:
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
                 code = "request_failed"
             raise MainbrellaError(code, status, preview_id=preview_id)
+        if stream:
+            if isinstance(data, bytes):
+                return Download(io.BytesIO(data), len(data))
+            try:
+                size = int(data.headers.get('Content-Length', ''))
+            except (AttributeError, TypeError, ValueError):
+                data.close()
+                raise MainbrellaError('invalid_response') from None
+            return Download(data, size)
         if binary:
             return data
         try:
@@ -111,6 +131,9 @@ class Mainbrella:
 
     def list(self):
         return self.request("/containers")
+
+    def pool(self, target_size=1, create=None):
+        return SandboxPool(self, target_size=target_size, create=create)
 
     def connect(self, container_id, created_at):
         return Sandbox(self, container_id, created_at)
@@ -258,7 +281,7 @@ class _Workspaces:
         return self.client.create(workspace_id=workspace_id, **options)
 
 
-class _Files:
+class _Files(FileTransfers):
     def __init__(self, sandbox):
         self.sandbox = sandbox
 
@@ -346,6 +369,50 @@ class _Webhook:
         if not isinstance(event_id, str) or not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", event_id):
             raise MainbrellaError("invalid_event_identity")
         return self.sandbox.client.request(self.sandbox._path("/containers/webhook/retry"), "POST", {"eventId": event_id})
+
+
+class _CodeContexts:
+    def __init__(self, sandbox):
+        self.sandbox = sandbox
+
+    def create(self, language='python'):
+        record = self.sandbox.client.request(self.sandbox._path('/containers/code-contexts'), 'POST', {'language': language})
+        return CodeContext(self.sandbox, record['id'], record.get('expiresAt'))
+
+    def list(self):
+        return self.sandbox.client.request(self.sandbox._path('/containers/code-contexts'))
+
+    def attach(self, context_id):
+        return CodeContext(self.sandbox, context_id)
+
+
+class CodeContext:
+    def __init__(self, sandbox, context_id, expires_at=None):
+        if not isinstance(context_id, str) or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', context_id):
+            raise MainbrellaError('invalid_code_context_identity')
+        self.sandbox = sandbox
+        self.id = context_id
+        self.language = 'python'
+        self.expires_at = expires_at
+
+    def run(self, code, timeout_ms=None):
+        body = {'code': code}
+        if timeout_ms is not None:
+            body['timeoutMs'] = timeout_ms
+        return self.sandbox.client.request(self.sandbox._path('/containers/code-contexts/' + self.id + '/execute'), 'POST', body)
+
+    def close(self):
+        return self.sandbox.client.request(self.sandbox._path('/containers/code-contexts/' + self.id), 'DELETE')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        try:
+            self.close()
+        except MainbrellaError as error:
+            if error.code != 'code_context_not_found':
+                raise
 
 
 class _Commands:
@@ -500,6 +567,7 @@ class Sandbox:
         self.created_at = created_at
         self.files = _Files(self)
         self.commands = _Commands(self)
+        self.code = _CodeContexts(self)
         self.previews = _Previews(self)
         self.webhook = _Webhook(self)
 

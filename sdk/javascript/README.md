@@ -2,6 +2,8 @@
 
 Published as `@mainbrella/sdk` 0.1.0 on npm. Requires Node 22+; no runtime dependencies.
 
+The P1 additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+
 ```sh
 npm install @mainbrella/sdk@0.1.0
 ```
@@ -210,6 +212,28 @@ After publishing the updated package, the one-shot form is
 `npx --package @mainbrella/sdk mainbrella repo acme/demo --open`. Until then, run
 `node sdk/javascript/cli.mjs repo acme/demo --open` from this checkout.
 
+## Unreleased stateful Python interpreter
+
+Stateful Python contexts are also implemented in this checkout. Use an image
+with `python3` and check the API's `codeInterpreter` capability:
+
+```js
+const context = await sandbox.code.create();
+try {
+  await context.run('values = [2, 3, 5]');
+  const result = await context.run('sum(values)', { timeoutMs: 1000 });
+  console.log(result.results, result.error);
+} finally {
+  await context.close();
+}
+```
+
+Contexts hold a shared operation slot for at most 15 minutes. Variables survive
+calls and Python exceptions; they are lost on stop, timeout, cancellation, or
+runtime recovery. Results contain stdout/stderr, MIME values, and structured
+errors. Rich HTML is untrusted. Code is never automatically retried. See
+[interpreter limits and lifecycle](../../docs/code-interpreter.md).
+
 ## Unreleased filesystem lifecycle and security helpers
 
 The following helpers are implemented in this checkout; they are not part of the
@@ -247,3 +271,144 @@ and HTTPS to allowed public destinations. CIDR/domain denies take precedence.
 The relay injects credentials outside the guest into the configured HTTPS host
 and header. Secret values are never readable through the SDK. Choose a trusted
 upstream and scoped tokens; an upstream can disclose transformed credentials.
+
+## MCP server (source checkout)
+
+The unreleased source includes a Node 22+ stdio MCP server. With
+`MAINBRELLA_API_KEY` already set in the parent environment, configure your agent:
+
+```json
+{
+  "mcpServers": {
+    "mainbrella": {
+      "command": "node",
+      "args": ["/absolute/path/to/backend/sdk/javascript/mcp.mjs"]
+    }
+  }
+}
+```
+
+Use your client's secret/environment settings if it does not inherit the parent
+shell. No key belongs in the prompt or committed config. Tools include discovery,
+commands, text files, workspace save and filesystem lifecycle; every mutation is
+bound to a generation or explicit creation key. Follow capability discovery for
+gated operations. This executable is not in the published 0.1.0 package yet.
+
+## OTLP pull export
+
+The HTTP API exports collector-compatible JSON without a telemetry dependency:
+
+```js
+const response = await client.request(sandbox.path('/containers/telemetry/logs', {
+  cursor: '0', limit: '100',
+}), { stream: true });
+const payload = await response.json(); // Forward to your collector /v1/logs.
+const nextCursor = response.headers.get('Mainbrella-Next-Cursor');
+// Persist nextCursor only after the collector acknowledges this payload.
+```
+
+Use `/containers/telemetry/metrics` with non-overlapping `from`/`to` ranges for
+OTLP CPU and memory metrics when `observability.metrics` is enabled. Log export
+requires `observability.otlp`. Missing metric samples are not zero measurements.
+
+
+## Client-managed prewarming (unreleased)
+
+Pools in this checkout keep a local inventory of ordinary, billed ad-hoc
+sandboxes. They require a running client process and explicit refill; there is
+no server pool, background scheduler, keepalive, or reuse of acquired machines.
+Normal account start, concurrency, compute budgets, idle timeout and maximum
+session duration apply while a sandbox waits in the pool.
+
+```js
+const pool = client.pool({ targetSize: 2, create: { catalogId: 'python' } });
+let sandbox;
+try {
+  await pool.refill();
+  sandbox = await pool.acquire(); // Fails with pool_empty if inventory expired.
+  console.log(await sandbox.commands.run('python --version'));
+  await pool.refill(); // Explicitly replace the acquired slot when budget allows.
+} finally {
+  try { if (sandbox) await sandbox.kill(); }
+  finally { await pool.close(); } // Cleans only inventory still owned by the pool.
+}
+```
+
+Use `imageId` or `workspaceId` in `create` for prepared environments. A pool
+serializes calls, checks each generation before acquisition, and preserves the
+same creation key after an uncertain response. `pool.state` exposes inventory
+and a pending key for reconciliation. `close()` can finish a pending create
+before deleting it, so closing may incur a start and compute charge. Retry
+failed cleanup with `close()`; acquired sandboxes remain your responsibility.
+
+Inventory is process-local and cannot be restored from `state`. Process crashes
+lose the pool's bookkeeping: retain generation identities and pending keys in
+your application's journal and reconcile them through normal SDK operations.
+A pending key is retried for at most one hour, bounded by half the API's advertised
+retention. After `pool_creation_expired`, reconcile it manually instead of issuing
+a replacement create. Prewarming is not RAM-preserving pause/resume.
+
+## Image builds, versions and tags (unreleased)
+
+```js
+const queued = await client.images.create({ name: 'Agent tools',
+  dockerfile: 'FROM mainbrella:base\nRUN python -m pip install requests' });
+const { image } = await client.images.get(queued.image.id);
+console.log(await client.images.logs(image.id));
+// After the build reports ready:
+await client.images.tags.set('agent-tools.stable', image.id);
+const resolved = await client.images.tags.get('agent-tools.stable');
+const sandbox = await client.create({ imageId: resolved.image.id });
+try { console.log(sandbox.imageDigest); } finally { await sandbox.kill(); }
+```
+
+`images.list()`, `images.delete(id)`, `images.tags.list()` and
+`images.tags.delete(tag)` manage saved versions and aliases. Optional build
+`context` is gzip tar bytes (`Uint8Array`, at most 512 KiB). Builds require live
+`images.customBuilds`; tags require the new backend migration and deployment.
+Image IDs/digests are immutable; resolve a tag once and retain the resulting ID
+for all retries of a creation. Tags are account-scoped, capped at 30, and only
+point to ready images. Moving a tag leaves existing containers unchanged.
+
+## Streaming transfers and directory copies
+
+Check `capabilities.files.streamingTransfers` before using the new transfer
+endpoint. Files can be up to 64 MiB; streams flow under backpressure and uploads
+replace the destination atomically only after a clean, exact-length EOF.
+
+```js
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+const source = './dataset.bin';
+await sandbox.files.upload('/workspace/dataset.bin', Readable.toWeb(createReadStream(source)), {
+  size: (await stat(source)).size,
+});
+const bytes = await sandbox.files.download('/workspace/dataset.bin');
+// Consume bytes as a Web ReadableStream; cancel it if you stop reading.
+await bytes.cancel();
+await sandbox.files.uploadDirectory('./project', '/workspace/project');
+await sandbox.files.downloadDirectory('/workspace/output', './output');
+
+const stop = new AbortController();
+for await (const event of sandbox.files.watch('/workspace/project', { signal: stop.signal })) {
+  console.log(event.type, event.entry.path); // create, modify, remove
+  stop.abort();
+  break;
+}
+```
+
+Transfers share the execution pool and have a five-minute runtime deadline;
+configure `timeoutMs` for the expected duration (default 90 seconds). `upload`
+also accepts a `Uint8Array` and infers its size. Download consumers must discard
+incomplete output. Transfers cannot resume and writes are never retried after
+an ambiguous response. Forced cancellation can leave a hidden guest temporary
+file next to the destination.
+
+Directory helpers require Node, copy at most 10,000 entries and 64 levels, reject
+symlinks/special files, and keep unrelated destination files. Each file is atomic;
+the directory as a whole is not. Permissions are not synchronized. Keep the source
+and destination trees stable during a copy. Polling `watch` uses normal metadata
+requests, defaults to one second, and starts after an initial baseline; transient
+changes and same-size rewrites within one second may be missed. It is independent
+of the server's native `files.watch` capability, which remains unavailable.

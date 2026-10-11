@@ -26,9 +26,11 @@ import { handleFileRequest } from "./files";
 import { handleFilesystemRequest } from './filesystem';
 import { handleCapabilitiesRequest } from './capabilities';
 import { handleExecutionRequest } from './executions';
+import { handleCodeContextRequest } from './code-contexts';
 import { handlePreviewRequest } from './previews';
 import { handleStatusRequest } from './status';
 import { handleObservationRequest } from './observations';
+import { handleTelemetryRequest } from './telemetry';
 import { handleWebhookRequest } from './webhooks';
 import { handleActivityRequest } from './activity';
 import { handleWorkspacesRequest } from './workspaces';
@@ -67,11 +69,13 @@ async function handleLegacyRequest(
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);
   if (url.pathname === '/containers/activity') return handleActivityRequest(request, env);
+  if (['/containers/telemetry/logs', '/containers/telemetry/metrics'].includes(url.pathname)) return handleTelemetryRequest(request, env);
   if (['/containers/events', '/containers/metrics'].includes(url.pathname)) return handleObservationRequest(request, env);
   if (url.pathname === '/containers/webhook' || url.pathname.startsWith('/containers/webhook/')) return handleWebhookRequest(request, env);
   if (url.pathname === '/containers/previews') return handlePreviewRequest(request, env);
   if (['/status', '/status/history', '/internal/status/observations', '/internal/status/incidents'].includes(url.pathname)) return handleStatusRequest(request, env);
   if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
+  if (url.pathname === '/containers/code-contexts' || url.pathname.startsWith('/containers/code-contexts/')) return handleCodeContextRequest(request, env);
 
   if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);
   if (url.pathname === "/projects") return handleProjectsRequest(request, env);

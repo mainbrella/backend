@@ -309,7 +309,10 @@ export async function startCodexBridge({ executable = process.env.CODEX_PATH || 
       await inference(session, body);
     } catch (error) {
       if (session && session.response === response) terminate(session, error.code || 'invalid_model_response');
-      else { response.writeHead(400); response.end(); }
+      else if (!response.headersSent) { response.writeHead(400); response.end(); }
+      // Cancellation can finish the SSE response while inference is awaiting
+      // the app-server. Its later rejection must not write a second header.
+      else if (!response.writableEnded) response.end();
     }
   });
   server.requestTimeout = 15_000;

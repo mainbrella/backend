@@ -20,10 +20,14 @@
   "files": [
     "index.js",
     "network-policy.js",
+    "file-transfers.js",
+    "pool.js",
+    "images.js",
     "index.d.ts",
     "README.md",
     "LICENSE",
-    "cli.mjs"
+    "cli.mjs",
+    "mcp.mjs"
   ],
   "engines": {
     "node": ">=22"
@@ -32,6 +36,7 @@
     "test": "node --test *.test.mjs"
   },
   "bin": {
-    "mainbrella": "cli.mjs"
+    "mainbrella": "cli.mjs",
+    "mainbrella-mcp": "mcp.mjs"
   }
 }

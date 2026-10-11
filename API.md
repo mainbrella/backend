@@ -62,7 +62,7 @@ The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
 integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
 The dependency-free SDKs are published as `@mainbrella/sdk` 0.1.0 on npm
-and `mainbrella` 0.1.0 on PyPI. See the
+and `mainbrella` 0.1.0 on PyPI. The P1 source additions (code contexts, streaming transfers, image tags, SDK prewarming and MCP) require a new release and matching API/runtime deployment. See the
 [JavaScript](https://mainbrella.com/sdk/javascript.md) and
 [Python](https://mainbrella.com/sdk/python.md) references for installation and APIs.
 Native HTTP remains sufficient for lifecycle, execution and file transfer;
@@ -297,6 +297,8 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `GET /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: raw `application/octet-stream` bytes for a regular file, up to 1 MiB. ID, exact generation, and URL-encoded path are required. |
 | `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` with a raw byte body | 200: `{path, size}` after writing up to 1 MiB. An empty body creates an empty file. Requires an existing parent directory. |
+| `GET /containers/files/transfer?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: streamed binary download up to 64 MiB, with `Content-Length`. Discard incomplete streams. |
+| `PUT /containers/files/transfer?id=<id>&createdAt=<generation>&path=<absolute-path>&size=<bytes>` | 200: `{path, size}` after an exact-length streamed upload and atomic rename. Up to 64 MiB; parent must exist. |
 | `GET /containers/files/list?id=<id>&createdAt=<generation>&path=<directory>&limit=100&offset=0` | 200: one sorted directory page, `{path, entries, nextOffset}`. |
 | `GET /containers/files/stat?id=<id>&createdAt=<generation>&path=<path>` | 200: entry metadata; optional `followSymlinks=true` reads the target. |
 | `POST /containers/files/mkdir?id=<id>&createdAt=<generation>` with `{path, recursive?, mode?}` | 200: creates a directory; missing parents require `recursive: true`. |
@@ -408,6 +410,49 @@ Foreground results are not retained. An HTTP failure can hide a completed
 command: do not blindly retry commands with side effects. SSH remains available
 for longer-running and interactive workflows.
 
+## Code interpreter contexts
+
+The source API and SDKs implement stateful Python execution. These additions
+require matching API/runtime deployment and a new SDK release; check
+`codeInterpreter.supported`. The image must include `python3` and GNU `timeout`.
+Every endpoint below requires the exact owned `id` and `createdAt` query values:
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | `/containers/code-contexts` | Create a context with `{"language":"python"}`; returns 201 with its `id`, generation and `expiresAt`. |
+| GET | `/containers/code-contexts` | List live contexts for that generation. |
+| POST | `/containers/code-contexts/{contextId}/execute` | Run `{"code":"values = [2, 3, 5]","timeoutMs":30000}` with persistent globals and imports. |
+| DELETE | `/containers/code-contexts/{contextId}` | Close the interpreter and release its operation slot. |
+
+Execution returns `stdout`, `stderr`, `results`, `error`, and `outputTruncated`.
+The final expression produces text and, when serializable, JSON MIME results;
+objects can additionally return HTML or base64 PNG. MIME data is always a string.
+Sanitize untrusted HTML before rendering. Python exceptions return structured
+`name`, `message`, and `traceback` fields with HTTP 200 and preserve the context.
+Native/subprocess output is combined in `stderr`; blocking stdin receives EOF.
+
+Code is limited to 16 KiB UTF-8; execution defaults to 30 seconds and caps at
+60 seconds. Returned stdout, stderr (including native output), MIME types/data,
+and error fields share a 256 KiB UTF-8 limit with truncation reported. JSON
+escaping and field names are excluded; the encoded response is bounded at
+2 MiB. At most four MIME results are returned; oversized JSON/HTML/PNG values
+are omitted whole. Native output ingestion also has a separate 1 MiB hard cap.
+Contexts last at most 15 minutes or
+the remaining sandbox lease, hold one of the four shared operation slots, and
+accept one execution at a time (`code_context_busy` on overlap). Active execution
+renews idle activity; an idle interpreter does not keep compute alive.
+
+Stop, timeout, cancellation, expiration and runtime recovery discard the context;
+RAM is never snapshotted or restored. Cleanup falls back to stopping the generation
+if process-group termination cannot be confirmed. List and close remain available
+to the owner during billing outages. Execution is never automatically retried;
+reconcile side effects after a lost response before submitting code again.
+
+JavaScript: `const ctx = await sandbox.code.create(); await ctx.run('x = 41');
+const result = await ctx.run('x + 1'); await ctx.close();`. Python supports
+`with sandbox.code.create() as ctx:`, followed by `ctx.run(code)` calls.
+See [interpreter lifecycle and limits](docs/code-interpreter.md).
+
 ## HTTP files
 
 File requests require an owned, running, paid generation, checked again immediately
@@ -447,6 +492,47 @@ const download = await fetch(url, { headers });
 if (!download.ok) throw new Error(`Download failed: ${download.status}`);
 const bytes = new Uint8Array(await download.arrayBuffer());
 ```
+
+## Streaming files and directory copies
+
+`GET` and `PUT /containers/files/transfer` add bounded streaming for files up to
+64 MiB. Check `capabilities.files.streamingTransfers` before use. The SDK client’s default request timeout remains 90 seconds; configure a longer client timeout for transfers that need the server’s five-minute maximum. Both directions
+flow under backpressure without a file-sized Worker buffer. PUT requires the exact
+byte count in `size`; short, oversized and interrupted input cannot publish a
+partial destination. A clean EOF authorizes atomic replacement, so a lost response
+can still hide a successful write. New files use mode 0600; replacement preserves
+permission bits. Leaf symlinks and non-regular destinations are rejected.
+
+Transfers occupy one execution slot for their lifetime, renew idle activity, and
+end after five minutes or the generation deadline. Request cancellation, response
+stream cancellation and machine stop end the operation. Forced interruption can
+leave a hidden `.mainbrella-transfer.*` temporary file beside the destination.
+Downloads provide `Content-Length`; changing files are not snapshots, and stream
+errors or short bodies must cause consumers to discard their output. Transfers
+have no resume protocol and mutations are never automatically retried. A Linux
+guest with `/bin/sh`, GNU coreutils and `/proc` is required.
+
+The JavaScript SDK exposes `files.upload(path, readableStream, {size, signal})`
+and `files.download(path, {signal})`, returning a Web `ReadableStream`.
+The Python SDK accepts binary file objects with `files.upload(path, source,
+size=...)`; `files.download(path)` returns a context-managed binary reader.
+Configure the client timeout above the expected transfer duration (the default
+is 90 seconds).
+
+`files.uploadDirectory(local, remote)` / `downloadDirectory(remote, local)` in
+Node and `upload_directory` / `download_directory` in Python recursively copy
+directories without extracting archives. Copies are bounded to 10,000 entries
+and 64 directory levels, reject symlinks and special files, and replace each file
+atomically. The whole directory is not atomic; existing unrelated files remain,
+permission bits are not synchronized, and a failure may leave completed earlier
+files. Avoid concurrent changes to either tree during a copy.
+
+`files.watch(path)` polls paginated metadata and yields `create`, `modify` and
+`remove` events after its initial baseline. This is a client-side polling helper,
+not a retained native watcher: transient changes and same-size rewrites within
+one second can be missed. JavaScript accepts an `AbortSignal`; Python accepts a
+`threading.Event` as `stop_event`. Polls use normal filesystem operations and
+renew idle activity. Neither helper deletes local or remote files to mirror a tree.
 
 ## Filesystem metadata and directories
 
@@ -865,7 +951,7 @@ Delivery is at least once and may arrive out of order. Up to eight automatic att
 
 POST payloads are `{id,sequence,type,occurredAt,container:{id,createdAt,size},reason?}`. Headers include `Mainbrella-Event-Id` and `Mainbrella-Signature: t=<Unix-seconds>,v1=<hex-HMAC-SHA256>`. The signature covers the exact UTF-8 bytes of `<timestamp>.<raw-body>` using the returned signingSecret string as the HMAC key. Verify the raw body before JSON parsing, check timestamp freshness, then deduplicate event IDs. JS exports `verifyWebhookSignature(bytes,header,secret)`; Python exports `verify_webhook_signature(body,header,secret)`. Both default to a five-minute freshness window and compare signatures through standard cryptographic primitives.
 
-JavaScript `sandbox.webhook.configure(url,{replayFromCursor})`, `.get()`, `.remove()`, `.deliveries()` and `.retry(eventId)` expose the contract. Python equivalents use `replay_from_cursor` and `event_id`. Signing keys are encrypted in private runtime storage with an operator-managed key; destination URL paths/query values remain owner-visible configuration. Key rotation requires reconfiguring retained webhook destinations. Operators should read [the observability runbook](https://github.com/mainbrella/backend/blob/main/docs/workload-observability.md) before enabling delivery. OTLP export remains unsupported.
+JavaScript `sandbox.webhook.configure(url,{replayFromCursor})`, `.get()`, `.remove()`, `.deliveries()` and `.retry(eventId)` expose the contract. Python equivalents use `replay_from_cursor` and `event_id`. Signing keys are encrypted in private runtime storage with an operator-managed key; destination URL paths/query values remain owner-visible configuration. Key rotation requires reconfiguring retained webhook destinations. Operators should read [the observability runbook](https://github.com/mainbrella/backend/blob/main/docs/workload-observability.md) before enabling delivery. OTLP JSON pull export is available in source; see [OTLP lifecycle and workload export](#otlp-lifecycle-and-workload-export). Provider metrics and webhook qualification gates are unchanged.
 
 ## Public operational status
 
@@ -1053,3 +1139,84 @@ Each resource has `{id,containerId,name,lifecycle,size,startAt,endAt,runtimeMs,c
 Checkout completion and signed Stripe webhooks verify the live Checkout subtotal, Stripe discount, customer and saved purchase identity. Nonzero totals additionally require current PaymentIntent and captured card charge state matching the actual amount paid, currency, customer, account metadata and funding purpose. A 100% discount requires a completed `no_payment_required` Checkout and uses its session ID as the funding identity. Funding is applied once per identity, across retries and event types. Refunds remove the corresponding proportion of compute credit, rounded up to the next cent; a dispute revokes the payment's entire balance contribution. A reversal can leave a negative wallet when credit was already consumed. Delayed success events cannot restore revoked funding. Dispute restoration requires operator reconciliation in this initial implementation.
 
 Set `STRIPE_PREPAID_PRICE_ID` to an active one-time USD $5 Price with an active Product. The backend validates it; exact $5 purchases use that Price and other amounts use inline prices under its Product. Configure matching test or live `STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY`; new prepaid purchases require both, while completion verification and billing settings remain available without the publishable key. Apply migration `019_prepaid_billing.sql` and configure the existing signed `/subscription/webhook` for Checkout, PaymentIntent, charge/refund and dispute events before deployment. Existing legacy read, payment-method management, invoice reconciliation and cancellation remain available; new recurring purchases are disabled. See `docs/prepaid-billing.md` and `docs/usage-billing.md` for operator setup.
+
+## OTLP lifecycle and workload export
+
+`GET /containers/telemetry/logs?id=…&createdAt=…` returns an OTLP/HTTP JSON
+`ExportLogsServiceRequest` body, ready to forward to a collector's `/v1/logs`.
+It uses the same account authentication, exact-generation checks, seven-day
+retention and `cursor`/`limit` pagination as lifecycle history. Response headers
+`Mainbrella-Next-Cursor`, `Mainbrella-Has-More`, and
+`Mainbrella-History-Truncated` carry pagination metadata; all are exposed to
+allowed browser origins. Deduplicate on the `event.id` log attribute. Advance a
+stored cursor only after the collector acknowledges the batch.
+
+`GET /containers/telemetry/metrics?id=…&createdAt=…&from=…&to=…` returns an
+OTLP/HTTP JSON `ExportMetricsServiceRequest` for `/v1/metrics`. CPU seconds are
+sampled delta sums; peak memory bytes are gauges. Export non-overlapping time
+ranges to avoid duplicate CPU sums. Missing measurements remain absent, including
+an entirely unobserved interval. Disk values with unqualified units are omitted.
+`Mainbrella-Metrics-State` is `observed` or `unobserved`. The metrics endpoint
+retains the existing provider qualification gate and generation/range limits.
+
+Check `observability.otlp` and, for metrics, `observability.metrics`. These are
+pull exports: the API never sends data or credentials to a caller-supplied URL,
+and exports do not renew compute. Errors and authentication match the underlying
+`/containers/events` and `/containers/metrics` endpoints. This addition does not
+enable webhook delivery or qualify a provider metrics deployment.
+
+## MCP agent integration
+
+The source JavaScript SDK includes the dependency-free `mainbrella-mcp` stdio
+server (Node 22+). This is an unreleased source addition; the published 0.1.0
+artifact does not yet include it. Run a reviewed checkout directly:
+
+```sh
+# MAINBRELLA_API_KEY comes from your environment/secret manager.
+node /absolute/path/to/backend/sdk/javascript/mcp.mjs
+```
+
+Configure an MCP-compatible IDE or agent with that executable and an inherited
+`MAINBRELLA_API_KEY`. `MAINBRELLA_API_URL` optionally selects an HTTPS API or a
+loopback development server. The process keeps JSON-RPC on stdout and diagnostic
+codes on stderr. It negotiates MCP 2025-11-25, 2025-06-18 or 2024-11-05.
+
+Tools cover capabilities, container listing/creation, commands, text files,
+directory listings, lifecycle events, workspace save, stop/resume, filesystem
+fork and deletion. Mutations require the exact `id` and `createdAt`; creation,
+save, stop, resume and fork require an explicit `idempotencyKey` so callers can
+reconcile ambiguous responses. Tool annotations distinguish reads and destructive
+actions. Container creation and prewarming consume normal account allowance.
+Guest output remains untrusted data. Existing command/file API limits apply;
+use the streaming SDK for larger or binary transfers.
+
+The stdio server processes requests serially. It does not implement protocol
+cancellation; command timeouts still apply. Disconnecting the MCP client does
+not delete its sandboxes. Reconcile pending creation keys and explicitly delete
+owned generations when finished.
+
+
+## Image versions and tags (unreleased)
+
+Every build has an immutable image ID; published image metadata includes its
+`sha256:` digest. Tags are movable account-scoped aliases for ready images:
+
+| Method | Route | Behavior |
+| --- | --- | --- |
+| GET | `/images/tags` | List `{ tags: [{ tag, imageId, updatedAt }] }`. |
+| GET | `/images/tags/{tag}` | Resolve `{ tag, image }` with immutable ID and digest. |
+| PUT | `/images/tags/{tag}` | Set or move a tag with `{ "imageId": "<uuid>" }`. |
+| DELETE | `/images/tags/{tag}` | Idempotently remove this account's alias. |
+
+Tags match `[a-z0-9][a-z0-9._-]{0,63}` and are limited to 30 per account,
+advertised in `images.limits.maxTags`. Only owned ready images can be tagged.
+Invalid bodies return 400, unknown images/tags 404, unfinished builds 409, and
+new tags exceeding the limit 429. Cookie mutations require a trusted Origin;
+API-key requests use the existing bearer authentication. Deleting an image
+removes its tags, and deleting a tag does not delete its image.
+
+Resolve a tag once and pass its image ID to `POST /containers`; keep that same
+ID and idempotency key when retrying an uncertain creation. Moving a tag never
+changes an existing container. Apply `039_image_tags.sql` before deployment.
+These routes and SDK helpers do not enable gated builds, private registries or
+cross-build caching. See [custom image rollout](docs/custom-images.md).

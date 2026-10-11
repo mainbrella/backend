@@ -18,7 +18,7 @@ const account = '2b7a9be82bb64187230703b024e25157';
 async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity', '019_prepaid_billing']) {
+  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity', '019_prepaid_billing', '039_image_tags']) {
     db.exec(readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8'));
   }
   db.prepare("INSERT INTO users (id, email) VALUES ('owner', 'owner@test.com'), ('other', 'other@test.com')").run();
@@ -237,4 +237,46 @@ test('catalog IDs select approved published images without reserving a custom bu
   assert.equal(f.starts[0].image, digest);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM container_images').get()!.count, 0);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM container_image_usage').get()!.count, 0);
+});
+
+test('owned image tags resolve immutable digests, move between versions, and clean up on deletion', async t => {
+  const f = await fixture(t);
+  const first = (await (await f.create()).json() as { image: { id: string } }).image.id;
+  assert.equal((await f.user('/images/tags/stable', 'PUT', JSON.stringify({ imageId: first }))).status, 409);
+  const ready = async (id: string, digest: string) => {
+    await f.internal(`/${id}/source`);
+    await f.internal(`/${id}/status`, 'POST', { status: 'publishing', image: `registry.cloudflare.com/${account}/mainbrella-custom-${id}@sha256:${digest.repeat(64)}` });
+    await f.internal(`/${id}/status`, 'POST', { status: 'ready' });
+  };
+  await ready(first, 'a');
+  assert.equal((await f.user('/images/tags/stable', 'PUT', JSON.stringify({ imageId: first }), 'other')).status, 404);
+  assert.equal((await f.user('/images/tags/stable', 'PUT', JSON.stringify({ imageId: first }))).status, 200);
+  const resolved = await (await f.user('/images/tags/stable')).json() as { image: { id: string; digest: string } };
+  assert.equal(resolved.image.id, first);
+  assert.equal(resolved.image.digest, `sha256:${'a'.repeat(64)}`);
+  assert.equal((await f.user('/images/tags/stable', 'GET', undefined, 'other')).status, 404);
+  assert.deepEqual(await (await f.user('/images/tags', 'GET', undefined, 'other')).json(), { tags: [] });
+  const second = (await (await f.create()).json() as { image: { id: string } }).image.id;
+  await ready(second, 'b');
+  assert.equal((await f.user('/images/tags/stable', 'PUT', JSON.stringify({ imageId: second }))).status, 200);
+  assert.equal((await (await f.user('/images/tags/stable')).json() as { image: { id: string } }).image.id, second);
+  assert.equal((await (await f.user(`/images/${first}`)).json() as { image: { digest: string } }).image.digest, `sha256:${'a'.repeat(64)}`);
+  await f.user(`/images/${second}`, 'DELETE');
+  assert.equal((await f.user('/images/tags/stable')).status, 404);
+  assert.deepEqual(await (await f.user('/images/tags')).json(), { tags: [] });
+});
+
+test('tag writes enforce bounded admission atomically and isolate deletes by owner', async t => {
+  const f = await fixture(t);
+  const id = (await (await f.create()).json() as { image: { id: string } }).image.id;
+  f.db.prepare("UPDATE container_images SET status = 'ready' WHERE id = ?").run(id);
+  for (let i = 0; i < 30; i++) assert.equal((await f.user(`/images/tags/v${i}`, 'PUT', JSON.stringify({ imageId: id }))).status, 200);
+  assert.equal((await f.user('/images/tags/overflow', 'PUT', JSON.stringify({ imageId: id }))).status, 429);
+  assert.equal((await f.user('/images/tags/v0', 'PUT', JSON.stringify({ imageId: id }))).status, 200);
+  assert.equal((await f.user('/images/tags/v0', 'DELETE', undefined, 'other')).status, 200);
+  assert.equal((await f.user('/images/tags/v0')).status, 200);
+  assert.equal((await f.user('/images/tags/v0', 'DELETE')).status, 200);
+  assert.equal((await f.user('/images/tags/overflow', 'PUT', JSON.stringify({ imageId: id }))).status, 200);
+  assert.equal((await f.user('/images/tags/v1', 'PUT', JSON.stringify({ imageId: id, extra: true }))).status, 400);
+  assert.equal((await f.user('/images/tags/Bad', 'PUT', JSON.stringify({ imageId: id }))).status, 404);
 });

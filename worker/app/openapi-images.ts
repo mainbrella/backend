@@ -1,15 +1,35 @@
 import { z } from "zod";
 import { containerSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
-const image = z.object({ id: z.string(), name: z.string(), status: z.enum(["queued", "building", "publishing", "ready", "failed"]), createdAt: z.string(), updatedAt: z.string() }).openapi("Image");
+const image = z.object({ id: z.string(), name: z.string(), status: z.enum(["queued", "building", "publishing", "ready", "failed"]), digest: z.string().nullable().optional(), createdAt: z.string(), updatedAt: z.string() }).openapi("Image");
+const tagParams = z.object({ tag: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/) });
+const imageTag = z.object({ tag: z.string(), imageId: z.string().uuid(), updatedAt: z.string() });
 const params = z.object({ id: z.string().uuid() });
 const internalSecurity = [{ imageBuild: [] }];
 
 export function registerImageRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
+  register(api, "get", "/images/tags", {
+    operationId: "listImageTags", tags: ["Images"], summary: "List account image tags", security: containerSecurity,
+    responses: { 200: jsonResponse(z.object({ tags: imageTag.array() })), ...errors(401, 403, 503) },
+  }, handler);
+  register(api, "get", "/images/tags/:tag", {
+    operationId: "resolveImageTag", tags: ["Images"], summary: "Resolve a tag to an immutable owned image version", security: containerSecurity,
+    request: { params: tagParams }, responses: { 200: jsonResponse(z.object({ tag: z.string(), image })), ...errors(401, 403, 404, 503) },
+  }, handler);
+  register(api, "put", "/images/tags/:tag", {
+    operationId: "setImageTag", tags: ["Images"], summary: "Create or move an account image tag", security: containerSecurity,
+    description: "Only owned, ready images may be tagged. Maximum 30 tags per account. Each image ID is an immutable version; moving a tag does not change existing containers. Cookie requests require a trusted Origin.",
+    request: { params: tagParams, ...requestBody(z.object({ imageId: z.string().uuid() })) },
+    responses: { 200: jsonResponse(imageTag), ...errors(400, 401, 403, 404, 409, 429, 503) },
+  }, handler);
+  register(api, "delete", "/images/tags/:tag", {
+    operationId: "deleteImageTag", tags: ["Images"], summary: "Remove an account image tag", security: containerSecurity,
+    request: { params: tagParams }, responses: { 200: jsonResponse(z.object({ deleted: z.literal(true) })), ...errors(401, 403, 404, 503) },
+  }, handler);
   register(api, "get", "/images", {
     operationId: "listImages", tags: ["Images"], summary: "List account images and monthly build usage", security: containerSecurity,
     responses: { 200: jsonResponse(z.object({ images: image.array(), buildsEnabled: z.boolean(),
-      limits: z.object({ maxBuildsPerMonth: z.number(), maxSavedImages: z.number(), maxContextBytes: z.number(), maxDockerfileBytes: z.number(), maxBuildSeconds: z.number() }),
+      limits: z.object({ maxBuildsPerMonth: z.number(), maxSavedImages: z.number(), maxContextBytes: z.number(), maxDockerfileBytes: z.number(), maxBuildSeconds: z.number(), maxTags: z.number() }),
       usage: z.object({ month: z.string(), builds: z.number() }) })), ...errors(401, 403, 503) },
   }, handler);
   register(api, "post", "/images", {

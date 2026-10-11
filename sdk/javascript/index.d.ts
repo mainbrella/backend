@@ -3,6 +3,12 @@ export interface Size { id: MachineSize; name: string; instance: string; cpuVcpu
 export interface NetworkPolicy { allow: string[]; deny?: string[] }
 export interface SecretMetadata { id: string; name: string; hostname: string; header: 'authorization' | 'x-api-key' | 'api-key'; prefix: string; createdAt: string; updatedAt: string }
 export interface LifecycleOptions { idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }
+export interface CreateOptions extends LifecycleOptions { name?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string; networkPolicy?: NetworkPolicy; secretBindings?: string[]; catalogId?: string; imageId?: string; workspaceId?: string; size?: MachineSize; internet?: boolean }
+export interface Image { id: string; name: string; status: 'queued' | 'building' | 'publishing' | 'ready' | 'failed'; digest?: string | null; createdAt: string; updatedAt: string }
+export interface ImageTag { tag: string; imageId: string; updatedAt: string }
+export interface PoolOptions { targetSize?: number; create?: Omit<CreateOptions, 'idempotencyKey' | 'lifecycle' | 'startupCommand'> & { lifecycle?: 'ad_hoc' } }
+export interface PoolState { closed: boolean; targetSize: number; available: ContainerIdentity[]; pending: { idempotencyKey: string; retryBefore: number } | null }
+export class SandboxPool { constructor(client: Mainbrella, options?: PoolOptions); readonly state: PoolState; refill(): Promise<PoolState>; acquire(): Promise<Sandbox>; close(): Promise<PoolState> }
 export interface ContainerIdentity { id: string; createdAt: string }
 export interface Workspace {id:string;name:string;createdAt:string;expiresAt:number;source:ContainerIdentity;size:MachineSize;internet:boolean;networkPolicy?:NetworkPolicy;secretBindings?:string[];imageDigest:string;imageId?:string;imageName?:string;catalogId?:string;bytes:number|null;archived:boolean;status:'saving'|'ready'|'failed'|'expired'|'deleted';stopRequested:boolean;stopCompleted:boolean}
 export interface FileEntry { name: string; path: string; type: 'file' | 'directory' | 'symlink' | 'fifo' | 'socket' | 'character' | 'block' | 'other'; size: number; mode: string; uid: number; gid: number; modifiedAt: string; linkTarget?: string }
@@ -11,6 +17,10 @@ export interface ExecutionOptions { timeoutMs?: number; idempotencyKey?: string;
 export interface Preview { id: string; port: number; createdAt: string; expiresAt: number }
 export interface PreviewLink extends Preview { url: string }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; outputTruncated: boolean }
+export interface CodeContextRecord { id: string; language: 'python'; createdAt: string; expiresAt: number }
+export interface CodeResult { stdout: string; stderr: string; outputTruncated: boolean;
+  results: { mimeType: 'text/plain' | 'application/json' | 'text/html' | 'image/png'; data: string }[];
+  error: { name: string; message: string; traceback: string } | null }
 export interface Container extends ContainerIdentity { internet?: boolean; status: 'starting' | 'running' | 'stopped'; name?: string; lifecycle?: 'ad_hoc' | 'production'; workspaceId?: string; persistenceExpiresAt?: number; networkPolicy?: NetworkPolicy; secretBindings?: string[]; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | 'usage' | null; active: boolean; containers: Container[];
   sizes: Size[]; imageCatalog: { id: string; name: string }[]; limits: { maxComputeUnitHours: number; maxConcurrentComputeUnits: number; maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
@@ -36,19 +46,29 @@ export class MainbrellaError extends Error { code: string; status: number; idemp
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
+  images: { list(): Promise<{ images: Image[]; buildsEnabled: boolean; limits: Record<string, number>; usage: { month: string; builds: number } }>;
+    get(id: string): Promise<{ image: Image }>; logs(id: string): Promise<{ logs: string; status: string }>; delete(id: string): Promise<{ deleted: true }>;
+    create(options: { name: string; dockerfile: string; context?: Uint8Array }): Promise<{ image: Image }>;
+    tags: { list(): Promise<{ tags: ImageTag[] }>; get(tag: string): Promise<{ tag: string; image: Image }>; set(tag: string, imageId: string): Promise<ImageTag>; delete(tag: string): Promise<{ deleted: true }> } };
+  pool(options?: PoolOptions): SandboxPool;
   secrets: { list(): Promise<{ secrets: SecretMetadata[] }>; create(options: { name: string; value: string; hostname: string; header: SecretMetadata['header']; prefix?: string }): Promise<SecretMetadata>; rotate(id: string, value: string): Promise<SecretMetadata>; delete(id: string): Promise<{ deleted: true }> };
   workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number;maxCaptureBytesPerMonth:number;maxRetainedCaptureBytes:number}|null;usage:{saved:number;reservedBytes:number;savesThisMonth:number;captureBytesThisMonth:number;retainedCaptureBytes:number}}>;
     get(id:string):Promise<Workspace>;update(id:string,options:{name?:string;archived?:boolean}):Promise<Workspace>;delete(id:string):Promise<{deleted:true}>;
     restore(id:string,options?:{idempotencyKey?:string;waitTimeoutMs?:number;pollIntervalMs?:number}):Promise<Sandbox>};
   request<T = unknown>(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string>; binary?: boolean; stream?: boolean; signal?: AbortSignal }): Promise<T>;
   capabilities(): Promise<Capabilities>; list(): Promise<AccountState>; connect(value: ContainerIdentity): Sandbox;
-  create(options?: { name?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string; networkPolicy?: NetworkPolicy; secretBindings?: string[]; catalogId?: string; imageId?: string; workspaceId?:string; size?: MachineSize; internet?: boolean; idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<Sandbox>;
+  create(options?: CreateOptions): Promise<Sandbox>;
 }
 export class Sandbox implements ContainerIdentity {
   internet?: boolean;
   constructor(client: Mainbrella, value: ContainerIdentity);
   client: Mainbrella; id: string; createdAt: string; creationId?: string; imageDigest?: string; instance?: string;
   files: { read(path: string): Promise<Uint8Array>; write(path: string, bytes: Uint8Array): Promise<{ path: string; size: number }>;
+    upload(path: string, source: Uint8Array | ReadableStream<Uint8Array>, options?: { size?: number; signal?: AbortSignal }): Promise<{ path: string; size: number }>;
+    download(path: string, options?: { signal?: AbortSignal }): Promise<ReadableStream<Uint8Array>>;
+    uploadDirectory(local: string, remote: string, options?: { signal?: AbortSignal }): Promise<{ entries: number }>;
+    downloadDirectory(remote: string, local: string, options?: { signal?: AbortSignal }): Promise<{ entries: number }>;
+    watch(path: string, options?: { intervalMs?: number; recursive?: boolean; signal?: AbortSignal }): AsyncGenerator<{ type: 'create' | 'modify' | 'remove'; entry: FileEntry }>;
     list(path: string, options?: { limit?: number; offset?: number }): Promise<DirectoryPage>;
     stat(path: string, options?: { followSymlinks?: boolean }): Promise<FileEntry>;
     mkdir(path: string, options?: { recursive?: boolean; mode?: string }): Promise<{ path: string; ok: true }>;
@@ -60,6 +80,7 @@ export class Sandbox implements ContainerIdentity {
   commands: { run(command: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<CommandResult>;
     start(command: string | string[], options?: ExecutionOptions): Promise<Execution>;
     list(): Promise<{ executions: Omit<ExecutionRecord, 'stdout' | 'stderr'>[] }>; attach(id: string): Execution };
+  code: { create(options?: { language?: 'python' }): Promise<CodeContext>; list(): Promise<{ contexts: CodeContextRecord[] }>; attach(id: string): CodeContext };
   kill(): Promise<AccountState>;
   delete(): Promise<AccountState>;
   stop(options?: { idempotencyKey?: string }): Promise<AccountState>;
@@ -87,6 +108,12 @@ export interface ExecutionRecord extends CommandResult {
   pty?: { cols: number; rows: number }; stdinEnabled?: boolean; stdinClosed?: boolean; stdinBytes?: number;
 }
 export type ExecutionEvent = { type: 'stdout' | 'stderr'; data: string; sequence: number } | { type: 'status'; execution: Omit<ExecutionRecord, 'stdout' | 'stderr'> };
+export class CodeContext {
+  constructor(sandbox: Sandbox, id: string, record?: Partial<CodeContextRecord>);
+  id: string; language: 'python'; expiresAt?: number;
+  run(code: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<CodeResult>;
+  close(): Promise<{ closed: true }>;
+}
 export class Execution {
   constructor(sandbox: Sandbox, id: string); id: string; cursor: number;
   get(): Promise<ExecutionRecord>; cancel(): Promise<Omit<ExecutionRecord, 'stdout' | 'stderr'>>;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Mainbrella } from './index.js';
+const { Mainbrella } = await import(process.env.MAINBRELLA_SDK_MODULE || './index.js');
 
 const apiKey = `mb_${'a'.repeat(64)}`, createdAt = '2026-10-11T00:00:00.000Z';
 const resumedAt = '2026-10-11T00:01:00.000Z';

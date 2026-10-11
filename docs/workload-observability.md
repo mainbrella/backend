@@ -81,7 +81,7 @@ Receivers must verify `Mainbrella-Signature` against exact raw body bytes, enfor
 
 Qualify signed delivery, duplicate/out-of-order handling, transient failure, restart recovery, lease recovery, explicit retry, removal/rotation during in-flight transport, retention, cross-account/generation isolation and disabled-policy cleanup. Removal cancels in-flight transport, but a receiver may already have accepted a request. Verify private alarm/provider behavior and inspect confirmed compute cleanup. The original local implementation performed no live callback or paid start; the October 6 qualification below supersedes that historical status.
 
-Sources: [Cloudflare startup labels and monitor/exec APIs](https://developers.cloudflare.com/containers/api/durable-object-container/) and [workload versus billing analytics](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-container-metrics/). Provider documentation is a design input; the above rollout evidence remains required. OTLP export is future work.
+Sources: [Cloudflare startup labels and monitor/exec APIs](https://developers.cloudflare.com/containers/api/durable-object-container/) and [workload versus billing analytics](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-container-metrics/). Provider documentation is a design input; the above rollout evidence remains required. OTLP JSON pull export is implemented in the source API; see the section below. It does not enable provider metrics or webhook delivery.
 
 ## October 6 UTC workload and outbox qualification
 
@@ -146,3 +146,23 @@ changed sources and private JSON reports found no operator/account credentials.
 
 `WORKLOAD_METRICS_TOKEN` is still absent locally. Supply an account Analytics Read token in the ignored
 backend `.env`; an operator OAuth session is not a production substitute.
+
+
+## OTLP pull export
+
+The source API exposes `/containers/telemetry/logs` and
+`/containers/telemetry/metrics`, authenticated and fenced to the same account and
+generation as their existing JSON counterparts. The bodies follow the
+[OTLP/HTTP JSON encoding](https://opentelemetry.io/docs/specs/otlp/): lifecycle
+history becomes log records with stable `event.id`; sampled CPU becomes delta
+sums; memory peaks become gauges. Disk measurements with unqualified units are
+omitted. The metrics gate remains unchanged.
+
+A collector bridge should forward bodies to `/v1/logs` or `/v1/metrics`, reject
+partial collector failures, and only then checkpoint the log cursor. Event ID
+deduplication is required after an ambiguous collector response. Read
+`Mainbrella-Has-More` and `Mainbrella-History-Truncated`; never infer a complete
+history from one page. Export disjoint metric ranges and allow for provider
+sampling/ingestion delay. This is a pull interface, with no customer URL or
+collector credential stored by Mainbrella. Source tests establish encoding and
+access behavior; collector transport and live metrics still need qualification.

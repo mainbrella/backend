@@ -1,4 +1,8 @@
 import { normalizeNetworkPolicy } from './network-policy.js';
+import { fileTransfers } from './file-transfers.js';
+import { SandboxPool } from './pool.js';
+import { imageClient } from './images.js';
+export { SandboxPool } from './pool.js';
 
 const keyPattern = /^mb_[a-f0-9]{64}$/i;
 const terminal = new Set(['succeeded', 'failed', 'canceled', 'timed_out', 'output_limit', 'interrupted']);
@@ -45,6 +49,7 @@ export class Mainbrella {
     this.#fetch = fetcher;
     this.baseUrl = apiOrigin(baseUrl);
     this.timeoutMs = timeoutMs;
+    this.images = imageClient(this);
     const workspacePath = id => {
       if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id??''))throw new MainbrellaError('invalid_workspace_identity');
       return `/workspaces/${id}`;
@@ -74,8 +79,9 @@ export class Mainbrella {
     try {
       response = await this.#fetch(url, { method, redirect: 'error', credentials: 'omit',
         headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`,
-          ...(body !== undefined ? { 'Content-Type': body instanceof Uint8Array ? 'application/octet-stream' : 'application/json' } : {}) },
-        body: body instanceof Uint8Array ? body : body !== undefined ? JSON.stringify(body) : undefined,
+          ...(body !== undefined && !(body instanceof FormData) ? { 'Content-Type': body instanceof Uint8Array || body instanceof ReadableStream ? 'application/octet-stream' : 'application/json' } : {}) },
+        body: body instanceof Uint8Array || body instanceof FormData || body instanceof ReadableStream ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        ...(body instanceof ReadableStream ? { duplex: 'half' } : {}),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs) });
     } catch { throw new MainbrellaError('transport_unavailable'); }
     if (!response.ok) {
@@ -92,6 +98,7 @@ export class Mainbrella {
   }
   capabilities() { return this.request('/capabilities'); }
   list() { return this.request('/containers'); }
+  pool(options) { return new SandboxPool(this, options); }
   connect(value) { return new Sandbox(this, value); }
   async create({ catalogId, imageId, size, internet, workspaceId, name, lifecycle, startupCommand, networkPolicy, secretBindings, idempotencyKey = crypto.randomUUID(), waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
     if (catalogId && imageId || workspaceId && (catalogId || imageId || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(workspaceId)) || !/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey)
@@ -164,6 +171,7 @@ export class Sandbox {
     if (value.secretBindings) this.secretBindings = value.secretBindings;
     for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance','workspaceId']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
+      ...fileTransfers(this, MainbrellaError),
       read: path => this.client.request(this.path('/containers/files', { path }), { binary: true }),
       write: (path, bytes) => {
         if (!(bytes instanceof Uint8Array)) throw new MainbrellaError('file_bytes_required');
@@ -220,6 +228,14 @@ export class Sandbox {
           return new Execution(this, record.id);
         } catch (error) { error.idempotencyKey = idempotencyKey; throw error; }
       },
+    };
+    this.code = {
+      create: async ({ language = 'python' } = {}) => {
+        const record = await this.client.request(this.path('/containers/code-contexts'), { method: 'POST', body: { language } });
+        return new CodeContext(this, record.id, record);
+      },
+      list: () => this.client.request(this.path('/containers/code-contexts')),
+      attach: id => new CodeContext(this, id),
     };
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
@@ -278,6 +294,22 @@ export async function verifyWebhookSignature(bytes, signature, signingSecret, { 
   const expected = Uint8Array.from(match[2].match(/.{2}/g), pair => Number.parseInt(pair, 16));
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(signingSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
   return crypto.subtle.verify('HMAC', key, expected, message);
+}
+
+export class CodeContext {
+  constructor(sandbox, id, record = {}) {
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id ?? '')) throw new MainbrellaError('invalid_code_context_identity');
+    this.sandbox = sandbox;
+    this.id = id;
+    this.language = 'python';
+    this.expiresAt = record.expiresAt;
+  }
+  run(code, { timeoutMs, signal } = {}) {
+    return this.sandbox.client.request(this.sandbox.path(`/containers/code-contexts/${this.id}/execute`), {
+      method: 'POST', body: { code, ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, signal,
+    });
+  }
+  close() { return this.sandbox.client.request(this.sandbox.path(`/containers/code-contexts/${this.id}`), { method: 'DELETE' }); }
 }
 
 export class Execution {

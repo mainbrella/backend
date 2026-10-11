@@ -4,6 +4,7 @@ import { runningContainer, containerError } from '../lib/container-service';
 import { validContainerId } from '../../containers/container-account-core.js';
 import { readFileBytes } from '../../containers/file-contract.js';
 import { MAX_FILESYSTEM_OUTPUT_BYTES, readFilesystemBody, validFilesystemOperation } from '../../containers/filesystem-contract.js';
+import { handleFileTransferRequest } from './file-transfers';
 
 const methods: Record<string, string> = { list: 'GET', stat: 'GET', mkdir: 'POST', remove: 'DELETE', move: 'POST', chmod: 'PATCH' };
 const failures: Record<number, Set<string>> = {
@@ -13,6 +14,7 @@ const failures: Record<number, Set<string>> = {
 };
 
 export async function handleFilesystemRequest(request: Request, env: Env): Promise<Response> {
+  if (new URL(request.url).pathname === '/containers/files/transfer') return handleFileTransferRequest(request, env);
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   const url = new URL(request.url);
