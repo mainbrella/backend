@@ -1,7 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { serviceConfiguration, servicePreflight } from './deploy-services-preflight.mjs';
+import { serviceConfiguration, servicePreflight, wrangler } from './deploy-services-preflight.mjs';
+
+test('a missing admin Worker explains how to provision its Stripe secret before the first deployment', () => {
+  const execute = () => {
+    throw Object.assign(new Error('sensitive execution details'), {
+      stderr: '\u001b[31mWorker "mainbrella-admin" not found.\u001b[0m\nsensitive configuration',
+    });
+  };
+  assert.throws(() => wrangler(['secret', 'list', '--config', 'wrangler.admin.jsonc', '--format', 'json'], execute), error => {
+    assert.match(error.message, /mainbrella-admin does not exist in the configured account/);
+    assert.match(error.message, /npx wrangler secret put STRIPE_SECRET_KEY --config wrangler\.admin\.jsonc/);
+    assert.match(error.message, /Confirm Worker creation/);
+    assert.match(error.message, /npm run deploy:admin/);
+    assert.doesNotMatch(error.message, /sensitive/);
+    return true;
+  });
+});
+
+test('Wrangler failures identify the failed metadata read without exposing output or assuming first rollout', () => {
+  for (const [args, message] of [
+    [['secret', 'list', '--config', 'wrangler.admin.jsonc', '--format', 'json'], /secret metadata/],
+    [['d1', 'execute', 'DB', '--remote', '--json'], /database migration metadata/],
+  ]) {
+    for (const execute of [
+      () => { throw Object.assign(new Error('sensitive execution details'), { stderr: 'Authentication error: sensitive token', stdout: 'sensitive configuration' }); },
+      () => 'malformed JSON with sensitive configuration',
+    ]) assert.throws(() => wrangler(args, execute), error => {
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /sensitive|does not exist|secret put/);
+      return true;
+    });
+  }
+});
 
 function fixture(target) {
   const read = file => JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'));

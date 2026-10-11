@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const targets = ['admin', 'marketing'];
@@ -49,12 +50,22 @@ export function serviceConfiguration(target, api, service) {
   return database;
 }
 
-function wrangler(args) {
+const adminSecretSetup = 'Run npx wrangler secret put STRIPE_SECRET_KEY --config wrangler.admin.jsonc using the same Stripe account as the API. Confirm Worker creation if prompted, then rerun npm run deploy:admin.';
+
+export function wrangler(args, execute = execFileSync) {
   try {
-    return JSON.parse(execFileSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args],
+    return JSON.parse(execute(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
-  } catch {
-    throw new Error('Cannot read service deployment metadata. Check Wrangler authentication, secret provisioning, and database access.');
+  } catch (error) {
+    // Classify known errors without echoing Wrangler output or configuration data.
+    if (args[0] === 'secret' && args[1] === 'list') {
+      const stderr = stripVTControlCharacters(String(error.stderr ?? ''));
+      if (args.includes('wrangler.admin.jsonc') && stderr.includes('Worker "mainbrella-admin" not found.')) {
+        throw new Error(`Worker mainbrella-admin does not exist in the configured account. ${adminSecretSetup}`);
+      }
+      throw new Error('Cannot read service Worker secret metadata. Check Wrangler authentication, Worker existence, and secret access.');
+    }
+    throw new Error('Cannot read the shared database migration metadata. Check Wrangler authentication, database access, and applied API migrations.');
   }
 }
 
@@ -76,7 +87,7 @@ export function servicePreflight({ target, api, service, migrations, local = fal
   if (target === 'admin') {
     const secrets = run(['secret', 'list', ...config, '--format', 'json']);
     requireCheck(Array.isArray(secrets) && secrets.some(item => item.name === 'STRIPE_SECRET_KEY' && item.type === 'secret_text'),
-      'Configure STRIPE_SECRET_KEY on mainbrella-admin before rollout; accounting closes refresh payment evidence.');
+      `Configure STRIPE_SECRET_KEY on mainbrella-admin before rollout; accounting closes refresh payment evidence. ${adminSecretSetup}`);
   }
 }
 

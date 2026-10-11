@@ -62,6 +62,10 @@ operator action.
 2. Configure `STRIPE_SECRET_KEY` on the admin Worker from the established secure
    secret source:
    `npx wrangler secret put STRIPE_SECRET_KEY --config wrangler.admin.jsonc`.
+   On the first rollout, confirm creation of `mainbrella-admin` when prompted.
+   This creates the Worker and provisions its secret before `deploy:admin` checks
+   secret metadata. A missing Worker or secret blocks the preflight; provision it
+   with the command above and rerun `npm run deploy:admin`.
    Secrets on the existing API are not inherited by a new Worker. Admin accounting
    closes need the same Stripe account to refresh payment evidence. Marketing
    requires its configured Email Sending binding and the already onboarded sender domains.
