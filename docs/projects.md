@@ -34,3 +34,71 @@ the web changes. The migration backfills existing Builder apps into `projects`
 and links them without rewriting source, conversations, Git versions, R2 keys
 or bookmarked app URLs. New Builder inserts automatically create their project
 record within the same database transaction.
+
+## GitHub repositories
+
+Projects can switch to GitHub with the separate **Mainbrella Build** GitHub App.
+The existing **Mainbrella Import** app and its read-only permissions remain
+unchanged. Build requests Contents write and Metadata read permissions for the
+repositories selected by the user; it does not request workflow permissions.
+Authorization tokens are encrypted with separate `GITHUB_BUILD_*` configuration,
+remain in the API Worker, and are never placed in a Builder container.
+
+The Projects page opens `/github/build/connect` for authorization and installation.
+The callback returns to the same account's project with its repository and branch
+selection. Authorization alone does not change project storage. The final
+`PUT /projects/github?id=...` verifies both user push permission and the app's
+write access, then locks the project against new Builder turns while switching.
+
+For a project with hosted Git history, select an empty destination branch or a
+branch at the project's current saved commit. The complete saved Git history,
+including original commit hashes, moves through Git's receive-pack protocol.
+Current draft edits are committed after that history. Unrelated branch history
+is never overwritten. If transfer or verification fails, hosted Git remains
+enabled. A project without saved history can import supported Builder source
+from an existing branch or start in an empty repository.
+
+Only after GitHub confirms the commit does the API publish `github_repo`,
+`github_branch`, and `github_commit_id`, clear the hosted Git heads, and remove
+the project's `build_git_versions` records. Its old R2 `bundles/` and `parts/`
+are deleted; interrupted cleanup resumes in scheduled reconciliation. Source,
+assets, conversations, revisions, billing records, and operation evidence remain
+available in their existing storage. Turning off hosted Git therefore removes
+Git history storage and write costs, while ordinary Builder storage and compute
+still apply.
+
+Linked projects save new commits directly through GitHub's Git database API.
+Commits preserve unrelated repository files, apply deletions to managed source,
+and use fast-forward branch updates. Tokens revoked by GitHub, protected branches,
+and concurrent branch changes stop the operation; there is no hosted Git fallback.
+The next Builder turn reads supported external source changes from the linked
+branch and merges edits to different files with unsaved working changes. If both
+sides change the same file differently, it preserves both versions and reports
+the conflicting path. Save the working version of that file to GitHub before
+retrying. Existing Builder source limits continue to apply.
+
+Builder history, committed files, and restores read from GitHub for linked
+projects. Their version IDs are 40-character commit SHAs; hosted version IDs
+remain UUIDs. Only commits reachable from the linked branch can be read or
+restored. A repository bundle download returns `409 github_repository_hosted`
+with its GitHub URL; use GitHub's normal clone/download workflow. Removing a
+Builder project does not delete its GitHub repository. Reconnect access in
+Projects if credentials expire or installation permissions change.
+
+### Setup
+
+Run `npm run github:register-build` in `backend` and open the local registration
+URL printed by the command while signed in to the GitHub organization that owns
+the new app. This creates **Mainbrella Build**, without editing Import. Credentials
+are saved to the ignored `.github-build-secrets.json` with mode `0600`.
+Provision them with `npx wrangler secret bulk .github-build-secrets.json --config
+wrangler.jsonc`, or pass `--provision` to the registration command. Keep the
+encryption key stable so saved credentials remain decryptable.
+
+Apply `035_project_github.sql` after migration 034, then deploy the API and web
+changes. The required configuration is `GITHUB_BUILD_CLIENT_ID`,
+`GITHUB_BUILD_CLIENT_SECRET`, `GITHUB_BUILD_APP_SLUG`, and
+`GITHUB_BUILD_ENCRYPTION_KEY` (64 lowercase hex characters). The registration
+manifest sets production and localhost callback URLs, a setup URL, and no active
+webhook. Without configuration the UI reports GitHub linking as unavailable;
+existing hosted Git and read-only Import continue to work.

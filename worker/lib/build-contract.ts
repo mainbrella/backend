@@ -17,7 +17,8 @@ export const buildTurnSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('preview'), revision: z.number().int().min(1) }).strict(),
 ]);
 export const buildRenameSchema = z.object({ name: z.string().trim().min(1).max(80) }).strict();
-export const buildRestoreSchema = z.object({ versionId: z.uuid(), revision: z.number().int().min(0) }).strict();
+export const buildVersionId = z.union([z.uuid(), z.string().regex(/^[a-f0-9]{40}$/)]);
+export const buildRestoreSchema = z.object({ versionId: buildVersionId, revision: z.number().int().min(0) }).strict();
 export type BuildFiles = Record<string, string>;
 export type BuildContainer = { id: string; createdAt: string; expiresAt: string };
 export type BuildPreview = { id: string; url: string; expiresAt: number };
@@ -28,6 +29,7 @@ export interface BuildAppRow {
   source_json: string; revision: number; active_turn_id: string | null;
   container_json: string | null; preview_json: string | null; created_at: string; updated_at: string;
   git_version_id?: string | null; verified_git_version_id?: string | null;
+  github_verified_commit_id?: string | null;
 }
 export interface BuildTurnRow {
   id: string; app_id: string; user_id: string; request_key: string; prompt: string; mode: 'build' | 'preview';

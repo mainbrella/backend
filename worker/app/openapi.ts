@@ -1,6 +1,8 @@
 import { registerStorageBillingRoutes } from './openapi-storage-billing';
 import { registerRepoLaunchRoutes } from "./openapi-repo-launches";
 import { registerGithubImportRoutes } from './openapi-github-import';
+import { registerGithubBuildRoutes } from './openapi-github-build';
+import { registerProjectGithubRoutes } from './openapi-project-github';
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
@@ -57,6 +59,8 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   }
   registerRepoLaunchRoutes(api, handler);
   registerGithubImportRoutes(api, handler);
+  registerGithubBuildRoutes(api, handler);
+  registerProjectGithubRoutes(api, handler);
   registerBuildRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);

@@ -1,6 +1,8 @@
 import { handleStorageBillingRequest } from './storage-billing';
 import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleGithubImportRequest } from './github-import';
+import { handleGithubBuildRequest } from './github-build';
+import { handleProjectGithubRequest } from './project-github';
 import { handleAPIKeysRequest } from "./api-keys";
 import { handleProjectsRequest } from "./projects";
 import { handleProjectEndpointRequest, handleProjectDomainsRequest } from './project-hosting';
@@ -46,6 +48,8 @@ async function handleLegacyRequest(
     return forwardServiceRequest(request, env.MARKETING_API, "marketing_unavailable");
   }
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
+  if (url.pathname.startsWith('/github/build/')) return handleGithubBuildRequest(request, env);
+  if (url.pathname === '/projects/github') return handleProjectGithubRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/')) return handleAcquisitionRequest(request, env);
   if (url.pathname === '/billing/storage') return handleStorageBillingRequest(request, env);

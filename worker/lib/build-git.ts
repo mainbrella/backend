@@ -4,6 +4,7 @@ import { buildImageBytes, buildImagePath, savedBuildImages, buildImageEntries } 
 import { buildGitProgram, BUILD_GIT_MAX_FILE_BYTES } from './build-git-program';
 import { buildGitPrefix, gitCommitId, readBuildGitChain, validateBuildGitBundle, type BuildGitBundle, type BuildGitPart } from './build-git-bundle';
 import { exportBuildGitBundles } from './build-git-export';
+import { githubProject, hydrateGithubGit, saveGithubVersion } from './build-github';
 import { storeBuildSource, storeBuildText, storeBuildObject, buildSourceEntries, buildTextEntry, buildObjectRef, buildObjectReference, buildSourceManifest, type BuildStorageOwner, type BuildStoredFile } from './build-storage';
 
 export const BUILD_GIT_ROOT = '/workspace/mainbrella-git';
@@ -56,6 +57,8 @@ async function prepare(env: Env, params: BuildParams, runtime: BuildGitRuntime, 
   return { ...(bundle ?? { commitId: null, bundleKey: null, bundles: [] }), reuse: false };
 }
 export async function hydrateBuildGit(env: Env, params: BuildParams, runtime: BuildGitRuntime, parent: BuildGitVersion | null, turn: BuildTurnRow) {
+  const project = await githubProject(env, params.userId, params.appId);
+  if (project?.github_repo) return hydrateGithubGit(env, params, runtime, { ...project, github_commit_id: turn.restore_version_id ?? project.github_commit_id });
   if (!env.BUCKET) return;
   const bundle = await prepare(env, params, runtime, parent, 'git-hydrate');
   await runtime.write(`${BUILD_GIT_ROOT}/input.json`, JSON.stringify({ action: 'hydrate', parent: parent ? bundle : null,
@@ -64,6 +67,8 @@ export async function hydrateBuildGit(env: Env, params: BuildParams, runtime: Bu
   if (result.status !== 'succeeded') throw new BuildError('build_git_unavailable', 503, result.stderr);
 }
 export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime: BuildGitRuntime, turn: BuildTurnRow, files: BuildFiles, verified: boolean) {
+  const project = await githubProject(env, params.userId, params.appId);
+  if (project?.github_repo) return saveGithubVersion(env, params, runtime, turn, files, verified);
   if (!env.BUCKET) throw new BuildError('build_git_unavailable');
   validateBuildFiles(files);
   const existing = await buildGitVersion(env, params.appId, params.turnId);

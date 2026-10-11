@@ -7,6 +7,8 @@ import { serviceForPath } from "../shared/service-routing";
 const endpointMethods: Record<string, string[]> = {
   '/github/import/config': ['get'], '/github/import/connect': ['post'], '/github/import/connection': ['get', 'delete'],
   '/github/import/callback': ['get'], '/github/import/setup': ['get'],
+  '/github/build/config': ['get'], '/github/build/connect': ['post'], '/github/build/connection': ['get'],
+  '/github/build/callback': ['get'], '/github/build/setup': ['get'], '/projects/github': ['get', 'put'],
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
@@ -154,6 +156,16 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.match(update.description, /project owned by the signed-in user/);
 });
 
+test('GitHub Build authorization documents the exact same-origin project return fields', async () => {
+  const { paths } = await document();
+  const connect = paths['/github/build/connect'].post;
+  const body = connect.requestBody.content['application/json'].schema;
+  assert.equal(body.properties.returnTo.type, 'string');
+  assert.equal(body.properties.returnTo.pattern, '^\\/projects\\/');
+  assert.match(connect.description, /githubProject, githubRepo, and githubBranch/);
+  assert.deepEqual(paths['/github/build/setup'].get.security, [{ cookieAuth: [] }]);
+});
+
 test('Build repository browsing documents manifests and authenticated individual R2 file streams', async () => {
   const { paths, components } = await document();
   const operation = paths['/build/apps/{appId}/versions/{versionId}'].get;
@@ -166,7 +178,9 @@ test('Build repository browsing documents manifests and authenticated individual
   assert.ok(!schema.properties.changes.items.properties.before);
   for (const path of ['/build/apps/{appId}/files', '/build/apps/{appId}/file']) {
     assert.deepEqual(paths[path].get.security, [{ cookieAuth: [] }]);
-    assert.equal(paths[path].get.parameters.find((param: any) => param.name === 'versionId').schema.format, 'uuid');
+    const identifier = paths[path].get.parameters.find((param: any) => param.name === 'versionId').schema;
+    assert.ok(identifier.anyOf.some((format: any) => format.format === 'uuid'));
+    assert.ok(identifier.anyOf.some((format: any) => format.pattern === '^[a-f0-9]{40}$'));
   }
   const stream = paths['/build/apps/{appId}/file'].get;
   assert.equal(stream.parameters.find((param: any) => param.name === 'path').required, true);

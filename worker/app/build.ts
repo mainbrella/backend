@@ -21,6 +21,9 @@ import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, bu
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
 import { buildGitEntries, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
 import { buildSourceEntries, readBuildSource, storeBuildSource, readBuildText, serveBuildFile, type BuildFileInfo } from '../lib/build-storage';
+import { githubProject, publicGithubProject, listGithubVersions, githubVersion, githubVersionDetail, serveGithubVersionFile,
+  cleanupLinkedGithubHistory } from '../lib/build-github';
+import { buildVersionId } from '../lib/build-contract';
 
 export function buildConfigured(env: Env) {
   return env.BUILD_ENABLED === 'true' && Boolean(env.BUCKET && (localCodexConfigured(env) || env.AI && env.CONTAINER_ACCOUNT && buildTokenPrices[env.BUILD_MODEL || BUILD_MODEL]) && env.BUILD_WORKFLOW && previewsConfigured(env));
@@ -74,7 +77,10 @@ async function detail(env: Env, userId: string, id: string) {
     CASE WHEN json_extract(o.result_json,'$.ok') = 0 THEN o.result_json ELSE NULL END AS result_json
     FROM build_operations o JOIN build_turns t ON t.id = o.turn_id WHERE t.app_id = ? AND t.user_id = ?`)
     .bind(id, userId).all<OperationRow>();
-  return { app: { ...publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost])), operations), retention: await storageRetention(env, userId) } };
+  const project = await githubProject(env, userId, id);
+  return { app: { ...publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost])), operations),
+    ...(project?.github_repo ? { versionId: project.github_commit_id, verifiedVersionId: row.github_verified_commit_id ?? null, github: publicGithubProject(project) } : {}),
+    retention: await storageRetention(env, userId) } };
 }
 async function requireBuildAccess(env: Env, userId: string) {
   if (!buildConfigured(env)) throw new BuildError('build_unavailable');
@@ -110,6 +116,7 @@ export async function failBuildTurn(env: Env, turn: Pick<BuildTurnRow, 'id' | 'a
 export async function reconcileBuildTurns(env: Env) {
   await settleReportedBuildUsage(env);
   await cleanupDeletedBuildGit(env);
+  await cleanupLinkedGithubHistory(env);
   if (!buildConfigured(env)) return;
   const { results } = await env.DB.prepare("SELECT * FROM build_turns WHERE status IN ('queued', 'running') ORDER BY created_at LIMIT 20").all<BuildTurnRow>();
   for (const turn of results) {
@@ -157,9 +164,9 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
   const diagnostic = /^\/build\/apps\/([a-f0-9-]{36})\/turns\/([a-f0-9-]{36})\/diagnostics$/.exec(url.pathname);
-  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|files|file|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}))?)?)?$/.exec(url.pathname);
+  const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|files|file|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}|[a-f0-9]{40}))?)?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]
-    || ['images', 'diagnostics'].includes(match[3]) && !match[4] || match[4] && (!['images', 'diagnostics', 'versions'].includes(match[3]) || !validExecutionId(match[4]))) return authJson({ error: 'not_found' }, 404, cors);
+    || ['images', 'diagnostics'].includes(match[3]) && !match[4] || match[4] && (!['images', 'diagnostics', 'versions'].includes(match[3]) || !(match[3] === 'versions' ? buildVersionId.safeParse(match[4]).success : validExecutionId(match[4])))) return authJson({ error: 'not_found' }, 404, cors);
   const allowed = match[1] === 'config' || ['source', 'files', 'file', 'export', 'events', 'images', 'diagnostics', 'versions', 'repository'].includes(match[3]) ? ['GET']
     : match[3] ? ['POST'] : match[2] ? ['GET', 'PATCH', 'DELETE'] : ['GET', 'POST'];
   if (!allowed.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: `${allowed.join(', ')}, OPTIONS` });
@@ -182,6 +189,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
       const owner = { userId: user.id, appId: id };
+      const github = await githubProject(env, user.id, id);
       const retention = await storageRetention(env, user.id);
       if (retention.writesBlocked && ['turns', 'restore', 'resume'].includes(match[3]) && request.method === 'POST')
         return authJson({ error: 'storage_funding_required', retention }, 402, cors);
@@ -190,7 +198,12 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
         const versionId = url.searchParams.get('versionId'), path = url.searchParams.get('path');
         const allowedQuery = match[3] === 'files' ? ['versionId'] : ['versionId', 'path'];
         if ([...url.searchParams.keys()].some(key => !allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1)
-          || versionId !== null && !validExecutionId(versionId) || match[3] === 'file' && (!path || path.length > 160)) return authJson({ error: 'invalid_request' }, 400, cors);
+          || versionId !== null && !buildVersionId.safeParse(versionId).success || match[3] === 'file' && (!path || path.length > 160)) return authJson({ error: 'invalid_request' }, 400, cors);
+        if (github?.github_repo && versionId) {
+          if (match[3] === 'file') return serveGithubVersionFile(env, github, versionId, path!, cors);
+          const detail = await githubVersion(env, github, versionId, app.github_verified_commit_id ?? null);
+          return authJson({ revision: app.revision, version: detail.version, files: detail.files }, 200, cors);
+        }
         const version = versionId ? await buildGitVersion(env, id, versionId) : null;
         if (versionId && !version) return authJson({ error: 'version_not_found' }, 404, cors);
         const entries = version ? await buildGitEntries(env, owner, version) : [...await buildSourceEntries(env, owner, app.source_json), ...await buildImageEntries(env, owner)];
@@ -201,6 +214,9 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
         return await serveBuildFile(env, owner, entry, cors);
       }
       if (match[3] === 'versions') {
+        if (github?.github_repo) return authJson(match[4]
+          ? await githubVersionDetail(env, github, match[4], app.github_verified_commit_id ?? null)
+          : await listGithubVersions(env, github, app.github_verified_commit_id ?? null), 200, cors);
         if (match[4]) {
           const version = await buildGitVersion(env, id, match[4]);
           if (!version) return authJson({ error: 'version_not_found' }, 404, cors);
@@ -215,6 +231,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
         return authJson({ versions: results.map(publicGitVersion), versionId: app.git_version_id ?? null, verifiedVersionId: app.verified_git_version_id ?? null }, 200, cors);
       }
       if (match[3] === 'repository') {
+        if (github?.github_repo) return authJson({ error: 'github_repository_hosted', url: publicGithubProject(github)!.url }, 409, cors);
         const version = app.git_version_id ? await buildGitVersion(env, id, app.git_version_id) : null;
         if (!version) return authJson({ error: 'version_not_found' }, 404, cors);
         return await exportBuildGit(env, user.id, id, version, cors);
@@ -254,6 +271,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
       }
       if (request.method === 'DELETE' || match[3] === 'stop') {
         if (app.active_turn_id) return authJson({ error: 'build_busy' }, 409, cors);
+        if ((await githubProject(env, user.id, id))?.github_link_lock) throw new BuildError('github_project_busy', 409);
         if (request.method === 'DELETE' && app.project_id) {
           const domain = await env.DB.prepare('SELECT id FROM project_domains WHERE project_id = ? LIMIT 1').bind(app.project_id).first();
           const route = env.PREVIEW_ROUTES && await env.PREVIEW_ROUTES.prepare(`SELECT project_id FROM project_endpoints WHERE project_id = ? AND user_id = ?
@@ -293,7 +311,11 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
     if (!parsed.success) return authJson({ error: 'invalid_request' }, 400, cors);
     const data = parsed.data;
     const restoreId = 'versionId' in data ? data.versionId : null;
-    if (restoreId && (!env.BUCKET || !await buildGitVersion(env, id, restoreId))) return authJson({ error: 'version_not_found' }, 404, cors);
+    if (restoreId) {
+      const github = await githubProject(env, user.id, id);
+      if (github?.github_repo) await githubVersion(env, github, restoreId);
+      else if (!env.BUCKET || !await buildGitVersion(env, id, restoreId)) return authJson({ error: 'version_not_found' }, 404, cors);
+    }
     const mode = restoring ? 'preview' : 'mode' in data ? data.mode : 'build';
     const prompt = restoring ? `Restore version ${restoreId}` : 'prompt' in data ? data.prompt : '';
     const options = mode === 'build' ? resolveBuildModel(env.BUILD_MODEL || BUILD_MODEL, 'prompt' in data ? data : {}, localCodexConfigured(env)) : { model: env.BUILD_MODEL || BUILD_MODEL, effort: null };
@@ -312,6 +334,8 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
     const now = new Date().toISOString(), appId = id || crypto.randomUUID(), turnId = crypto.randomUUID();
     if (id) {
       const app = (await ownedBuildApp(env, user.id, id))!;
+      const project = await githubProject(env, user.id, id);
+      if (project?.github_link_lock) throw new BuildError('github_project_busy', 409);
       if (app.active_turn_id) return authJson({ error: 'build_busy' }, 409, cors);
       if ('revision' in data && data.revision !== app.revision) return authJson({ error: 'revision_conflict' }, 409, cors);
     }
@@ -327,6 +351,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (error instanceof BuildError) return authJson({ error: message }, error.status, cors);
+    if (message.includes('github_project_busy')) return authJson({ error: 'github_project_busy' }, 409, cors);
     if (message.includes('build_busy') || message.includes('revision_conflict')) return authJson({ error: message.includes('revision_conflict') ? 'revision_conflict' : 'build_busy' }, 409, cors);
     if (['build_app_limit', 'build_turn_limit'].some(code => message.includes(code))) return authJson({ error: message.includes('build_turn_limit') ? 'build_turn_limit' : 'build_app_limit' }, 429, cors);
     if (/UNIQUE constraint failed: build_turns\.user_id/.test(message)) return authJson({ error: 'build_busy' }, 409, cors);

@@ -18,12 +18,14 @@ import { readBuildSource, readBuildText, storeBuildObject } from '../lib/build-s
 import { putStoredObject } from '../lib/r2-storage';
 import type { BuildGitBundle } from '../lib/build-git-bundle';
 import { cleanupStorageOrphans } from '../lib/r2-maintenance';
+import { pushGithubHistory, rootSnapshotBundle } from '../lib/build-github';
+import { sealGithubBuildCredentials } from '../lib/github-build';
 
 async function fixture(t: TestContext, fromProjects = false) {
   const f = await paidContainerFixture(t);
   t.after(() => f.close());
   for (const name of ['014_projects.sql', '015_project_domain.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql',
-    '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql'])
+    '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql', '035_project_github.sql'])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   f.sqlite.prepare("INSERT INTO r2_meter_state(id,value) VALUES('inventory_complete',?)").run(String(Date.now()));
@@ -87,9 +89,11 @@ async function fixture(t: TestContext, fromProjects = false) {
       return { status: result.status === 0 ? 'succeeded' : 'failed', stdout: result.stdout ?? '', stderr: result.stderr || String(result.error ?? '') };
     },
     async write(path, content) {
-      if (path === `${BUILD_GIT_ROOT}/input.json`) {
+      if (path === `${BUILD_GIT_ROOT}/input.json` || path === '/workspace/mainbrella-github/input.json') {
         const input = JSON.parse(typeof content === 'string' ? content : new TextDecoder().decode(content));
-        input.worktree = localPath(input.worktree); content = JSON.stringify(input);
+        input.worktree = localPath(input.worktree);
+        if (input.pack) input.pack = localPath(input.pack);
+        content = JSON.stringify(input);
       }
       mkdirSync(dirname(localPath(path)), { recursive: true });
       writeFileSync(localPath(path), content);
@@ -630,4 +634,88 @@ test('an exhausted wallet rejects a new commit and preserves the accepted head i
   assert.equal(f.app().git_version_id, first.id);
   assert.equal(await buildGitVersion(f.env, next.appId, next.turnId), null);
   assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
+});
+
+test('switching to GitHub transfers complete incremental history through real Git receive-pack without tokens in the pack', async t => {
+  const f = await fixture(t);
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  const changed = { ...buildStarter, 'src/github.ts': 'export const github = true;' };
+  const second = await saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), changed, true);
+  const remote = join(f.disk, 'github.git');
+  git(['init', '--quiet', '--bare', remote], f.disk);
+  let pushes = 0;
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, options?: RequestInit) => {
+    const url = new URL(String(input));
+    assert.equal((options?.headers as Record<string, string>).Authorization, url.hostname === 'github.com'
+      ? `Basic ${btoa('x-access-token:ghu_secret_build')}` : 'Bearer ghu_secret_build');
+    if (url.pathname.endsWith('/info/refs')) {
+      const advertised = spawnSync('git', ['receive-pack', '--stateless-rpc', '--advertise-refs', remote]);
+      assert.equal(advertised.status, 0); return new Response(advertised.stdout);
+    }
+    if (url.pathname.endsWith('/git-receive-pack')) {
+      pushes++;
+      const input = Buffer.from(await new Response(options!.body).arrayBuffer());
+      assert.ok(!input.includes(Buffer.from('ghu_secret_build')));
+      const received = spawnSync('git', ['receive-pack', '--stateless-rpc', remote], { input });
+      assert.equal(received.status, 0, received.stderr.toString()); return new Response(received.stdout);
+    }
+    if (url.pathname.endsWith('/git/ref/heads/main')) {
+      return Response.json({ object: { sha: git(['rev-parse', 'refs/heads/main'], remote) } });
+    }
+    assert.fail(`Unexpected GitHub request: ${url}`);
+  });
+  const uploads = f.puts.length;
+  await pushGithubHistory('owner/project', 'main', second.commit_id, await exportBuildGit(f.env, USER_ONE, f.params.appId, second, {}), 'ghu_secret_build');
+  assert.equal(git(['rev-parse', 'main'], remote), second.commit_id);
+  assert.equal(git(['rev-parse', 'main^'], remote), first.commit_id);
+  assert.equal(git(['show', 'main:src/github.ts'], remote), changed['src/github.ts']);
+  git(['fsck', '--full'], remote);
+  assert.equal(f.puts.length, uploads);
+  await pushGithubHistory('owner/project', 'main', second.commit_id, await exportBuildGit(f.env, USER_ONE, f.params.appId, second, {}), 'ghu_secret_build');
+  assert.equal(pushes, 1, 'A lost migration acknowledgement does not push history twice');
+  await assert.rejects(pushGithubHistory('owner/project', 'main', first.commit_id, await exportBuildGit(f.env, USER_ONE, f.params.appId, first, {}), 'ghu_secret_build'), { message: 'github_branch_conflict' });
+  assert.equal(git(['rev-parse', 'main'], remote), second.commit_id);
+});
+
+test('empty GitHub repository snapshots contain valid Git objects, sorted trees and UTF-8 source', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'mainbrella-github-root-'));
+  try {
+    const snapshot = { '.gitignore': Buffer.from('node_modules/\n'), 'src/App.tsx': Buffer.from('Hello 🌍'),
+      'src-a.txt': Buffer.from('sibling'), 'src/assets/image.jpg': Uint8Array.from([255, 216, 255, 217]) };
+    const result = rootSnapshotBundle(snapshot, 'Initial source', '2026-10-11T01:00:00Z');
+    const bundle = join(directory, 'project.bundle'); writeFileSync(bundle, result.bundle);
+    const clone = join(directory, 'clone');
+    git(['clone', '--quiet', '-b', 'main', bundle, clone], directory);
+    git(['fsck', '--full'], clone);
+    assert.equal(git(['rev-parse', 'HEAD'], clone), result.sha);
+    assert.equal(git(['show', 'HEAD:src/App.tsx'], clone), 'Hello 🌍');
+    assert.deepEqual(readFileSync(join(clone, 'src/assets/image.jpg')), Buffer.from(snapshot['src/assets/image.jpg']));
+    assert.deepEqual(rootSnapshotBundle(snapshot, 'Initial source', '2026-10-11T01:00:00Z'), result, 'Retries produce the same initial commit');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('linked Builder containers hydrate the exact GitHub commit with shallow Git history and no guest credentials', async t => {
+  const f = await fixture(t);
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  Object.assign(f.env, { GITHUB_BUILD_CLIENT_ID: 'build', GITHUB_BUILD_CLIENT_SECRET: 'secret', GITHUB_BUILD_APP_SLUG: 'mainbrella-build', GITHUB_BUILD_ENCRYPTION_KEY: 'b'.repeat(64) });
+  f.sqlite.prepare('INSERT INTO github_build_connections(user_id,github_user_id,github_login,credentials,expires_at) VALUES(?,?,?,?,?)')
+    .run(USER_ONE, '1', 'owner', await sealGithubBuildCredentials(f.env, USER_ONE, { access_token: 'ghu_private_build_token' }), Date.now() + 600_000);
+  f.sqlite.prepare('UPDATE projects SET github_repo=?,github_branch=?,github_commit_id=? WHERE id=?')
+    .run('owner/project', 'main', first.commit_id, next.appId);
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, options?: RequestInit) => {
+    assert.equal(String(input), 'https://github.com/owner/project.git/git-upload-pack');
+    assert.equal((options?.headers as Record<string, string>).Authorization, `Basic ${btoa('x-access-token:ghu_private_build_token')}`);
+    const packed = spawnSync('git', ['upload-pack', '--stateless-rpc', f.localPath(`${BUILD_GIT_ROOT}/repository`)], { input: String(options?.body) });
+    assert.equal(packed.status, 0, packed.stderr.toString());
+    return new Response(packed.stdout, { headers: { 'Content-Type': 'application/x-git-upload-pack-result' } });
+  });
+  const reads = f.gets.length;
+  await hydrateBuildGit(f.env, next, f.runtime, null, f.turn(next));
+  assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
+  assert.equal(git(['rev-parse', '--is-shallow-repository'], f.localPath('/workspace/app')), 'true');
+  assert.equal(git(['remote', 'get-url', 'origin'], f.localPath('/workspace/app')), 'https://github.com/owner/project.git');
+  assert.ok(!readFileSync(f.localPath('/workspace/app/.git/config'), 'utf8').includes('ghu_private_build_token'));
+  assert.equal(f.gets.length, reads, 'Hydration does not read hosted bundles');
 });

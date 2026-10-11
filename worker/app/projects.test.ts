@@ -14,7 +14,7 @@ async function fixture(t: Parameters<typeof paidContainerFixture>[0], shared = t
   const f = await paidContainerFixture(t);
   for (const migration of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql', '020_accounting_ledger.sql', '023_build.sql', '024_build_activity.sql',
     '025_build_images.sql', '026_build_ai_billing.sql', '027_build_model_effort.sql', '028_build_operations.sql',
-    '029_remove_build_daily_limit.sql', '030_build_git.sql', '031_r2_billing.sql', '032_storage_retention.sql', ...(shared ? ['034_shared_projects.sql'] : [])])
+    '029_remove_build_daily_limit.sql', '030_build_git.sql', '031_r2_billing.sql', '032_storage_retention.sql', ...(shared ? ['034_shared_projects.sql', '035_project_github.sql'] : [])])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => {
     f.sqlite.exec('BEGIN');
@@ -72,10 +72,11 @@ test('shared migration backfills Builder identity without changing source, Git h
   f.sqlite.exec(readFileSync(new URL('../../migrations/034_shared_projects.sql', import.meta.url), 'utf8'));
   const after = f.sqlite.prepare('SELECT * FROM build_apps WHERE id=?').get(appId)!;
   assert.deepEqual({ ...after }, { ...before, project_id: appId });
+  f.sqlite.exec(readFileSync(new URL('../../migrations/035_project_github.sql', import.meta.url), 'utf8'));
   const { projects } = await (await handleRequest(request(), f.env)).json() as any;
   assert.equal(projects.length, 2);
   assert.deepEqual(projects.find((project: any) => project.id === appId), {
-    id: appId, name: before.name, domain: null, created_at: before.created_at, build_app_id: appId, git_version_id: 'saved-head',
+    id: appId, name: before.name, domain: null, created_at: before.created_at, build_app_id: appId, git_version_id: 'saved-head', github_repo: null, github_branch: null, github_commit_id: null,
   });
   assert.equal(projects.find((project: any) => project.id === manualId).domain, 'example.com');
 });
@@ -264,7 +265,7 @@ test('projects can be renamed by their owner while preserving identity and creat
   assert.equal(stored.user_id, USER_ONE);
   assert.equal(stored.name, 'Renamed');
   assert.equal(stored.created_at, before.created_at);
-  assert.equal(Object.keys(project).sort().join(','), 'build_app_id,created_at,domain,git_version_id,id,name');
+  assert.equal(Object.keys(project).sort().join(','), 'build_app_id,created_at,domain,git_version_id,github_branch,github_commit_id,github_repo,id,name');
 
   assert.equal((await handleRequest(update(before.id, { name: 'Other owner' }, SESSION_TWO), env)).status, 404);
   assert.equal((await handleRequest(update('4e3cb127-784d-4a9f-9828-afd093c295dc', { name: 'Missing' }), env)).status, 404);

@@ -12,6 +12,7 @@ import { buildFailure, failureError, proposeBuildOperation, startBuildOperation,
 import { storeBuildSource, readBuildSource, readBuildText, canonicalBuildSource } from './build-storage';
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from './build-git';
+import { syncGithubSource, githubRestoreVersion, githubProject } from './build-github';
 import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
@@ -139,7 +140,16 @@ async function materialize(env: Env, params: BuildParams, container: BuildContai
   // A retry overwrites exactly the same bytes; generated text never enters a shell.
   await step.do(`${label}: files`, retry, async () => {
     for (const [path, content] of Object.entries(files)) await writeGuestFile(env, params.userId, container, `${root}/${path}`, content);
+    const github = await githubProject(env, params.userId, params.appId);
     for (const image of await savedBuildImages(env, params.appId)) {
+      if (github?.github_repo) {
+        const { stub, headers } = await machine(env, params.userId, container);
+        const url = new URL('https://internal/files'); url.searchParams.set('path', `${root}/public${buildImagePath(image.id)}`);
+        const existing = await stub.fetch(new Request(url, { headers }));
+        await existing.body?.cancel();
+        if (existing.ok) continue;
+        if (existing.status !== 404) throw new BuildError('github_unavailable');
+      }
       await writeGuestFile(env, params.userId, container, `${root}/public${buildImagePath(image.id)}`, buildImageBytes(image.data));
     }
     await writeGuestFile(env, params.userId, container, '/workspace/mainbrella-build-server.cjs', buildStaticServer);
@@ -252,11 +262,20 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       return { app, turn, images };
     });
     currentTurn = initial.turn;
+    const github = await step.do('Sync GitHub source', retry, () => syncGithubSource(env, params));
+    if (github?.github_repo) {
+      const current = await ownedBuildApp(env, params.userId, params.appId);
+      if (!current) throw new BuildError('build_interrupted', 409);
+      initial.app.source_json = current.source_json;
+    }
     const initialFiles = await readBuildSource(env, params, initial.app.source_json);
     originalSource = canonicalBuildSource(initialFiles);
-    const restored = initial.turn.restore_version_id ? await buildGitVersion(env, params.appId, initial.turn.restore_version_id) : null;
+    const restored = initial.turn.restore_version_id ? github?.github_repo
+      ? await githubRestoreVersion(env, github, initial.turn.restore_version_id)
+      : await buildGitVersion(env, params.appId, initial.turn.restore_version_id) : null;
     if (initial.turn.restore_version_id && !restored) throw new BuildError('version_not_found', 404);
-    const parent = initial.app.git_version_id ? await buildGitVersion(env, params.appId, initial.app.git_version_id) : null;
+    const parent = github?.github_repo && github.github_commit_id ? await githubRestoreVersion(env, github, github.github_commit_id)
+      : initial.app.git_version_id ? await buildGitVersion(env, params.appId, initial.app.git_version_id) : null;
     // File inspection and model output can start before the sandbox is ready.
     async function sandbox() {
       if (container) return container;
@@ -417,7 +436,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
           .bind(params.appId, revision, params.turnId, source, now)] : []),
         env.DB.prepare('UPDATE build_apps SET source_json = ?, revision = ?, preview_json = ?, active_turn_id = NULL, updated_at = ? WHERE id = ? AND user_id = ? AND active_turn_id = ?')
           .bind(source, revision, JSON.stringify(preview), now, params.appId, params.userId, params.turnId),
-        ...(savedVersion ? [env.DB.prepare('UPDATE build_apps SET verified_git_version_id = ? WHERE id = ? AND user_id = ? AND git_version_id = ?')
+        ...(savedVersion && !github?.github_repo ? [env.DB.prepare('UPDATE build_apps SET verified_git_version_id = ? WHERE id = ? AND user_id = ? AND git_version_id = ?')
           .bind(savedVersion.id, params.appId, params.userId, savedVersion.id),
           env.DB.prepare('UPDATE build_git_versions SET verified = 1 WHERE id = ? AND app_id = ?').bind(savedVersion.id, params.appId)] : []),
         env.DB.prepare("UPDATE build_turns SET status = 'succeeded', stage = 'Preview ready', summary = ?, finished_at = ? WHERE id = ? AND user_id = ?")
@@ -428,7 +447,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     const code = error instanceof BuildError ? error.message : error instanceof Error && error.message === 'subscription_required' ? 'subscription_required' : 'build_failed';
     const details = (error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : '')?.trim().slice(0, 4000);
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
-    if (env.BUCKET && currentTurn && !['build_git_unavailable', 'build_git_file_limit', 'storage_funding_required', 'build_billing_unavailable'].includes(code)) {
+    if (env.BUCKET && currentTurn && !code.startsWith('github_') && !['build_git_unavailable', 'build_git_file_limit', 'storage_funding_required', 'build_billing_unavailable'].includes(code)) {
       try {
         const app = await ownedBuildApp(env, params.userId, params.appId);
         const files = app ? await readBuildSource(env, params, app.source_json) : null;
