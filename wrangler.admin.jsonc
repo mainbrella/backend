@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "account_id": "2b7a9be82bb64187230703b024e25157",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "delta",
+      "database_id": "41be6d7b-26fb-4701-a3fb-fdf3454e14f9",
+      "migrations_table": "schema_migrations"
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
+  },
+  "name": "mainbrella-admin",
+  "main": "worker/admin.ts",
+  "vars": {
+    "R2_BILLING_MODE": "charge",
+    "R2_CHARGE_FROM": "2026-10-11T00:00:00Z",
+    "R2_PLATFORM_MAX_BYTES": "1000000000000",
+    "R2_WRITES_PAUSED": "false",
+    "R2_MARKUP_BPS": "2000",
+    "R2_ACCOUNT_MAX_BYTES": "10000000000",
+    "ACQUISITION_ENABLED": "true"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTAINER_ACCOUNT",
+        "class_name": "ContainerAccount",
+        "script_name": "mainbrella-api"
+      }
+    ]
+  }
+}

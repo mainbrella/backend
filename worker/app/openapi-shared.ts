@@ -2,6 +2,7 @@ import { OpenAPIRoute, contentJson } from "chanfana";
 import type { HonoOpenAPIRouterType, OpenAPIRouteSchema, ResponseConfig } from "chanfana";
 import type { Context } from "hono";
 import { z } from "zod";
+import { serviceForPath } from "../shared/service-routing";
 
 export type LegacyHandler = (request: Request, env: Env, ctx?: ExecutionContext) => Promise<Response>;
 export type OpenAPIApi = HonoOpenAPIRouterType<{ Bindings: Env }>;
@@ -49,6 +50,13 @@ export function register(
   schema: OpenAPIRouteSchema,
   handler: LegacyHandler,
 ): void {
+  const service = serviceForPath(path);
+  if (service) {
+    schema = {
+      ...schema,
+      description: `${schema.description ? `${schema.description} ` : ""}Served by the independently deployed mainbrella-${service} Worker through the API service binding. A missing or unavailable service returns 503.`,
+    };
+  }
   class Endpoint extends OpenAPIRoute {
     schema = schema;
     async handle(context: Context<{ Bindings: Env }>): Promise<Response> {

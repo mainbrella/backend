@@ -1,5 +1,5 @@
 import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
-import { ADMIN_EMAIL } from './admin';
+import { ADMIN_EMAIL } from '../shared/admin';
 import { createAccountingClose, monthBounds } from '../lib/accounting-close';
 import { ledgerWatermark, type LedgerRow } from '../lib/accounting-ledger';
 import type { BillingEnv } from '../lib/stripe';

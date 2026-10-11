@@ -10,7 +10,7 @@ import { storageReadAccess } from '../lib/r2-access';
 import { checkStorageHealth } from '../lib/r2-health';
 import { cleanupStorageOrphans, expireUnfundedStorage } from '../lib/r2-maintenance';
 import { storeBuildSource, storeBuildObject } from '../lib/build-storage';
-import { handleRequest } from './router';
+import { handleRequest } from './service-test-helpers';
 import { handleAppDelete } from './auth-app';
 import { hashToken } from './auth-core';
 import { cleanupDeletedBuildGit } from '../lib/build-git';

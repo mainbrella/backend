@@ -1,6 +1,7 @@
 import { boundedPrivateBody } from "../../containers/private-services-contract.js";
-import { MarketingEmailPreferenceError, marketingEmailSchema, marketingUnsubscribeSchema, sendMarketingEmail } from "../lib/marketing-email";
-import { ADMIN_EMAIL } from "./admin";
+import { MarketingEmailPreferenceError, sendMarketingEmail } from "../lib/marketing-email";
+import { marketingEmailSchema, marketingUnsubscribeSchema } from "../shared/marketing-email-contract";
+import { ADMIN_EMAIL } from "../shared/admin";
 import { authCorsHeaders, authJson, currentUser } from "./auth-core";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;

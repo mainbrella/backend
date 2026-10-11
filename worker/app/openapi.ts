@@ -37,7 +37,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     docs_url: "/docs", redoc_url: "/redocs", openapi_url: "/openapi.json",
     schema: {
       openapi: "3.1.0",
-      info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API." },
+      info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API. Admin and marketing endpoints retain this origin and are forwarded to independently deployed Workers." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
       tags: ["Operations", "Authentication", "API Keys", "Projects", "Subscriptions", "Billing", "Containers", "Private Services", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build"].map(name => ({ name })),
     },

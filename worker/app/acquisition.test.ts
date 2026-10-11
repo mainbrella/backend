@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { handleRequest } from './router';
+import { handleRequest } from './service-test-helpers';
 import { hashToken } from './auth-core';
 import { appendProductEvent, appendProductEventsWithCursor } from '../lib/acquisition';
 

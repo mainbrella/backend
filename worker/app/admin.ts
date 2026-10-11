@@ -1,8 +1,9 @@
 import { authCorsHeaders, authJson, currentUser, type AuthUser } from "./auth-core";
 import type { Plan } from "../lib/stripe";
 import { accountBillingRequest, type PrepaidHistory } from "../lib/prepaid-billing";
+import { ADMIN_EMAIL } from "../shared/admin";
 
-export const ADMIN_EMAIL = "oneone@gmail.com";
+export { ADMIN_EMAIL } from "../shared/admin";
 const PAGE_SIZE = 25;
 
 type AdminUser = Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at"> & { plan: Plan | "none" };

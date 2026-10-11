@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAPIApp } from "./openapi";
 import { handleRequest } from "./router";
+import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
   '/github/import/config': ['get'], '/github/import/connect': ['post'], '/github/import/connection': ['get', 'delete'],
@@ -71,6 +72,20 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('service-owned endpoints document independent deployment and retain their public contracts', async () => {
+  const { paths } = await document();
+  for (const [path, methods] of Object.entries(endpointMethods)) {
+    const service = serviceForPath(path);
+    if (!service) continue;
+    for (const method of methods) {
+      const operation = paths[path][method];
+      assert.match(operation.description, new RegExp(`independently deployed mainbrella-${service} Worker`));
+      assert.ok(operation.responses[503], `${method} ${path}`);
+      assert.deepEqual(operation.security, path === '/api/unsubscribe' ? [] : [{ cookieAuth: [] }]);
+    }
+  }
+});
 
 test('accounting schemas describe protected exports, immutable revisions and explicit CPA methods', async () => {
   const { paths, components } = await document();

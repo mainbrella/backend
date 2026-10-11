@@ -1,11 +1,87 @@
 # Backend release runbook
 
-The current order is **migrations/secrets → account and routing preflights → containers
-→ gateway → API → qualification → web**. `npm run deploy` enforces the preflights and Worker
+The coordinated release order is **migrations/secrets → account, routing, and service preflights → containers
+→ gateway → admin and marketing → API → qualification → web**. `npm run deploy` enforces the preflights and Worker
 order and stops on the first failed command. It does not apply migrations, change
 secrets, publish web, or run paid verification. Direct `deploy:api`,
 `deploy:previews`, and `deploy:containers` commands remain operator tools and
 bypass the combined gate.
+
+## Independent admin and marketing releases
+
+This repository contains three independently deployed application Workers:
+`mainbrella-api` (`worker/index.ts`, `wrangler.jsonc`),
+`mainbrella-admin` (`worker/admin.ts`, `wrangler.admin.jsonc`), and
+`mainbrella-marketing` (`worker/marketing.ts`, `wrangler.marketing.jsonc`).
+Containers and the preview gateway retain their existing independent configurations.
+
+The public API forwards `/admin/*` and `/api/get-marketing-users` to `ADMIN_API`,
+and `/api/send-marketing-email` and `/api/unsubscribe` to `MARKETING_API`.
+Public URLs, host-only browser session cookies, authentication policy, and API
+contracts remain the same. Both services validate requests and authentication
+themselves. Their Workers have no public routes, workers.dev URL, or preview URL.
+The API continues serving the complete OpenAPI document, including service endpoints.
+
+Admin owns user/table browsing, acquisition reports, accounting reports/closes,
+storage invoice reconciliation, and marketing recipient lists. It binds to the
+existing API `ContainerAccount` namespace for billing history and accounting
+checkpoints; it does not create or migrate a Durable Object namespace. Marketing
+owns the sender, HTML template, and public unsubscribe handler. Welcome and
+authentication emails stay with the API. Both services share the existing `delta`
+database. Only `wrangler.jsonc` owns migration execution: use
+`npm run db:migrate:remote`. Keep schema changes compatible with independently
+deployed versions; migration state is not reverted by a Worker rollback.
+
+For a template or marketing implementation change, run:
+
+```sh
+npm run test:marketing
+npm run type-check
+npm run check:marketing
+npm run deploy:marketing
+```
+
+For an admin implementation change, use the corresponding `test:admin`,
+`check:admin`, and `deploy:admin` commands, plus `type-check`.
+These deploy commands run only the selected service's preflight and publication;
+they do not acquire an image lease or republish containers, previews, or the API.
+The preflight validates private routing, shared bindings/configuration, the remote
+migration ledger, and (for admin) Stripe secret metadata. It performs no database
+writes, email sends, or workload starts. The checks use Wrangler dry runs.
+
+CI selects service checks for files owned exclusively by admin or marketing.
+Shared authentication, schemas, migration files, configuration/tooling, and unknown
+paths run the full checks. The existing `test` status aggregates whichever checks
+were selected. An endpoint contract change also requires publishing the API's
+updated OpenAPI document. CI validates changes; publication remains an explicit
+operator action.
+
+### First rollout
+
+1. Apply account migrations through the API configuration.
+2. Configure `STRIPE_SECRET_KEY` on the admin Worker from the established secure
+   secret source:
+   `npx wrangler secret put STRIPE_SECRET_KEY --config wrangler.admin.jsonc`.
+   Secrets on the existing API are not inherited by a new Worker. Admin accounting
+   closes need the same Stripe account to refresh payment evidence. Marketing
+   requires its configured Email Sending binding and the already onboarded sender domains.
+3. Run the scoped tests, type check, and both dry runs. Publish admin and marketing
+   before publishing the API with its new service bindings. For the full coordinated
+   release, `npm run deploy` enforces that order. An API-only rollout can follow
+   `npm run deploy:admin`, `npm run deploy:marketing`, then `npm run deploy:api`
+   after the applicable release checks; retain the full release for runtime changes.
+4. Check admin access with an existing session and exercise unsubscribe with a
+   dedicated test recipient. Sending a real email is a separate operator check.
+
+After the first rollout, unchanged API bindings continue pointing at each service's
+current deployment. Inspect logs with `wrangler tail --config wrangler.admin.jsonc`
+or `wrangler tail --config wrangler.marketing.jsonc`. Roll back only the affected
+service using `wrangler rollback --config <service-config>` when its predecessor
+is compatible with the current shared schema and account service.
+
+`npm run dev` starts API, containers, admin, and marketing together with local
+service bindings and the shared local database; migrations still run once through
+the API configuration. Local Email Sending simulates delivery.
 
 ## Prepare a release
 
@@ -29,7 +105,7 @@ Apply `npm run db:migrate:previews:remote` to the separate routing database.
 Project endpoints require `002_project_endpoints.sql` in addition to the existing
 preview migration. The account migration command does not migrate this database.
 `npm run previews:preflight` verifies routing tables, constraints, and indexes
-using schema metadata reads. Normal deployment runs both preflights before
+using schema metadata reads. Normal deployment runs account, routing, and service preflights before
 publishing any Worker.
 
 Configure `MONITORING_SECRET` using `npx wrangler secret put MONITORING_SECRET
@@ -42,12 +118,13 @@ values, so the operator must establish that the deployed monitoring secret is
 distinct and available to monitoring tools. No monitoring credential is sent to
 the public capability endpoint.
 
-Run `npm run deploy:preflight`. It reads the production API capability contract,
+Run `npm run deploy:preflight` and `npm run services:preflight`. The account
+preflight reads the production API capability contract,
 remote migration ledger/table names, and Worker secret metadata. It authenticates
 a GET to the deployment-lock endpoint, expecting its method rejection. It never
 acquires a lease, reads the build manifest (which can expire build records),
 starts containers, or writes status observations. Unreachable, malformed or
-unsupported responses block the release. Both Workers are pinned to the same
+unsupported responses block the release. All Workers are pinned to the same
 Cloudflare account in their configs.
 
 The accepted predecessor is the known `2026-10-05` agent API with API keys,
@@ -74,8 +151,9 @@ or serialize the entire release.
 Run `npm run deploy`. Container publication uses the existing authoritative image
 map and 12-minute lease, with a 10-minute Wrangler timeout. Do not deploy the
 tracked container config directly: it contains build recipes rather than the
-assembled immutable map. Gateway publication follows container success, and API
-publication follows gateway success.
+assembled immutable map. Gateway publication follows container success, admin
+and marketing publication follow gateway success, and API publication follows
+both service publications.
 Keep the current images and generations; publication does not upgrade running
 guest images. Do not mass-stop customer containers as a deployment step.
 
@@ -120,13 +198,13 @@ For an accepted predecessor that passes compatibility preflight, run:
 npm run deploy:bootstrap-activity
 ```
 
-This runs preflight, deploys the current containers without `ACCOUNT_ACTIVITY`,
-deploys the API to provision its export, then redeploys containers with the binding
+This runs preflights, deploys the current containers without `ACCOUNT_ACTIVITY`,
+publishes admin and marketing, deploys the API to provision its export, then redeploys containers with the binding
 restored. It preserves the required runtime-before-API order, image validation,
 authoritative image map and deployment leases, then publishes the gateway.
-Both account and routing preflights run before publication. The tracked config is unchanged.
+Account, routing, and service preflights run before publication. The tracked container config is unchanged.
 Container activity notifications are skipped during the intermediate stage;
-changes during that interval are not replayed. Finish all four publications
+changes during that interval are not replayed. Finish all six publications
 before qualifying activity streams or publishing web integrations.
 
 The command stops on failure. If API publication fails, retry the bootstrap

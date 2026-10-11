@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { marketingEmailSchema, marketingUnsubscribeSchema } from "../lib/marketing-email";
+import { marketingEmailSchema, marketingUnsubscribeSchema } from "../shared/marketing-email-contract";
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
 export function registerMarketingEmailRoutes(api: OpenAPIApi, handler: LegacyHandler): void {

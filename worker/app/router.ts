@@ -10,9 +10,8 @@ import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
 import { handlePrepaidBillingRequest } from './prepaid-billing';
-import { handleAdminRequest } from "./admin";
-import { handleMarketingEmailRequest, handleMarketingUnsubscribeRequest } from "./marketing-email";
-import { handleAccountingRequest } from './accounting';
+import { forwardServiceRequest } from "../shared/service-proxy";
+import { serviceForPath } from "../shared/service-routing";
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
@@ -39,13 +38,17 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname === "/api/get-marketing-users") return handleAdminRequest(request, env);
-  if (url.pathname === "/api/send-marketing-email") return handleMarketingEmailRequest(request, env);
-  if (url.pathname === "/api/unsubscribe") return handleMarketingUnsubscribeRequest(request, env);
+  const service = serviceForPath(url.pathname);
+  if (service === "admin") {
+    return forwardServiceRequest(request, env.ADMIN_API, "admin_unavailable");
+  }
+  if (service === "marketing") {
+    return forwardServiceRequest(request, env.MARKETING_API, "marketing_unavailable");
+  }
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
-  if (url.pathname.startsWith('/acquisition/') || url.pathname === '/admin/acquisition/leads' || url.pathname === '/admin/acquisition/events') return handleAcquisitionRequest(request, env);
-  if (url.pathname === '/billing/storage' || url.pathname === '/admin/accounting/storage-invoices') return handleStorageBillingRequest(request, env);
+  if (url.pathname.startsWith('/acquisition/')) return handleAcquisitionRequest(request, env);
+  if (url.pathname === '/billing/storage') return handleStorageBillingRequest(request, env);
   if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
@@ -87,11 +90,6 @@ async function handleLegacyRequest(
 
   if (url.pathname.startsWith("/auth/")) {
     return handleAuthRequest(request, env, ctx);
-  }
-
-  if (url.pathname.startsWith('/admin/accounting/')) return handleAccountingRequest(request, env);
-  if (url.pathname.startsWith("/admin/")) {
-    return handleAdminRequest(request, env);
   }
 
   if (url.pathname === "/health") {

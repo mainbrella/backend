@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { handleRequest } from "./router";
+import { handleRequest } from "./service-test-helpers";
 import { hashToken } from "./auth-core";
 import { marketingSender, sendMarketingEmail } from "../lib/marketing-email";
 

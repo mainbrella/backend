@@ -18,7 +18,11 @@ async function run(t, { signal, fail = false, migrationFail, allImages = false, 
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ name: 'mainbrella-containers', containers: [
     { class_name: 'UserContainer', images: { terminal: { dockerfile: './containers/Dockerfile' } } },
   ] }));
-  const sourceConfigs = ['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8'));
+  for (const service of ['admin', 'marketing']) {
+    writeFileSync(join(root, `wrangler.${service}.jsonc`), JSON.stringify({ name: `mainbrella-${service}`, workers_dev: false, preview_urls: false }));
+  }
+  const sourceFiles = ['wrangler.jsonc', 'wrangler.containers.jsonc', 'wrangler.admin.jsonc', 'wrangler.marketing.jsonc'];
+  const sourceConfigs = sourceFiles.map(file => readFileSync(join(root, file), 'utf8'));
   const hash = 'a'.repeat(64);
   const proxy = { ID: 'session-proxy', Names: `workerd-mainbrella-containers-UserContainer-${hash}-proxy`, Image: 'cloudflare/proxy-everything:test' };
   const db = new DatabaseSync(join(root, 'state/v3/do/mainbrella-containers-UserContainer', `${hash}.sqlite`));
@@ -75,10 +79,11 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
   }
   if (migrationFail || codexFail) {
     assert.equal(readdirSync(root).includes('args.json'), false, 'dev should not start after migration failure');
-    assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
+    assert.deepEqual(sourceFiles.map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
     return;
   }
   const configs = JSON.parse(readFileSync(join(root, 'configs.json')));
+  assert.deepEqual(configs.map(config => config.name), ['mainbrella-api', 'mainbrella-containers', 'mainbrella-admin', 'mainbrella-marketing']);
   assert.equal(configs.every(config => config.vars.LOCAL_DEV === 'true' && !config.routes), true);
   const apiConfig = configs.find(config => config.name === 'mainbrella-api');
   const containerConfig = configs.find(config => config.name === 'mainbrella-containers');
@@ -103,7 +108,7 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
     assert.equal(apiConfig.vars.BUILD_CODEX_URL, undefined);
     assert.equal(readdirSync(root).includes('codex.jsonl'), false);
   }
-  assert.deepEqual(['wrangler.jsonc', 'wrangler.containers.jsonc'].map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
+  assert.deepEqual(sourceFiles.map(file => readFileSync(join(root, file), 'utf8')), sourceConfigs);
   const images = configs[1].containers[0].images;
   assert.deepEqual(Object.keys(images), allImages ? ['terminal', 'python', 'rust', 'go', 'devops'] : ['terminal']);
   if (allImages) {

@@ -1,6 +1,8 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  // Owned by the marketing Worker; the API reaches it through MARKETING_API.
+  MARKETING_EMAIL?: SendEmail;
   BUILD_ENABLED?: string;
   BUILD_MODEL?: string;
   BUILD_AI_GATEWAY?: string;

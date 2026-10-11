@@ -9,7 +9,27 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      services: ${{ steps.scope.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/service-changes.mjs "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
   public-contracts:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -27,7 +47,9 @@ jobs:
           node-version: 22
       - run: node scripts/sync-agent-docs.mjs --check
         working-directory: web
-  test:
+  full-test:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -47,6 +69,8 @@ jobs:
       - run: npm run type-check
       - run: npm run check:containers
       - run: npm run docs:generate
+      - run: npm run check:services
+      - run: npm run check:api
       - name: Validate workflows
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,6 +79,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP"/actionlint/*linux_amd64.tar.gz -C "$RUNNER_TEMP/actionlint"
           "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes=
   sdk-artifacts:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -79,3 +105,43 @@ jobs:
           name: sdk-local-qualification
           path: artifacts/sdk/
           retention-days: 7
+  services:
+    needs: changes
+    if: needs.changes.outputs.full == 'false' && needs.changes.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:${{ matrix.service }}
+      - run: npm run type-check
+      - run: npm run check:${{ matrix.service }}
+  # Preserve the existing required "test" status for both full and scoped runs.
+  test:
+    needs: [changes, full-test, public-contracts, sdk-artifacts, services]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selected checks to pass
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'JS'
+          const jobs = JSON.parse(process.env.CHECK_RESULTS);
+          if (Object.values(jobs).some(job => !['success', 'skipped'].includes(job.result))) process.exit(1);
+          if (jobs.changes.result !== 'success') process.exit(1);
+          const expected = jobs.changes.outputs.full === 'true'
+            ? ['full-test', 'public-contracts', 'sdk-artifacts']
+            : JSON.parse(jobs.changes.outputs.services).length ? ['services'] : [];
+          if (expected.some(name => jobs[name].result !== 'success')) process.exit(1);
+          JS

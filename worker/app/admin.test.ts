@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { handleRequest } from "./router";
+import { handleRequest } from "./service-test-helpers";
 import { hashToken } from "./auth-core";
 
 const LEGACY_ADMIN_ID = "4109eeda-46e0-4ffa-ac57-f1ff81902116";

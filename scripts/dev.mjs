@@ -43,8 +43,8 @@ function sweep(shutdown = false) {
 await sweep();
 // Keep bindings and variables in sync with the deployment configuration, while
 // preventing Wrangler from rewriting local preview hosts to the deployed route.
-const configPaths = ['api', 'containers'].map(name => {
-  const source = name === 'api' ? 'wrangler.jsonc' : 'wrangler.containers.jsonc';
+const configPaths = ['api', 'containers', 'admin', 'marketing'].map(name => {
+  const source = name === 'api' ? 'wrangler.jsonc' : `wrangler.${name}.jsonc`;
   const config = JSON.parse(readFileSync(`${root}${source}`, 'utf8'));
   if (name === 'containers' && allImages) {
     for (const container of config.containers ?? []) {

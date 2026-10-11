@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendAccountingEvent, ledgerRows, ledgerWatermark, type AccountingEvent, type LedgerRow } from '../lib/accounting-ledger';
 import { buildAccountingClose, type AccountingPolicy } from '../lib/accounting-close';
-import { handleRequest } from './router';
+import { handleRequest } from './service-test-helpers';
 import { billingFixture, billingRequest, TEST_USER } from './billing-test-helpers';
 
 const received = Date.UTC(2026, 11, 20), checkpointAt = Date.UTC(2027, 1, 2);

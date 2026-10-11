@@ -1,5 +1,5 @@
 import { storageMetered } from './r2-storage';
-import { ADMIN_EMAIL } from '../app/admin';
+import { ADMIN_EMAIL } from '../shared/admin';
 
 export async function checkStorageHealth(env: Env) {
   if (!storageMetered(env)) return;
