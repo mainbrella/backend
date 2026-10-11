@@ -1,4 +1,5 @@
 import { invoiceAccountUsage, invoiceCanceledUsage } from '../lib/usage-billing';
+import { reconcileDomainOrder } from './domains';
 import { authJson } from "./auth-core";
 import { resolveEntitlement, type Entitlement } from "../lib/entitlements";
 import { stripeRequest, type BillingEnv } from "../lib/stripe";
@@ -31,7 +32,7 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
     || !await verifyStripeSignature(body, request.headers.get("Stripe-Signature"), env.STRIPE_WEBHOOK_SECRET)) {
     return authJson({ error: "invalid_signature" }, 400, {});
   }
-  let event: { id: string; type: string; data: { object: { id?: string; customer?: string | { id: string }; charge?: string; payment_intent?: string } } };
+  let event: { id: string; type: string; data: { object: { id?: string; customer?: string | { id: string }; charge?: string; payment_intent?: string; metadata?: Record<string, string> } } };
   try {
     event = JSON.parse(body);
     if (!/^evt_[A-Za-z0-9_]+$/.test(event.id) || typeof event.type !== "string" || !event.data?.object) throw new Error();
@@ -42,6 +43,13 @@ export async function handleSubscriptionWebhook(request: Request, env: BillingEn
   try {
     const receipt = await env.DB.prepare("SELECT event_id FROM billing_webhook_events WHERE event_id = ?").bind(event.id).first();
     if (receipt) return authJson({ received: true }, 200, {});
+    if (event.type.startsWith('checkout.session.') && event.data.object.metadata?.mainbrella_domain_order && /^cs_[A-Za-z0-9_]+$/.test(event.data.object.id ?? '')) {
+      const order = await env.DB.prepare('SELECT id FROM domain_orders WHERE checkout_id=?').bind(event.data.object.id).first<{ id: string }>();
+      if (order) {
+        await reconcileDomainOrder(env, order.id);
+        return authJson({ received: true }, 200, {});
+      }
+    }
     let customer = typeof event.data.object.customer === "string" ? event.data.object.customer : event.data.object.customer?.id;
     let paymentIntentId = event.data.object.payment_intent;
     const chargeId = event.type.startsWith('charge.dispute.') || event.type.startsWith('refund.') ? event.data.object.charge

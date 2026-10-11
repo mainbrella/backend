@@ -26,6 +26,9 @@
 		]
 	},
 	"vars": {
+		"NAMECOM_ENABLED": "true",
+		"NAME_DOT_COM_USERNAME": "mainbrella",
+		"NAMECOM_MARKUP_BPS": "0",
 		"BUILD_ENABLED": "true",
 		"R2_BILLING_MODE": "charge",
 		"R2_CHARGE_FROM": "2026-10-11T00:00:00Z",

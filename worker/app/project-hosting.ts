@@ -289,3 +289,29 @@ async function handle(request: Request, env: Env, domains: boolean): Promise<Res
 }
 export const handleProjectEndpointRequest = (request: Request, env: Env) => handle(request, env, false);
 export const handleProjectDomainsRequest = (request: Request, env: Env) => handle(request, env, true);
+
+// Internal registrar fulfillment reuses the same DNS proof and certificate checks.
+// The caller supplies a persisted, paid order; this helper still checks project ownership.
+export async function purchasedProjectDomain(env: Env, projectId: string, userId: string, hostname: string, verify = false) {
+  if (!await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, userId).first()) throw new HostingError('not_found', 404);
+  if (!customDomainsConfigured(env) || normalizeProjectHostname(hostname, env) !== hostname) throw new HostingError('custom_domains_unavailable');
+  let row = await env.DB.prepare('SELECT * FROM project_domains WHERE project_id=? AND hostname=?').bind(projectId, hostname).first<ProjectDomainRow>();
+  if (!row) {
+    await checkedRun(env.DB.prepare(`INSERT OR IGNORE INTO project_domains (id,project_id,hostname,challenge,created_at,provider)
+      SELECT ?,?,?,?,?,? WHERE (SELECT count(*) FROM project_domains WHERE project_id=?) < 20`)
+      .bind(crypto.randomUUID(), projectId, hostname, `mainbrella-verification=${crypto.randomUUID()}`, new Date().toISOString(), env.PROJECT_DOMAIN_PROVIDER ?? null, projectId));
+    row = await env.DB.prepare('SELECT * FROM project_domains WHERE project_id=? AND hostname=?').bind(projectId, hostname).first<ProjectDomainRow>();
+    if (!row) throw new HostingError('domain_limit', 429);
+  }
+  if (verify) await verifyDomain(env, projectId, userId, row);
+  const updated = await env.DB.prepare('SELECT * FROM project_domains WHERE id=?').bind(row.id).first<ProjectDomainRow>();
+  if (!updated) throw new HostingError('domain_reconciliation_required');
+  return publicProjectDomain(updated, env);
+}
+export async function disconnectPurchasedDomain(env: Env, projectId: string, userId: string, domainName: string) {
+  if (!await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, userId).first()) return;
+  for (const hostname of [domainName, `www.${domainName}`]) {
+    const row = await env.DB.prepare('SELECT * FROM project_domains WHERE project_id=? AND hostname=?').bind(projectId, hostname).first<ProjectDomainRow>();
+    if (row) await removeDomain(env, projectId, userId, row);
+  }
+}

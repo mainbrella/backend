@@ -1,4 +1,5 @@
 import { handleStorageBillingRequest } from './storage-billing';
+import { handleDomainsRequest } from './domains';
 import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleGithubImportRequest } from './github-import';
 import { handleGithubBuildRequest } from './github-build';
@@ -40,6 +41,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/domains' || url.pathname.startsWith('/domains/')) return handleDomainsRequest(request, env);
   const service = serviceForPath(url.pathname);
   if (service === "admin") {
     return forwardServiceRequest(request, env.ADMIN_API, "admin_unavailable");

@@ -1,4 +1,5 @@
 import { notifyStorageRetention } from './lib/r2-retention';
+import { reconcileDomainOrders } from './app/domains';
 import { checkStorageHealth } from './lib/r2-health';
 import { runStorageBilling } from './lib/r2-billing';
 import { inventoryStoragePage, cleanupStorageOrphans, expireUnfundedStorage } from './lib/r2-maintenance';
@@ -23,6 +24,7 @@ export default {
     return handleRequest(request, env, ctx);
   },
   scheduled(_event, env, ctx) {
+    ctx.waitUntil(reconcileDomainOrders(env).catch(() => { console.error('domain_reconciliation_failed'); }));
     ctx.waitUntil((async () => {
       await inventoryStoragePage(env);
       await runStorageBilling(env);

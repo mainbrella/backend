@@ -5,6 +5,10 @@ import { handleRequest } from "./router";
 import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
+  '/domains/config': ['get'], '/domains': ['get'], '/domains/search': ['post'], '/domains/quote': ['post'],
+  '/domains/checkout': ['post'], '/domains/order': ['get'], '/domains/detail': ['get'], '/domains/settings': ['patch'],
+  '/domains/verification': ['post'], '/domains/records': ['post', 'delete'], '/domains/auth-code': ['post'],
+  '/domains/connect': ['post'],
   '/github/import/config': ['get'], '/github/import/connect': ['post'], '/github/import/connection': ['get', 'delete'],
   '/github/import/callback': ['get'], '/github/import/setup': ['get'],
   '/github/build/config': ['get'], '/github/build/connect': ['post'], '/github/build/connection': ['get'],

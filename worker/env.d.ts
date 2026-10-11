@@ -1,6 +1,11 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  NAMECOM_ENABLED?: string;
+  NAME_DOT_COM_USERNAME?: string;
+  NAME_DOT_COM_DEV_USERNAME?: string;
+  NAME_DOT_COM_TOKEN?: string;
+  NAMECOM_MARKUP_BPS?: string;
   // Owned by the marketing Worker; the API reaches it through MARKETING_API.
   MARKETING_EMAIL?: SendEmail;
   BUILD_ENABLED?: string;

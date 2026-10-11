@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { handleProjectEndpointRequest, handleProjectDomainsRequest } from './project-hosting';
+import { handleProjectEndpointRequest, handleProjectDomainsRequest, purchasedProjectDomain, disconnectPurchasedDomain } from './project-hosting';
 import { normalizeProjectHostname, dnsQuery, cloudflareRequest, ingressTlsReady, type ProjectDomainRow } from '../lib/project-domains';
 import { publicIngressIp, projectHostingCapabilities } from '../lib/project-hosting';
 import { paidContainerFixture, GENERATION_ONE, GENERATION_TWO, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
@@ -112,6 +112,20 @@ async function addDomain(f: Awaited<ReturnType<typeof fixture>>, hostname = host
   return (await response.json() as any).domain;
 }
 const verify = (domainId: string, session = SESSION_ONE, project = PROJECT) => request('domains/verify', 'POST', undefined, session, project, `&domainId=${domainId}`);
+
+test('registrar setup reuses scoped ownership, real DNS verification and certificate readiness', async t => {
+  const f = await fixture(t);
+  await assert.rejects(purchasedProjectDomain(f.env, PROJECT, USER_TWO, host), /not_found/);
+  const first = await purchasedProjectDomain(f.env, PROJECT, USER_ONE, host);
+  const again = await purchasedProjectDomain(f.env, PROJECT, USER_ONE, host);
+  assert.equal(first.id, again.id); assert.equal(first.status, 'pending_dns');
+  f.setDns(true, true, false);
+  assert.equal((await purchasedProjectDomain(f.env, PROJECT, USER_ONE, host, true)).status, 'pending_tls');
+  f.setDns(true, true, true);
+  assert.equal((await purchasedProjectDomain(f.env, PROJECT, USER_ONE, host, true)).status, 'active');
+  await disconnectPurchasedDomain(f.env, PROJECT, USER_TWO, host);
+  assert.ok(f.sqlite.prepare('SELECT id FROM project_domains WHERE id=?').get(first.id));
+});
 
 test('domain checks reject redirects without following them or forwarding provider credentials', async t => {
   const calls: RequestInit[] = [];
