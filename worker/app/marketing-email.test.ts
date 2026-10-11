@@ -106,6 +106,8 @@ test("marketing email sends named sender, text and escaped HTML inside the templ
   assert.equal(sent.subject, email.subj);
   assert.equal(sent.text, email.message);
   assert.match(sent.html!, /<title>New &lt;idea&gt; &amp; &quot;news&quot;<\/title>/);
+  assert.match(sent.html!, /<h1[^>]*>New &lt;idea&gt; &amp; &quot;news&quot;<\/h1>/);
+  assert.match(sent.html!, /<img src="https:\/\/mainbrella\.com\/images\/logo\.png"[^>]*width="44" height="44"/);
   assert.match(sent.html!, /Hi &lt;everyone&gt; &amp; &#39;friends&#39;<br>\n<br>\n&lt;script&gt;alert\(1\)&lt;\/script&gt;<br>\nKeep dry!/);
   assert.ok(!sent.html!.includes("<script>"));
   assert.ok(sent.html!.indexOf(">mainbrella</a>") < sent.html!.indexOf("Hi &lt;everyone&gt;"));
