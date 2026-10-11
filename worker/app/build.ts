@@ -254,6 +254,13 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
       }
       if (request.method === 'DELETE' || match[3] === 'stop') {
         if (app.active_turn_id) return authJson({ error: 'build_busy' }, 409, cors);
+        if (request.method === 'DELETE' && app.project_id) {
+          const domain = await env.DB.prepare('SELECT id FROM project_domains WHERE project_id = ? LIMIT 1').bind(app.project_id).first();
+          const route = env.PREVIEW_ROUTES && await env.PREVIEW_ROUTES.prepare(`SELECT project_id FROM project_endpoints WHERE project_id = ? AND user_id = ?
+            UNION ALL SELECT project_id FROM project_binding_operations WHERE project_id = ? AND user_id = ? LIMIT 1`)
+            .bind(app.project_id, user.id, app.project_id, user.id).first();
+          if (domain || route) return authJson({ error: 'project_hosting_in_use' }, 409, cors);
+        }
         await stopBuildContainer(env, user.id, app);
         if (request.method === 'DELETE') {
           await env.DB.batch([

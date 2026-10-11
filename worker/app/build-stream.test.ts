@@ -115,7 +115,7 @@ test('inference stream failures retain provider codes and messages as failure de
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['014_projects.sql', '015_project_domain.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -885,6 +885,8 @@ test('prepaid app creation, edits and previews depend on available funds after t
         const { app } = await response.json() as any;
         assert.ok(app.activeTurnId);
         assert.equal(app.turns.find((turn: any) => turn.id === app.activeTurnId).mode, mode === 'preview' ? 'preview' : 'build');
+        assert.equal(f.sqlite.prepare('SELECT project_id FROM build_apps WHERE id=?').get(app.id)!.project_id, app.id);
+        assert.equal(f.sqlite.prepare('SELECT name FROM projects WHERE id=? AND user_id=?').get(app.id, USER_ONE)!.name, app.name);
       }
     });
   }

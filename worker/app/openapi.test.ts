@@ -133,6 +133,8 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.equal(createBody.properties.domain.maxLength, 253);
   assert.deepEqual(createBody.properties.domain.type, ['string', 'null']);
   assert.ok(!createBody.required?.includes('domain'));
+  assert.equal(createBody.properties.git.type, 'boolean');
+  assert.ok(!createBody.required?.includes('git'));
   assert.match(create.description, /blank or null values are stored as null/);
   const update = paths['/projects'].patch;
   assert.equal(update.operationId, 'updateProject');
@@ -145,6 +147,9 @@ test('project schemas document optional domains, owner-scoped updates and reques
   assert.deepEqual(body.properties.domain.type, ['string', 'null']);
   assert.match(update.description, /omitted domain is preserved/);
   assert.deepEqual(update.responses[200].content['application/json'].schema.properties.project.properties.domain.type, ['string', 'null']);
+  assert.deepEqual(update.responses[200].content['application/json'].schema.properties.project.properties.build_app_id.type, ['string', 'null']);
+  assert.deepEqual(update.responses[200].content['application/json'].schema.properties.project.properties.git_version_id.type, ['string', 'null']);
+  assert.match(paths['/projects'].get.description, /including Builder apps/);
   for (const status of [200, 400, 401, 403, 404, 503]) assert.ok(update.responses[status]);
   assert.match(update.description, /project owned by the signed-in user/);
 });

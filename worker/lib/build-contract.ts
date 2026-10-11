@@ -24,6 +24,7 @@ export type BuildPreview = { id: string; url: string; expiresAt: number };
 export type BuildParams = { appId: string; userId: string; turnId: string };
 export interface BuildAppRow {
   id: string; user_id: string; name: string; initial_prompt: string; create_key: string;
+  project_id?: string | null;
   source_json: string; revision: number; active_turn_id: string | null;
   container_json: string | null; preview_json: string | null; created_at: string; updated_at: string;
   git_version_id?: string | null; verified_git_version_id?: string | null;

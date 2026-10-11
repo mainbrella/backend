@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { handleRequest } from './router';
-import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE } from './paid-container-test-helpers';
+import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 
 function request(method = 'GET', session = SESSION_ONE, body?: unknown) {
   return new Request('https://api.mainbrella.com/projects', {
@@ -10,10 +10,21 @@ function request(method = 'GET', session = SESSION_ONE, body?: unknown) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
-async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
+async function fixture(t: Parameters<typeof paidContainerFixture>[0], shared = true) {
   const f = await paidContainerFixture(t);
-  f.sqlite.exec(readFileSync(new URL('../../migrations/014_projects.sql', import.meta.url), 'utf8'));
-  f.sqlite.exec(readFileSync(new URL('../../migrations/015_project_domain.sql', import.meta.url), 'utf8'));
+  for (const migration of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql', '020_accounting_ledger.sql', '023_build.sql', '024_build_activity.sql',
+    '025_build_images.sql', '026_build_ai_billing.sql', '027_build_model_effort.sql', '028_build_operations.sql',
+    '029_remove_build_daily_limit.sql', '030_build_git.sql', '031_r2_billing.sql', '032_storage_retention.sql', ...(shared ? ['034_shared_projects.sql'] : [])])
+    f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  f.env.DB.batch = (async (statements: D1PreparedStatement[]) => {
+    f.sqlite.exec('BEGIN');
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      f.sqlite.exec('COMMIT');
+      return results;
+    } catch (error) { f.sqlite.exec('ROLLBACK'); throw error; }
+  }) as D1Database['batch'];
   t.after(() => f.close());
   return f;
 }
@@ -36,6 +47,129 @@ test('projects persist names and domains and are scoped to their session owner, 
   assert.equal((await handleRequest(request('POST', SESSION_TWO, { name: 'Second project' }), env)).status, 201);
   sqlite.prepare('DELETE FROM users WHERE id = ?').run(USER_ONE);
   assert.equal((sqlite.prepare('SELECT COUNT(*) AS count FROM projects WHERE user_id = ?').get(USER_ONE) as any).count, 0);
+});
+
+function insertApp(sqlite: Awaited<ReturnType<typeof fixture>>['sqlite'], userId = USER_ONE, name = 'Builder app') {
+  const id = crypto.randomUUID(), now = new Date().toISOString();
+  sqlite.prepare(`INSERT INTO build_apps(id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?)`).run(id, userId, id, 'Original brief', name, '{"src/App.tsx":"Saved source"}', now, now);
+  return id;
+}
+
+function patchProject(id: string, body: unknown, session = SESSION_ONE) {
+  return new Request(`https://api.mainbrella.com/projects?id=${id}`, { method: 'PATCH',
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${session}` }, body: JSON.stringify(body) });
+}
+
+test('shared migration backfills Builder identity without changing source, Git heads or existing projects', async t => {
+  const f = await fixture(t, false);
+  const manualId = crypto.randomUUID();
+  f.sqlite.prepare('INSERT INTO projects(id,user_id,name,domain,created_at) VALUES(?,?,?,?,?)')
+    .run(manualId, USER_ONE, 'Manual project', 'example.com', '2024-01-01T00:00:00.000Z');
+  const appId = insertApp(f.sqlite);
+  f.sqlite.prepare('UPDATE build_apps SET git_version_id=?,verified_git_version_id=? WHERE id=?').run('saved-head', 'verified-head', appId);
+  const before = f.sqlite.prepare('SELECT * FROM build_apps WHERE id=?').get(appId)!;
+  f.sqlite.exec(readFileSync(new URL('../../migrations/034_shared_projects.sql', import.meta.url), 'utf8'));
+  const after = f.sqlite.prepare('SELECT * FROM build_apps WHERE id=?').get(appId)!;
+  assert.deepEqual({ ...after }, { ...before, project_id: appId });
+  const { projects } = await (await handleRequest(request(), f.env)).json() as any;
+  assert.equal(projects.length, 2);
+  assert.deepEqual(projects.find((project: any) => project.id === appId), {
+    id: appId, name: before.name, domain: null, created_at: before.created_at, build_app_id: appId, git_version_id: 'saved-head',
+  });
+  assert.equal(projects.find((project: any) => project.id === manualId).domain, 'example.com');
+});
+
+test('new Builder workspaces appear once in Projects, sync both rename paths and cascade deletion', async t => {
+  const f = await fixture(t);
+  const appId = insertApp(f.sqlite);
+  insertApp(f.sqlite, USER_TWO, 'Other owner');
+  const listing = await (await handleRequest(request(), f.env)).json() as any;
+  assert.equal(listing.projects.length, 1);
+  assert.equal(listing.projects[0].build_app_id, appId);
+  await handleRequest(patchProject(appId, { name: 'From Projects', domain: 'app.example.com' }), f.env);
+  assert.equal(f.sqlite.prepare('SELECT name FROM build_apps WHERE id=?').get(appId)!.name, 'From Projects');
+  const renamed = await handleRequest(new Request(`https://api.mainbrella.com/build/apps/${appId}`, { method: 'PATCH',
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }, body: JSON.stringify({ name: 'From Builder' }) }), f.env);
+  assert.equal(renamed.status, 200);
+  const project = f.sqlite.prepare('SELECT name,domain FROM projects WHERE id=?').get(appId)!;
+  assert.equal(project.name, 'From Builder');
+  assert.equal(project.domain, 'app.example.com');
+  assert.equal((await handleRequest(patchProject(appId, { name: 'Hijack', git: true }, SESSION_TWO), f.env)).status, 404);
+  f.sqlite.prepare('DELETE FROM build_apps WHERE id=?').run(appId);
+  assert.equal(f.sqlite.prepare('SELECT id FROM projects WHERE id=?').get(appId), undefined);
+  const another = insertApp(f.sqlite);
+  f.sqlite.prepare('DELETE FROM projects WHERE id=?').run(another);
+  assert.equal(f.sqlite.prepare('SELECT id FROM build_apps WHERE id=?').get(another), undefined);
+});
+
+test('Git is optional and can be enabled once on a project without a build, subscription or storage writes', async t => {
+  const f = await fixture(t);
+  f.sqlite.exec('DELETE FROM pro_billing');
+  const plain = await (await handleRequest(request('POST', SESSION_ONE, { name: 'Plain project' }), f.env)).json() as any;
+  assert.equal(plain.project.build_app_id, null);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_apps').get()!.count, 0);
+  const created = await handleRequest(request('POST', SESSION_ONE, { name: 'With Git', git: true }), f.env);
+  assert.equal(created.status, 201);
+  const { project } = await created.json() as any;
+  assert.equal(project.build_app_id, project.id);
+  assert.equal(project.git_version_id, null);
+  assert.equal(f.sqlite.prepare('SELECT active_turn_id,source_json FROM build_apps WHERE id=?').get(project.id)!.active_turn_id, null);
+  for (const git of [true, true, false]) {
+    const response = await handleRequest(patchProject(plain.project.id, { name: 'Enabled later', git }), f.env);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).project.build_app_id, plain.project.id);
+  }
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_apps').get()!.count, 2);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_turns').get()!.count, 0);
+  assert.equal(f.accountCalls.length, 0);
+  assert.equal(f.machineCalls.length, 0);
+  const versions = await handleRequest(new Request(`https://api.mainbrella.com/build/apps/${project.id}/versions`, {
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  assert.equal(versions.status, 200);
+  assert.deepEqual(await versions.json(), { versions: [], versionId: null, verifiedVersionId: null });
+  assert.throws(() => f.sqlite.prepare(`INSERT INTO build_apps(id,project_id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(crypto.randomUUID(), plain.project.id, USER_TWO, 'foreign', '', 'Foreign', '{}', 'now', 'now'), /project_identity_conflict/);
+  for (const git of ['true', 1, null, {}])
+    assert.equal((await handleRequest(request('POST', SESSION_ONE, { name: 'Invalid Git', git }), f.env)).status, 400);
+});
+
+test('workspace limit rolls back project creation and edits while plain projects remain available', async t => {
+  const f = await fixture(t);
+  for (let index = 0; index < 50; index++) insertApp(f.sqlite);
+  assert.equal((await handleRequest(request('POST', SESSION_ONE, { name: 'Too many', git: true }), f.env)).status, 429);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM projects').get()!.count, 50);
+  const { project } = await (await handleRequest(request('POST', SESSION_ONE, { name: 'Plain still works' }), f.env)).json() as any;
+  assert.equal((await handleRequest(patchProject(project.id, { name: 'Unsaved rename', git: true }), f.env)).status, 429);
+  assert.equal(f.sqlite.prepare('SELECT name FROM projects WHERE id=?').get(project.id)!.name, 'Plain still works');
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_apps').get()!.count, 50);
+});
+
+test('Builder deletion preserves hosted projects until endpoints, cleanup journals and domains are removed', async t => {
+  const f = await fixture(t);
+  f.sqlite.exec(readFileSync(new URL('../../preview-migrations/002_project_endpoints.sql', import.meta.url), 'utf8'));
+  f.env.PREVIEW_ROUTES = f.env.DB;
+  const appId = insertApp(f.sqlite);
+  const deleting = () => handleRequest(new Request(`https://api.mainbrella.com/build/apps/${appId}`, { method: 'DELETE',
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  f.sqlite.prepare('INSERT INTO project_endpoints(project_id,user_id,target_json,container_name,created_at,revision,updated_at) VALUES(?,?,?,?,?,?,?)')
+    .run(appId, USER_ONE, '{}', 'container', 'now', 'revision', 'now');
+  let response = await deleting();
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'project_hosting_in_use' });
+  assert.ok(f.sqlite.prepare('SELECT id FROM build_apps WHERE id=?').get(appId));
+  f.sqlite.prepare('DELETE FROM project_endpoints WHERE project_id=?').run(appId);
+  f.sqlite.prepare('INSERT INTO project_binding_operations(revision,project_id,user_id,route_json,updated_at) VALUES(?,?,?,?,?)')
+    .run('revision', appId, USER_ONE, '{}', 'now');
+  assert.equal((await deleting()).status, 409);
+  f.sqlite.prepare('DELETE FROM project_binding_operations WHERE project_id=?').run(appId);
+  f.sqlite.prepare('INSERT INTO project_domains(id,project_id,hostname,challenge,created_at) VALUES(?,?,?,?,?)')
+    .run('domain', appId, 'example.com', 'challenge', 'now');
+  assert.equal((await deleting()).status, 409);
+  f.sqlite.prepare('DELETE FROM project_domains WHERE project_id=?').run(appId);
+  response = await deleting();
+  assert.equal(response.status, 200);
+  assert.equal(f.sqlite.prepare('SELECT id FROM projects WHERE id=?').get(appId), undefined);
 });
 
 test('project routes validate names and require authenticated trusted browser requests', async t => {
@@ -130,7 +264,7 @@ test('projects can be renamed by their owner while preserving identity and creat
   assert.equal(stored.user_id, USER_ONE);
   assert.equal(stored.name, 'Renamed');
   assert.equal(stored.created_at, before.created_at);
-  assert.equal(Object.keys(project).sort().join(','), 'created_at,domain,id,name');
+  assert.equal(Object.keys(project).sort().join(','), 'build_app_id,created_at,domain,git_version_id,id,name');
 
   assert.equal((await handleRequest(update(before.id, { name: 'Other owner' }, SESSION_TWO), env)).status, 404);
   assert.equal((await handleRequest(update('4e3cb127-784d-4a9f-9828-afd093c295dc', { name: 'Missing' }), env)).status, 404);

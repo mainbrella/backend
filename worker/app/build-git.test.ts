@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { paidContainerFixture, USER_ONE, SESSION_ONE, SESSION_TWO, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
 import { buildBillingFixture } from './build-billing-test-helpers';
 import { handleBuildRequest } from './build';
+import { handleProjectsRequest } from './projects';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
 import { BUILD_GIT_ROOT, buildGitVersion, exportBuildGit, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
@@ -18,11 +19,11 @@ import { putStoredObject } from '../lib/r2-storage';
 import type { BuildGitBundle } from '../lib/build-git-bundle';
 import { cleanupStorageOrphans } from '../lib/r2-maintenance';
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, fromProjects = false) {
   const f = await paidContainerFixture(t);
   t.after(() => f.close());
-  for (const name of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql',
-    '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql'])
+  for (const name of ['014_projects.sql', '015_project_domain.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql',
+    '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql'])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   f.sqlite.prepare("INSERT INTO r2_meter_state(id,value) VALUES('inventory_complete',?)").run(String(Date.now()));
@@ -100,10 +101,19 @@ async function fixture(t: TestContext) {
     async persist(label, action) { await step.do(label, { retries: { limit: 2 } }, action); },
   };
 
-  const appId = crypto.randomUUID(), now = new Date().toISOString();
-  f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,container_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(appId, USER_ONE, appId, 'Build an app', 'Test app', JSON.stringify(buildStarter),
-      JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT }), now, now);
+  let appId: string = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const container = JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT });
+  if (fromProjects) {
+    const response = await handleProjectsRequest(new Request('https://api.mainbrella.com/projects', { method: 'POST',
+      headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` }, body: JSON.stringify({ name: 'Test app', git: true }) }), f.env);
+    assert.equal(response.status, 201);
+    const { project } = await response.json() as { project: { id: string; build_app_id: string } };
+    appId = project.build_app_id;
+    assert.equal(appId, project.id);
+    f.sqlite.prepare('UPDATE build_apps SET container_json=? WHERE id=?').run(container, appId);
+  } else f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,container_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run(appId, USER_ONE, appId, 'Build an app', 'Test app', JSON.stringify(buildStarter), container, now, now);
   const app = () => f.sqlite.prepare('SELECT * FROM build_apps WHERE id = ?').get(appId) as unknown as BuildAppRow;
   const turn = (params: BuildParams) => f.sqlite.prepare('SELECT * FROM build_turns WHERE id = ?').get(params.turnId) as unknown as BuildTurnRow;
   function startTurn(mode: 'build' | 'preview' = 'build', restoreId: string | null = null): BuildParams {
@@ -187,6 +197,24 @@ function git(args: string[], cwd: string) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
 }
+
+test('project Git opt-in builds empty source into a downloadable repository while retaining project identity', async t => {
+  const f = await fixture(t, true);
+  assert.equal(f.app().source_json, '{}');
+  f.editSource(buildStarter);
+  await f.run(f.params);
+  assert.equal(f.turn(f.params).status, 'succeeded');
+  assert.ok(f.app().git_version_id);
+  const directory = await f.cloneRepository('project-first-build');
+  assert.equal(readFileSync(join(directory, 'src/App.tsx'), 'utf8'), buildStarter['src/App.tsx']);
+  const listing = await handleProjectsRequest(new Request('https://api.mainbrella.com/projects', {
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  const { projects } = await listing.json() as { projects: { id: string; build_app_id: string; git_version_id: string }[] };
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0].id, f.params.appId);
+  assert.equal(projects[0].build_app_id, f.params.appId);
+  assert.equal(projects[0].git_version_id, f.app().git_version_id);
+});
 
 const manifest = (f: Awaited<ReturnType<typeof fixture>>, key: string) => JSON.parse(new TextDecoder().decode(f.objects.get(key)!)) as BuildGitBundle;
 

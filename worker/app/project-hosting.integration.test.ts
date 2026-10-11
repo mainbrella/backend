@@ -30,7 +30,7 @@ test('project publication, domain DNS/TLS, app cookies and cleanup work across t
   t.after(() => f.close());
   const routing = new DatabaseSync(':memory:');
   t.after(() => routing.close());
-  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql']) {
+  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql', '023_build.sql', '030_build_git.sql', '034_shared_projects.sql']) {
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${path}`, import.meta.url), 'utf8'));
   }
   for (const path of ['001_preview_routes.sql', '002_project_endpoints.sql']) {
@@ -126,7 +126,7 @@ test('local project publication activates loopback aliases with real HTTP applic
   t.after(() => f.close());
   const routing = new DatabaseSync(':memory:');
   t.after(() => routing.close());
-  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql']) {
+  for (const path of ['014_projects.sql', '015_project_domain.sql', '016_project_domains.sql', '017_project_domain_provider.sql', '023_build.sql', '030_build_git.sql', '034_shared_projects.sql']) {
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${path}`, import.meta.url), 'utf8'));
   }
   for (const path of ['001_preview_routes.sql', '002_project_endpoints.sql']) {
