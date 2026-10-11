@@ -162,8 +162,13 @@ test('GitHub Build authorization documents the exact same-origin project return 
   const body = connect.requestBody.content['application/json'].schema;
   assert.equal(body.properties.returnTo.type, 'string');
   assert.equal(body.properties.returnTo.pattern, '^\\/projects\\/');
-  assert.match(connect.description, /githubProject, githubRepo, and githubBranch/);
+  assert.match(connect.description, /Omit repo and branch/);
+  assert.deepEqual(body.required, ['projectId']);
   assert.deepEqual(paths['/github/build/setup'].get.security, [{ cookieAuth: [] }]);
+  const picker = paths['/github/build/repositories'].get;
+  assert.deepEqual(picker.security, [{ cookieAuth: [] }]);
+  assert.equal(picker.operationId, 'listGithubBuildRepositories');
+  assert.ok(picker.responses[200].content['application/json'].schema.properties.nextCursor);
 });
 
 test('Build repository browsing documents manifests and authenticated individual R2 file streams', async () => {

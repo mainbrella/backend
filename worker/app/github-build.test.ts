@@ -24,11 +24,14 @@ async function fixture(t: TestContext) {
     GITHUB_IMPORT_APP_SLUG: 'mainbrella-import', GITHUB_IMPORT_ENCRYPTION_KEY: 'a'.repeat(64) });
   const calls: { url: string; init?: RequestInit }[] = [];
   let failRefresh = false;
+  const githubPages = new Map<string, unknown>();
   const delegate = globalThis.fetch;
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes('github.com')) {
       calls.push({ url, init });
+      const parsed = new URL(url);
+      if (githubPages.has(parsed.pathname + parsed.search)) return Response.json(githubPages.get(parsed.pathname + parsed.search));
       if (url.endsWith('/user')) return Response.json({ id: 456, login: 'build-user' });
       if (url.endsWith('/access_token')) {
         if (failRefresh && String(init?.body).includes('grant_type=refresh_token')) throw new Error('connection reset after request');
@@ -42,8 +45,84 @@ async function fixture(t: TestContext) {
     const response = await handleRequest(api('/github/build/connect', 'POST', { projectId, repo: 'acme/site', branch: 'release/2026', returnTo }, session), f.env);
     return { response, data: await response.json() as any };
   };
-  return { ...f, calls, start, failRefresh(value: boolean) { failRefresh = value; } };
+  return { ...f, calls, start, githubPages, failRefresh(value: boolean) { failRefresh = value; } };
 }
+
+test('repository-free connect installs first, then authorizes and returns to the project picker', async t => {
+  const f = await fixture(t);
+  const projectId = '11111111-1111-4111-8111-111111111111';
+  const response = await handleRequest(api('/github/build/connect', 'POST', { projectId }), f.env);
+  assert.equal(response.status, 200);
+  const install = new URL((await response.json() as any).url);
+  assert.equal(install.pathname, '/apps/mainbrella-build/installations/new');
+  assert.equal(f.calls.length, 0);
+  const setup = `/github/build/setup?state=${install.searchParams.get('state')}&installation_id=987`;
+  assert.equal((await handleRequest(api(setup, 'GET', undefined, SESSION_TWO, null), f.env)).status, 400);
+  const authorization = await handleRequest(api(setup, 'GET', undefined, SESSION_ONE, null), f.env);
+  const authorize = new URL(authorization.headers.get('Location')!);
+  assert.equal(authorize.pathname, '/login/oauth/authorize');
+  assert.equal(authorize.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal((await handleRequest(api(setup, 'GET', undefined, SESSION_ONE, null), f.env)).status, 400);
+  const callback = `/github/build/callback?state=${authorize.searchParams.get('state')}&code=installed-code`;
+  const returned = await handleRequest(api(callback, 'GET', undefined, SESSION_ONE, null), f.env);
+  const destination = new URL(returned.headers.get('Location')!);
+  assert.equal(destination.origin, 'https://mainbrella.com');
+  assert.equal(destination.pathname, '/projects/');
+  assert.equal(destination.searchParams.get('githubProject'), projectId);
+  assert.equal(destination.searchParams.get('github'), 'connected');
+  assert.equal(destination.searchParams.has('githubRepo'), false);
+  assert.equal(await githubBuildUserToken(f.env, USER_ONE), 'ghu_build-token');
+  assert.equal((await handleRequest(api(callback, 'GET', undefined, SESSION_ONE, null), f.env)).status, 400);
+});
+
+test('install-first organization approval stays pending and preserves project storage', async t => {
+  const f = await fixture(t);
+  const response = await handleRequest(api('/github/build/connect', 'POST', { projectId: '11111111-1111-4111-8111-111111111111' }), f.env);
+  const install = new URL((await response.json() as any).url);
+  const returned = await handleRequest(api(`/github/build/setup?state=${install.searchParams.get('state')}&setup_action=request`, 'GET', undefined, SESSION_ONE, null), f.env);
+  assert.equal(new URL(returned.headers.get('Location')!).searchParams.get('github'), 'approval_pending');
+  assert.equal(f.calls.length, 0);
+  assert.equal((f.sqlite.prepare('SELECT github_repo FROM projects').get() as any).github_repo, null);
+});
+
+async function connectUser(f: Awaited<ReturnType<typeof fixture>>) {
+  const credentials = await sealGithubBuildCredentials(f.env, USER_ONE, { access_token: 'ghu_picker-token' });
+  f.sqlite.prepare('INSERT INTO github_build_connections(user_id,github_user_id,github_login,credentials,expires_at) VALUES(?,?,?,?,?)')
+    .run(USER_ONE, '456', 'build-user', credentials, Date.now() + 60_000_000);
+}
+
+test('repository picker lists only writable app installations and paginates personal and organization repos', async t => {
+  const f = await fixture(t);
+  assert.equal((await handleRequest(api('/github/build/repositories'), f.env)).status, 400);
+  assert.equal((await handleRequest(api('/github/build/repositories', 'GET', undefined, ''), f.env)).status, 401);
+  await connectUser(f);
+  const installation = (id: number, extra = {}) => ({ id, app_slug: 'mainbrella-build', permissions: { contents: 'write' }, ...extra });
+  f.githubPages.set('/user/installations?per_page=100&page=1', { installations: [
+    installation(1, { app_slug: 'other-app' }), installation(2, { permissions: { contents: 'read' } }),
+    installation(3, { suspended_at: new Date().toISOString() }), installation(4), installation(5),
+  ] });
+  const repository = (id: number, extra = {}) => ({ id, full_name: `personal/repo-${id}`, default_branch: 'main', private: true, permissions: { push: true }, ...extra });
+  f.githubPages.set('/user/installations/4/repositories?per_page=100&page=1', { repositories: [
+    repository(1, { permissions: { push: false } }), repository(2, { archived: true }), repository(3, { disabled: true }),
+    ...Array.from({ length: 97 }, (_, index) => repository(index + 4)),
+  ] });
+  f.githubPages.set('/user/installations/4/repositories?per_page=100&page=2', { repositories: [repository(101)] });
+  f.githubPages.set('/user/installations/5/repositories?per_page=100&page=1', { repositories: [repository(102, { full_name: 'organization/website', default_branch: 'master', private: false })] });
+  const first = await (await handleRequest(api('/github/build/repositories'), f.env)).json() as any;
+  assert.equal(first.repositories.length, 97);
+  assert.equal(first.nextCursor, '1:3:2');
+  assert.deepEqual(first.repositories[0], { id: 4, fullName: 'personal/repo-4', defaultBranch: 'main', private: true });
+  const second = await (await handleRequest(api(`/github/build/repositories?cursor=${encodeURIComponent(first.nextCursor)}`), f.env)).json() as any;
+  assert.equal(second.repositories[0].id, 101);
+  assert.equal(second.nextCursor, '1:4:1');
+  const last = await (await handleRequest(api(`/github/build/repositories?cursor=${encodeURIComponent(second.nextCursor)}`), f.env)).json() as any;
+  assert.deepEqual(last, { repositories: [{ id: 102, fullName: 'organization/website', defaultBranch: 'master', private: false }], nextCursor: null });
+  assert.equal(f.calls.filter(call => call.url.includes('/user/installations/')).length, 3);
+  for (const call of f.calls) assert.equal((call.init?.headers as any).Authorization, 'Bearer ghu_picker-token');
+  for (const query of ['cursor=bad', 'cursor=1:100:1', 'cursor=1:0:1&cursor=1:0:2', 'installation_id=4'])
+    assert.equal((await handleRequest(api(`/github/build/repositories?${query}`), f.env)).status, 400);
+});
+
 
 test('Build app config and auth state are independent from read-only Import', async t => {
   const f = await fixture(t);

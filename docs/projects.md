@@ -44,9 +44,23 @@ repositories selected by the user; it does not request workflow permissions.
 Authorization tokens are encrypted with separate `GITHUB_BUILD_*` configuration,
 remain in the API Worker, and are never placed in a Builder container.
 
-The Projects page opens `/github/build/connect` for authorization and installation.
-The callback returns to the same account's project with its repository and branch
-selection. Authorization alone does not change project storage. The final
+The Projects page opens `/github/build/connect` with only a project ID to start
+at GitHub's app installation screen. Users choose a personal account or organization
+and grant access to all repositories or specific ones, then authorize their GitHub
+account. The callback returns to the same Mainbrella account's project with a
+repository picker; no repository URL needs to be entered. Existing connections
+can use the picker immediately or choose **Manage repository access** to install
+on another account or change the selected repositories.
+
+`GET /github/build/repositories` lists writable repositories through the user's
+Build token and active installations with Contents write access. It excludes
+archived, disabled, suspended, and read-only repositories. Pass `nextCursor` as
+the `cursor` query parameter to continue across repositories and installations.
+An empty page can still have a cursor. The picker uses the repository's default
+branch, which users can change when moving hosted history. Repository-specific
+connect requests remain supported for existing clients.
+
+Authorization alone does not change project storage. The final
 `PUT /projects/github?id=...` verifies both user push permission and the app's
 write access, then locks the project against new Builder turns while switching.
 
