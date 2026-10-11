@@ -89,7 +89,20 @@ The next Builder turn reads supported external source changes from the linked
 branch and merges edits to different files with unsaved working changes. If both
 sides change the same file differently, it preserves both versions and reports
 the conflicting path. Save the working version of that file to GitHub before
-retrying. Existing Builder source limits continue to apply.
+retrying. Builder supports up to 1,024 editable text files, 1 MiB per file, and
+16 MiB for the serialized source map. These are storage/runtime bounds rather
+than model context limits. GitHub imports and synchronized working source use
+the same private R2 manifests as hosted source; D1 keeps only object references.
+Existing storage funding, account limits, and per-inference spending checks
+still apply.
+
+The model sees a paginated file list and reads bounded character ranges, so
+large or single-line datasets do not enter its conversation all at once.
+`read_file` returns `nextOffset` for continuation; `edit_file` replaces a unique
+exact match while preserving unread content. Older read results can be omitted
+from subsequent production requests to stay within the conversation budget;
+source and diagnostic records retain the original bytes. The local Codex bridge
+keeps its append-only session history.
 
 Builder history, committed files, and restores read from GitHub for linked
 projects. Their version IDs are 40-character commit SHAs; hosted version IDs

@@ -1,11 +1,15 @@
 import { z } from 'zod';
+import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 
 export const BUILD_MODEL = '@cf/zai-org/glm-5.3';
 export const BUILD_MAX_APPS = 50;
 export const BUILD_MAX_TURNS = 100;
-export const BUILD_MAX_SOURCE_BYTES = 256 * 1024;
-export const BUILD_MAX_FILE_BYTES = 64 * 1024;
-export const BUILD_MAX_FILES = 80;
+// Source storage is independent of the model conversation. Individual files
+// must still fit the sandbox's file API when materialized.
+export const BUILD_MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+export const BUILD_MAX_FILE_BYTES = MAX_FILE_BYTES;
+export const BUILD_MAX_FILES = 1024;
+export const BUILD_CONTEXT_BYTES = 192 * 1024;
 export const BUILD_MAX_ROUNDS = 16;
 export const BUILD_OUTPUT_BUDGET = 24_000;
 export const BUILD_INPUT_BUDGET = 240_000;

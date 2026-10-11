@@ -1,4 +1,4 @@
-import { BuildError, type BuildFiles } from './build-contract';
+import { BUILD_MAX_FILES, BuildError, type BuildFiles } from './build-contract';
 import { putStoredObject, getStoredObject, type StoragePurpose } from './r2-storage';
 
 export type BuildStorageOwner = { userId: string; appId: string };
@@ -69,7 +69,7 @@ export async function buildSourceEntries(env: Env, owner: BuildStorageOwner, sto
   const parsed = JSON.parse(stored), ref = buildObjectRef(parsed);
   if (!ref) return Promise.all(Object.entries(parsed as BuildFiles).map(async ([path, inline]) => ({ path, type: 'text' as const, inline, $r2: '', size: encoder.encode(inline).length, sha256: await buildContentHash(encoder.encode(inline)) })));
   const manifest = JSON.parse(new TextDecoder().decode(await readBuildObject(env, owner, ref)));
-  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.files) || manifest.files.length > 1024) throw new BuildError('build_source_unavailable');
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.files) || manifest.files.length > BUILD_MAX_FILES) throw new BuildError('build_source_unavailable');
   const paths = new Set<string>();
   for (const file of manifest.files) {
     if (!buildObjectRef(file) || typeof file.path !== 'string' || paths.has(file.path) || file.type !== 'text') throw new BuildError('build_source_unavailable');

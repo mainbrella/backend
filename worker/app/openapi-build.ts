@@ -1,7 +1,7 @@
 import { storageRetentionSchema } from './openapi-storage-billing';
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type OpenAPIApi, type LegacyHandler } from './openapi-shared';
-import { buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema, buildVersionId } from '../lib/build-contract';
+import { BUILD_MAX_FILES, BUILD_MAX_FILE_BYTES, BUILD_MAX_SOURCE_BYTES, buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema, buildVersionId } from '../lib/build-contract';
 
 const params = z.object({ appId: z.uuid() });
 const headers = z.object({ Origin: z.string().optional() });
@@ -59,7 +59,9 @@ export function registerBuildRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   register(api, 'post', '/build/apps/{appId}/resume', { ...common, operationId: 'resumeBuildDispatch', summary: 'Reconcile dispatch of an existing queued build',
     description: 'Uses the existing workflow ID; does not create a new turn or replay failed inference.', request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
   register(api, 'post', '/build/apps/{appId}/stop', { ...common, operationId: 'stopBuildPreview', summary: 'Stop the editing container while keeping source', request: { params, headers }, responses: { 200: jsonResponse(detail), ...failures } }, handler);
-  register(api, 'get', '/build/apps/{appId}/source', { ...common, operationId: 'getBuildSource', summary: 'Read saved working source, including edits from a failed build', request: { params, headers }, responses: { 200: jsonResponse(z.object({ revision: z.number().int(), files: z.record(z.string(), z.string()) })), ...failures } }, handler);
+  register(api, 'get', '/build/apps/{appId}/source', { ...common, operationId: 'getBuildSource', summary: 'Read saved working source, including edits from a failed build',
+    description: `Returns complete source, independent of the bounded file ranges used by the model. Up to ${BUILD_MAX_FILES} files, ${BUILD_MAX_FILE_BYTES / 1024 / 1024} MiB per UTF-8 file and ${BUILD_MAX_SOURCE_BYTES / 1024 / 1024} MiB of serialized source. Source and manifests use private R2 storage; D1 retains object references.`,
+    request: { params, headers }, responses: { 200: jsonResponse(z.object({ revision: z.number().int(), files: z.record(z.string(), z.string().max(BUILD_MAX_FILE_BYTES)) })), ...failures } }, handler);
   register(api, 'get', '/build/apps/{appId}/files', { ...common, operationId: 'listBuildFiles', summary: 'List working or committed repository files without loading their contents',
     description: 'Read-only, session-authenticated and owner-scoped. Returns paths, byte sizes and file types from an R2 manifest or the linked GitHub commit tree. Optional versionId selects a saved commit; omit it for working source and generated assets. Does not download file bodies or extract the Git bundle.',
     request: { params, headers, query: fileQuery }, responses: { 200: jsonResponse(z.object({ revision: z.number().int(), version: version.nullable(), files: z.array(file) })), ...failures } }, handler);

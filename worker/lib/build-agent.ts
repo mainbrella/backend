@@ -3,7 +3,8 @@ import { accountResponse, runningContainer } from './container-service';
 import { resolveEntitlement } from './entitlements';
 import { handleOwnedPreviewRequest } from '../app/previews';
 import { failBuildTurn } from '../app/build';
-import { buildInference, buildSystemPrompt, buildFirstVersionPrompt, buildToolSchemas, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
+import { buildInference, buildSystemPrompt, buildFirstVersionPrompt, parseBuildTool, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
+import { listBuildFiles, readBuildFile, editBuildFile, compactBuildReads } from './build-source-tools';
 import { buildToolDraftLabel, buildToolLabel, saveBuildActivity } from './build-activity';
 import { closeCodexInference, localCodexConfigured } from './build-codex';
 import { settleReportedBuildUsage } from './build-billing';
@@ -13,7 +14,7 @@ import { storeBuildSource, readBuildSource, readBuildText, canonicalBuildSource 
 import { buildImageBytes, buildImagePath, generateBuildImage, savedBuildImages } from './build-images';
 import { buildGitVersion, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from './build-git';
 import { syncGithubSource, githubRestoreVersion, githubProject } from './build-github';
-import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
+import { BUILD_INPUT_BUDGET, BUILD_OUTPUT_BUDGET, BUILD_MAX_ROUNDS, BUILD_MAX_FILES, BUILD_MAX_FILE_BYTES, BUILD_MAX_SOURCE_BYTES, BUILD_CONTEXT_BYTES, BuildError, buildStarter, ownedBuildApp, validateBuildFiles,
   type BuildParams, type BuildFiles, type BuildContainer, type BuildTurnRow, type BuildPreview } from './build-contract';
 
 type Step = Pick<WorkflowStep, 'do' | 'sleep'>;
@@ -135,11 +136,18 @@ async function writeGuestFile(env: Env, userId: string, container: BuildContaine
 async function materialize(env: Env, params: BuildParams, container: BuildContainer, files: BuildFiles, step: Step, label: string) {
   validateBuildFiles(files);
   const directories = [...new Set(Object.keys(files).filter(path => path.includes('/')).map(path => `${root}/${path.slice(0, path.lastIndexOf('/'))}`))];
-  const setup = await runCommand(env, params, container, step, `${label}-directories`, `mkdir -p ${shellQuote(`${root}/public/generated`)} ${directories.map(shellQuote).join(' ')}`, 30_000);
-  if (setup.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
+  // Keep directory commands within the execution API's command-size bound.
+  for (let offset = 0; offset < Math.max(1, directories.length); offset += 50) {
+    const setup = await runCommand(env, params, container, step, `${label}-directories${offset ? `-${offset}` : ''}`,
+      `mkdir -p ${shellQuote(`${root}/public/generated`)} ${directories.slice(offset, offset + 50).map(shellQuote).join(' ')}`, 30_000);
+    if (setup.status !== 'succeeded') throw new BuildError('build_runtime_unavailable');
+  }
   // A retry overwrites exactly the same bytes; generated text never enters a shell.
-  await step.do(`${label}: files`, retry, async () => {
-    for (const [path, content] of Object.entries(files)) await writeGuestFile(env, params.userId, container, `${root}/${path}`, content);
+  const entries = Object.entries(files);
+  for (let offset = 0; offset < entries.length; offset += 50) await step.do(`${label}: files${offset ? `-${offset}` : ''}`, { ...retry, timeout: '5 minutes' }, async () => {
+    for (const [path, content] of entries.slice(offset, offset + 50)) await writeGuestFile(env, params.userId, container, `${root}/${path}`, content);
+  });
+  await step.do(`${label}: assets`, retry, async () => {
     const github = await githubProject(env, params.userId, params.appId);
     for (const image of await savedBuildImages(env, params.appId)) {
       if (github?.github_repo) {
@@ -162,14 +170,10 @@ async function saveSource(env: Env, params: BuildParams, files: BuildFiles, reta
     .bind(source, new Date().toISOString(), params.appId, params.userId, params.turnId).run();
 }
 async function executeTool(env: Env, params: BuildParams, container: BuildContainer | undefined, files: BuildFiles, call: BuildToolCall, step: Step, label: string, logs: string): Promise<{ files: BuildFiles; output: string; logs: string; succeeded: boolean; state?: OperationStatus }> {
-  const schema = buildToolSchemas[call.function.name as keyof typeof buildToolSchemas];
-  let args: Record<string, string>;
-  try {
-    const parsed = schema?.safeParse(JSON.parse(call.function.arguments));
-    if (!parsed?.success) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false, state: 'blocked' };
-    args = parsed.data;
-  } catch { return { files, output: 'Arguments must be valid JSON.', logs, succeeded: false, state: 'blocked' }; }
-  if (call.function.name === 'generate_image') {
+  const request = parseBuildTool(call);
+  if (!request) return { files, output: 'Invalid tool or arguments. Use the documented tools and relative source paths.', logs, succeeded: false, state: 'blocked' };
+  const { name, args } = request;
+  if (name === 'generate_image') {
     const failure = { error: 'Could not generate this image. Continue building with CSS or reuse a saved image; do not substitute stock imagery.', state: 'unknown' as OperationStatus };
     const result = await step.do(`${label}: generate image`, { ...noRetry, timeout: '1 minute' }, async () => {
       try { return { image: await generateBuildImage(env, params, label, args.label, args.prompt) }; }
@@ -180,10 +184,11 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
     }).catch(() => failure);
     return { files, output: 'image' in result ? JSON.stringify(result.image) : result.error, logs, succeeded: 'image' in result, state: 'image' in result ? 'succeeded' : result.state };
   }
-  if (call.function.name === 'list_files') return { files, output: Object.keys(files).join('\n'), logs, succeeded: true };
-  if (call.function.name === 'read_file') return { files, output: files[args.path] ?? 'File not found.', logs, succeeded: Object.hasOwn(files, args.path) };
-  if (call.function.name === 'get_logs') return { files, output: logs || 'No commands have run yet.', logs, succeeded: true };
-  if (call.function.name === 'run_command') {
+  if (name === 'list_files') return { files, output: listBuildFiles(files, args.offset, args.limit), logs, succeeded: true };
+  if (name === 'read_file') return { files, logs, ...(Object.hasOwn(files, args.path)
+    ? readBuildFile(files[args.path], args.path, args.offset, args.limit) : { output: 'File not found.', succeeded: false }) };
+  if (name === 'get_logs') return { files, output: logs || 'No commands have run yet.', logs, succeeded: true };
+  if (name === 'run_command') {
     if (!container) throw new BuildError('build_runtime_unavailable');
     await materialize(env, params, container, files, step, `${label}-source`);
     // A fresh sandbox has no project dependencies. The model may ask to build
@@ -196,8 +201,14 @@ async function executeTool(env: Env, params: BuildParams, container: BuildContai
     return { files, output, logs: output, succeeded: result.status === 'succeeded' };
   }
   const next = { ...files };
-  if (call.function.name === 'delete_file') delete next[args.path]; else next[args.path] = args.content;
-  try { validateBuildFiles(next); } catch { return { files, output: 'Source limit exceeded. Keep each file below 64 KiB and the project below 256 KiB / 80 files.', logs, succeeded: false, state: 'blocked' }; }
+  if (name === 'delete_file') delete next[args.path];
+  else if (name === 'edit_file') {
+    if (!Object.hasOwn(files, args.path)) return { files, output: 'File not found.', logs, succeeded: false, state: 'blocked' };
+    const edit = editBuildFile(files[args.path], args.old_text, args.new_text);
+    if (!edit.succeeded) return { files, output: edit.output, logs, succeeded: false, state: 'blocked' };
+    next[args.path] = edit.content;
+  } else next[args.path] = args.content;
+  try { validateBuildFiles(next); } catch { return { files, output: `Source limit exceeded. Each file may be up to ${BUILD_MAX_FILE_BYTES / 1024} KiB; the serialized project may be up to ${BUILD_MAX_SOURCE_BYTES / 1024 / 1024} MiB / ${BUILD_MAX_FILES} files.`, logs, succeeded: false, state: 'blocked' }; }
   await step.do(`${label}: save source`, retry, async () => {
     const ref = { params, id: `${label}-source` };
     await proposeBuildOperation(env, ref, 'source', `Save ${args.path}`);
@@ -262,7 +273,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
       return { app, turn, images };
     });
     currentTurn = initial.turn;
-    const github = await step.do('Sync GitHub source', retry, () => syncGithubSource(env, params));
+    const github = await step.do('Sync GitHub source', { ...retry, timeout: '5 minutes' }, () => syncGithubSource(env, params));
     if (github?.github_repo) {
       const current = await ownedBuildApp(env, params.userId, params.appId);
       if (!current) throw new BuildError('build_interrupted', 409);
@@ -298,7 +309,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     const starterContext = canonicalBuildSource(files) === canonicalBuildSource(buildStarter)
       ? `\nStarter source (already supplied; begin editing without listing or reading these files):\n${JSON.stringify(files)}\n` : '';
     const messages: BuildAIMessage[] = [{ role: 'system', content: `${buildSystemPrompt}${initial.turn.base_revision === 0 ? `\n${buildFirstVersionPrompt}` : ''}` },
-      { role: 'user', content: `Current source files:\n${Object.keys(files).join('\n')}${starterContext}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
+      { role: 'user', content: `Current source files:\n${listBuildFiles(files)}${starterContext}\nSaved original images:\n${initial.images.map(image => `${buildImagePath(image.id)}: ${image.label}`).join('\n') || 'None yet.'}\nOriginal brief:\n${initial.app.initial_prompt}\n\nRequest:\n${initial.turn.prompt}` }];
     let verified = false;
     for (let round = 0; round < BUILD_MAX_ROUNDS; round++) {
       if (initial.turn.mode === 'build') {
@@ -307,8 +318,10 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
           { outputTokens, inputTokens, rounds: round });
         if (inputTokens >= BUILD_INPUT_BUDGET) await stopForLimit('input-tokens', BUILD_INPUT_BUDGET, `The build used ${inputTokens.toLocaleString()} input tokens, reaching its ${BUILD_INPUT_BUDGET.toLocaleString()} token limit.`, inputTokens,
           { outputTokens, inputTokens, rounds: round });
-        const contextBytes = new TextEncoder().encode(JSON.stringify(messages)).length;
-        if (contextBytes > 192 * 1024) await stopForLimit('context-size', 192 * 1024, `The model conversation reached ${contextBytes.toLocaleString()} bytes, above the ${ (192 * 1024).toLocaleString()} byte context limit.`, contextBytes,
+        // The local bridge owns an append-only session history. Production
+        // requests can omit older read bodies while retaining tool call pairs.
+        const contextBytes = localCodexConfigured(env) ? new TextEncoder().encode(JSON.stringify(messages)).length : compactBuildReads(messages, BUILD_CONTEXT_BYTES);
+        if (contextBytes > BUILD_CONTEXT_BYTES) await stopForLimit('context-size', BUILD_CONTEXT_BYTES, `The model conversation reached ${contextBytes.toLocaleString()} bytes, above the ${BUILD_CONTEXT_BYTES.toLocaleString()} byte context limit.`, contextBytes,
           { outputTokens, inputTokens, rounds: round });
         currentOperation = `text-${round}`;
         const result = await step.do(`AI ${round}`, noRetry, async (): Promise<OperationResult<BuildAIResult>> => {

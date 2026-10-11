@@ -18,7 +18,7 @@ export function buildToolLabel(name: string, argumentsJSON: string) {
     args = { path: argumentsJSON.match(/"path"\s*:\s*"([^"\\]+)"/)?.[1] };
   }
   const path = typeof args?.path === 'string' ? args.path : 'source file';
-  return ({ list_files: 'Inspect project files', read_file: `Read ${path}`, write_file: `Write ${path}`,
+  return ({ list_files: 'Inspect project files', read_file: `Read ${path}`, write_file: `Write ${path}`, edit_file: `Edit ${path}`,
     delete_file: `Delete ${path}`, run_command: args?.command === 'npm install' ? 'Install dependencies' : 'Type-check and compile',
     get_logs: 'Read build output', generate_image: `Generate ${typeof args?.label === 'string' ? args.label : 'original imagery'}` } as Record<string, string>)[name] || 'Update the app';
 }

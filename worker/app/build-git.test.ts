@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,7 +10,7 @@ import { buildBillingFixture } from './build-billing-test-helpers';
 import { handleBuildRequest } from './build';
 import { handleProjectsRequest } from './projects';
 import { runBuildAgent } from '../lib/build-agent';
-import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
+import { BUILD_MODEL, BUILD_MAX_FILE_BYTES, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
 import { BUILD_GIT_ROOT, buildGitVersion, exportBuildGit, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
 import { BUILD_GIT_MAX_FILE_BYTES, buildGitProgram } from '../lib/build-git-program';
 import { buildImagePath } from '../lib/build-images';
@@ -93,6 +93,7 @@ async function fixture(t: TestContext, fromProjects = false) {
         const input = JSON.parse(typeof content === 'string' ? content : new TextDecoder().decode(content));
         input.worktree = localPath(input.worktree);
         if (input.pack) input.pack = localPath(input.pack);
+        if (input.packs) input.packs = input.packs.map(localPath);
         content = JSON.stringify(input);
       }
       mkdirSync(dirname(localPath(path)), { recursive: true });
@@ -695,9 +696,10 @@ test('empty GitHub repository snapshots contain valid Git objects, sorted trees 
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('linked Builder containers hydrate the exact GitHub commit with shallow Git history and no guest credentials', async t => {
+test('linked Builder containers hydrate multi-megabyte GitHub packs in bounded parts with shallow history and no guest credentials', async t => {
   const f = await fixture(t);
-  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const files = { ...buildStarter, ...Object.fromEntries(Array.from({ length: 3 }, (_, index) => [`data/source-${index}.txt`, randomBytes(400_000).toString('hex')])) };
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), files, true);
   const next = f.startTurn();
   Object.assign(f.env, { GITHUB_BUILD_CLIENT_ID: 'build', GITHUB_BUILD_CLIENT_SECRET: 'secret', GITHUB_BUILD_APP_SLUG: 'mainbrella-build', GITHUB_BUILD_ENCRYPTION_KEY: 'b'.repeat(64) });
   f.sqlite.prepare('INSERT INTO github_build_connections(user_id,github_user_id,github_login,credentials,expires_at) VALUES(?,?,?,?,?)')
@@ -707,15 +709,23 @@ test('linked Builder containers hydrate the exact GitHub commit with shallow Git
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, options?: RequestInit) => {
     assert.equal(String(input), 'https://github.com/owner/project.git/git-upload-pack');
     assert.equal((options?.headers as Record<string, string>).Authorization, `Basic ${btoa('x-access-token:ghu_private_build_token')}`);
-    const packed = spawnSync('git', ['upload-pack', '--stateless-rpc', f.localPath(`${BUILD_GIT_ROOT}/repository`)], { input: String(options?.body) });
+    const packed = spawnSync('git', ['upload-pack', '--stateless-rpc', f.localPath(`${BUILD_GIT_ROOT}/repository`)], { input: String(options?.body), maxBuffer: 8 * 1024 * 1024 });
     assert.equal(packed.status, 0, packed.stderr.toString());
+    assert.ok(packed.stdout.length > BUILD_MAX_FILE_BYTES);
     return new Response(packed.stdout, { headers: { 'Content-Type': 'application/x-git-upload-pack-result' } });
   });
   const reads = f.gets.length;
-  await hydrateBuildGit(f.env, next, f.runtime, null, f.turn(next));
+  const parts: string[] = [];
+  await hydrateBuildGit(f.env, next, { ...f.runtime, async write(path, content) {
+    assert.ok((typeof content === 'string' ? Buffer.byteLength(content) : content.byteLength) <= BUILD_MAX_FILE_BYTES);
+    if (/source-\d+\.pack$/.test(path)) parts.push(path);
+    await f.runtime.write(path, content);
+  } }, null, f.turn(next));
+  assert.ok(parts.length > 1);
   assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
   assert.equal(git(['rev-parse', '--is-shallow-repository'], f.localPath('/workspace/app')), 'true');
   assert.equal(git(['remote', 'get-url', 'origin'], f.localPath('/workspace/app')), 'https://github.com/owner/project.git');
+  for (const [path, content] of Object.entries(files)) assert.equal(readFileSync(f.localPath(`/workspace/app/${path}`), 'utf8'), content);
   assert.ok(!readFileSync(f.localPath('/workspace/app/.git/config'), 'utf8').includes('ghu_private_build_token'));
   assert.equal(f.gets.length, reads, 'Hydration does not read hosted bundles');
 });

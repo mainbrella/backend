@@ -199,6 +199,22 @@ test('Build repository browsing documents manifests and authenticated individual
   assert.ok(repository.responses[200].content['application/octet-stream']);
 });
 
+test('Builder source and GitHub linking document storage bounds separately from model context', async () => {
+  const { paths } = await document();
+  const source = paths['/build/apps/{appId}/source'].get;
+  assert.equal(source.responses[200].content['application/json'].schema.properties.files.additionalProperties.maxLength, 1024 * 1024);
+  for (const operation of [source, paths['/projects/github'].put]) {
+    assert.match(operation.description, /1024.*files/);
+    assert.match(operation.description, /1 MiB per/);
+    assert.match(operation.description, /16 MiB.*serialized source/);
+    assert.match(operation.description, /D1.*object reference/);
+    assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+  }
+  const link = paths['/projects/github'].put;
+  assert.equal(link.operationId, 'linkProjectGithub');
+  assert.ok(link.responses[402]); assert.ok(link.responses[413]);
+});
+
 test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {
   const { paths } = await document();
   const config = paths['/build/config'].get;

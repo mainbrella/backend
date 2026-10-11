@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const requiredToolNames = ['list_files', 'read_file', 'write_file', 'delete_file', 'run_command', 'get_logs'];
-const toolNames = [...requiredToolNames, 'generate_image'];
+const toolNames = [...requiredToolNames, 'generate_image', 'edit_file'];
 const inferenceTimeoutMs = 240_000;
 const sessionTimeoutMs = 30 * 60_000;
 const toolTimeoutMs = 12 * 60_000; // Materialization, install and compiler checks can span multiple Workflow steps.

@@ -11,7 +11,7 @@ import { buildAppStream, saveBuildActivity, buildToolDraftLabel, buildToolLabel 
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
 import { buildTokenPrices } from '../lib/build-pricing';
-import { BUILD_MODEL, BuildError, buildStarter } from '../lib/build-contract';
+import { BUILD_MODEL, BUILD_CONTEXT_BYTES, BuildError, buildStarter } from '../lib/build-contract';
 import { buildBillingFixture } from './build-billing-test-helpers';
 import { accountBillingRequest } from '../lib/prepaid-billing';
 import { PLAN_PRICES, planPrices } from '../lib/stripe';
@@ -20,6 +20,8 @@ import { BUILD_IMAGE_MODEL, buildImageBytes, generateBuildImage } from '../lib/b
 import { proposeBuildOperation, startBuildOperation, readBuildOperation, recordBuildOperation, retainBuildSource } from '../lib/build-journal';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO, GENERATION_ONE, EXPIRES_AT } from './paid-container-test-helpers';
 import { readBuildSource, storeBuildSource, buildSourceEntries } from '../lib/build-storage';
+import { MAX_COMMAND_BYTES } from '../../containers/command-contract.js';
+import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 
 const event = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\r\n\r\n`;
 const delta = (value: unknown) => event({ choices: [{ delta: value, finish_reason: null }] });
@@ -135,6 +137,72 @@ const jpegBase64 = btoa(String.fromCharCode(...jpeg));
 
 const immediateStep = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return structuredClone(await operation()); },
   async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
+
+test('the agent reads and edits a large dataset while retaining complete source outside model context', async t => {
+  const f = await fixture(t); f.setAccountStatus(503); t.mock.method(console, 'error', () => {});
+  const files = { 'card-2026.json': JSON.stringify({ data: 'x'.repeat(300_000), status: 'before' }), 'src/other.ts': 'Existing feature' };
+  f.sqlite.prepare('UPDATE build_apps SET source_json = ? WHERE id = ?').run(await storeBuildSource(f.env, f.params, files), f.appId);
+  let calls = 0;
+  f.env.AI = { async run(_model: string, payload: any) {
+    const round = calls++;
+    assert.ok(Buffer.byteLength(JSON.stringify(payload.messages)) < BUILD_CONTEXT_BYTES);
+    assert.ok(!JSON.stringify(payload.messages).includes('x'.repeat(100_000)));
+    let name = 'read_file', args: unknown = { path: 'card-2026.json' };
+    if (round === 1) {
+      const page = JSON.parse(payload.messages.at(-1).content);
+      assert.ok(page.nextOffset > 0); assert.equal(page.totalChars, files['card-2026.json'].length);
+      args = { path: 'card-2026.json', offset: files['card-2026.json'].indexOf('"status"') };
+    } else if (round === 2) {
+      assert.match(payload.messages.at(-1).content, /before/);
+      name = 'edit_file'; args = { path: 'card-2026.json', old_text: '"status":"before"', new_text: '"status":"after"' };
+    } else if (round === 3) {
+      assert.equal(payload.messages.at(-1).content, 'Saved.');
+      throw new BuildError('build_interrupted');
+    }
+    return { choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: `call-${round}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 } };
+  } } as unknown as Ai;
+  await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  assert.equal(calls, 4);
+  const stored = f.sqlite.prepare('SELECT source_json FROM build_apps WHERE id = ?').get(f.appId)!.source_json as string;
+  const saved = await readBuildSource(f.env, f.params, stored);
+  assert.deepEqual(saved, { ...files, 'card-2026.json': files['card-2026.json'].replace('"status":"before"', '"status":"after"') });
+  assert.ok(Buffer.byteLength(stored) < 512);
+  assert.equal((await readBuildOperation(f.env, { params: f.params, id: 'tool-2-0' }))!.status, 'succeeded');
+});
+
+test('large projects materialize complete files and long directory lists within sandbox API limits', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  const files = { ...buildStarter, 'large.json': JSON.stringify({ data: 'x'.repeat(900_000) }),
+    ...Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`src/${String(index).padStart(3, '0')}-${'x'.repeat(140)}/file.ts`, 'export {};'])) };
+  f.sqlite.prepare('UPDATE build_apps SET source_json = ?, container_json = ? WHERE id = ?')
+    .run(await storeBuildSource(f.env, f.params, files), JSON.stringify({ id: 'small', createdAt: GENERATION_ONE, expiresAt: EXPIRES_AT }), f.appId);
+  const written = new Map<string, Uint8Array>(), commands: string[] = [], executions = new Map<string, unknown>();
+  f.env.USER_CONTAINER = { idFromName: (name: string) => name, get: () => ({ async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/files' && request.method === 'PUT') {
+      const bytes = new Uint8Array(await request.arrayBuffer()); assert.ok(bytes.byteLength <= MAX_FILE_BYTES);
+      written.set(url.searchParams.get('path')!, bytes); return Response.json({ saved: true });
+    }
+    if (url.pathname === '/executions' && request.method === 'POST') {
+      const { command } = await request.json() as { command: string }; assert.ok(Buffer.byteLength(command) <= MAX_COMMAND_BYTES); commands.push(command);
+      const id = `command-${commands.length}`, result = { id, status: 'succeeded', stdout: '', stderr: '' };
+      executions.set(id, result); return Response.json(result);
+    }
+    if (url.pathname.startsWith('/executions/')) return Response.json(executions.get(url.pathname.split('/').at(-1)!));
+    assert.fail(`Unexpected request: ${request.method} ${url.pathname}`);
+  } }) } as unknown as DurableObjectNamespace;
+  let calls = 0;
+  f.env.AI = { async run(_model: string, payload: any) {
+    if (calls++ > 0) { assert.equal(payload.messages.at(-1).content, 'succeeded\n\n'); throw new BuildError('build_interrupted'); }
+    return { choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'build', type: 'function', function: { name: 'run_command', arguments: '{"command":"npm run build"}' } }] } }],
+      usage: { prompt_tokens: 5, completion_tokens: 5 } };
+  } } as unknown as Ai;
+  await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  assert.equal(calls, 2);
+  for (const [path, content] of Object.entries(files)) assert.equal(new TextDecoder().decode(written.get(`/workspace/app/${path}`)), content);
+  assert.ok(commands.some(command => command.includes('tsc --noEmit')));
+});
 
 test('first builds receive a small scope and fresh starter source without restricting later edits', async t => {
   for (const [revision, edited] of [[0, false], [0, true], [1, true]] as const) await t.test(`revision ${revision}, edited ${edited}`, async sub => {

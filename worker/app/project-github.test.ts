@@ -9,6 +9,8 @@ import { githubBuildUserToken, sealGithubBuildCredentials } from '../lib/github-
 import { sealGithubCredentials } from '../lib/github-import';
 import { saveBuildGitVersion } from '../lib/build-git';
 import { commitGithubSnapshot, syncGithubSource } from '../lib/build-github';
+import { readBuildSource } from '../lib/build-storage';
+import { BUILD_MAX_FILE_BYTES, BUILD_MAX_FILES, BUILD_MAX_SOURCE_BYTES } from '../lib/build-contract';
 import type { BuildGitRuntime } from '../lib/build-git';
 import type { BuildFiles, BuildParams, BuildTurnRow } from '../lib/build-contract';
 
@@ -150,6 +152,7 @@ function row(f: Fixture, sql: string, ...params: unknown[]): Record<string, unkn
   assert.ok(result, `expected row for ${sql}`);
   return result as Record<string, unknown>;
 }
+const workingSource = (f: Fixture) => readBuildSource(f.env, { userId: USER_ONE, appId: APP }, row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string);
 function insertTurn(f: Fixture, id: string, status = 'running') {
   f.sqlite.prepare(`INSERT INTO build_turns(id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at)
     VALUES(?,?,?,?,?,'build',0,?,'Building','model',?)`).run(id, APP, USER_ONE, id, 'Save app', status, now);
@@ -262,9 +265,10 @@ test('an empty GitHub repository is initialized before the project link is switc
   assert.match(data.github.commitId, /^[a-f0-9]{40}$/);
   assert.equal(f.head, data.github.commitId);
   assert.equal(row(f, 'SELECT github_repo FROM projects WHERE id=?', PROJECT).github_repo, REPO);
-  assert.deepEqual(JSON.parse(row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string), local);
+  assert.deepEqual(await workingSource(f), local);
   assert.equal(row(f, 'SELECT github_cleanup_pending FROM projects WHERE id=?', PROJECT).github_cleanup_pending, 0);
-  assert.deepEqual(f.puts, []);
+  assert.ok(f.puts.length > 0);
+  assert.ok(f.puts.every(key => key.includes('/objects/')));
   assert.ok(f.calls.some(call => call.url.endsWith('/git-receive-pack') && call.init?.method === 'POST'));
 });
 
@@ -286,14 +290,49 @@ test('connecting an empty hosted project imports the existing repository source 
   const data = await response.json() as { github: { commitId: string } };
   assert.equal(data.github.commitId, remoteHead);
   assert.equal(row(f, 'SELECT github_repo FROM projects WHERE id=?', PROJECT).github_repo, REPO);
-  assert.deepEqual(JSON.parse(row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string), {
+  assert.deepEqual(await workingSource(f), {
     'index.html': '<main>Imported</main>', 'package.json': '{"name":"imported"}',
   });
   assert.equal(f.objects.has(sourceKey), true);
   assert.equal(f.objects.has(bundleKey), false);
   assert.equal(f.objects.has(partKey), false);
   assert.equal(row(f, 'SELECT github_cleanup_pending FROM projects WHERE id=?', PROJECT).github_cleanup_pending, 0);
-  assert.deepEqual(f.puts, []);
+  assert.ok(f.puts.every(key => key.includes('/objects/')));
+});
+
+test('GitHub imports accept large datasets and more than 80 files while keeping D1 and Workflow source references small', async t => {
+  const files: BuildFiles = Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`src/module-${index}.ts`, `// Module ${index}\n${' '.repeat(24 * 1024)}`]));
+  files['card-2026.json'] = JSON.stringify({ hands: Array.from({ length: 6000 }, (_, id) => ({ id, tiles: '222 000 2222 6666' })) });
+  assert.ok(Buffer.byteLength(files['card-2026.json']) > 64 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(files)) > 2 * 1024 * 1024);
+  const entries = Object.entries(files).map(([path, content]) => ({ path, sha: shaBlob(Buffer.from(content)), size: Buffer.byteLength(content) }));
+  const f = await fixture(t, { head: PARENT, tree: entries });
+  f.setCommitTree(PARENT, entries, files);
+  const response = await link(f);
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const stored = row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string;
+  assert.ok(Buffer.byteLength(stored) < 512);
+  assert.ok(JSON.parse(stored).$r2);
+  assert.deepEqual(await workingSource(f), files);
+  assert.ok(f.puts.every(key => key.includes('/objects/')));
+});
+
+test('GitHub import resource ceilings reject before fetching blobs and preserve the unlinked project', async t => {
+  const cases = [
+    [{ path: 'large.json', sha: PARENT, size: BUILD_MAX_FILE_BYTES + 1 }],
+    Array.from({ length: BUILD_MAX_FILES + 1 }, (_, index) => ({ path: `src/file-${index}.ts`, sha: PARENT, size: 1 })),
+    Array.from({ length: BUILD_MAX_SOURCE_BYTES / BUILD_MAX_FILE_BYTES + 1 }, (_, index) => ({ path: `data/file-${index}.json`, sha: PARENT, size: BUILD_MAX_FILE_BYTES })),
+  ];
+  for (const tree of cases) await t.test(`${tree.length} entries, ${tree[0].size} bytes per file`, async sub => {
+    const f = await fixture(sub, { head: PARENT, tree });
+    const response = await link(f);
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { error: 'github_source_limit' });
+    assert.equal(row(f, 'SELECT github_repo FROM projects WHERE id=?', PROJECT).github_repo, null);
+    assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_apps').n, 0);
+    assert.equal(f.calls.some(call => call.url.includes('/git/blobs/')), false);
+    assert.deepEqual(f.puts, []);
+  });
 });
 
 test('linked builds commit directly to GitHub without writing a local version or R2 bundle', async t => {
@@ -402,7 +441,7 @@ test('an external GitHub head syncs repository files into the active Build works
   const project = await syncGithubSource(f.env, params(turnId));
   assert.equal(project?.github_commit_id, externalHead);
   assert.equal(row(f, 'SELECT github_commit_id FROM projects WHERE id=?', PROJECT).github_commit_id, externalHead);
-  assert.deepEqual(JSON.parse(row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string), {
+  assert.deepEqual(await workingSource(f), {
     'index.html': 'external update', 'local.txt': 'unsaved local edit', 'remote.txt': 'external file',
   });
 });

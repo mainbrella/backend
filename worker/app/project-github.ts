@@ -3,6 +3,7 @@ import { BUILD_MAX_APPS, BuildError } from '../lib/build-contract';
 import { repoName } from '../lib/repo-launch';
 import { githubBuildUserToken, validGithubBranch } from '../lib/github-build';
 import { checkGithubWriteAccess, githubProject, publicGithubProject, migrateGithubProject, cleanupGithubHostedHistory } from '../lib/build-github';
+import { storeBuildSource } from '../lib/build-storage';
 
 export async function handleProjectGithubRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -47,6 +48,7 @@ export async function handleProjectGithubRequest(request: Request, env: Env): Pr
       if ((count?.count ?? 0) >= BUILD_MAX_APPS) throw new BuildError('build_app_limit', 429);
     }
     const result = await migrateGithubProject(env, project, app ?? { id, source_json: '{}' }, repo.data, branch, token);
+    const source = await storeBuildSource(env, { userId: user.id, appId: app?.id ?? id }, result.files);
     // Transfer and verify first. Atomically disable the hosted head afterwards.
     // A lost response is safe to retry: GitHub is already at the original SHA.
     const now = new Date().toISOString();
@@ -54,10 +56,10 @@ export async function handleProjectGithubRequest(request: Request, env: Env): Pr
       env.DB.prepare(`INSERT INTO build_apps(id,project_id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at)
         SELECT id,id,user_id,'project:' || id,'',name,?,created_at,? FROM projects WHERE id=? AND user_id=? AND github_link_lock=?
         AND NOT EXISTS(SELECT 1 FROM build_apps WHERE project_id=?)`)
-        .bind(JSON.stringify(result.files), now, id, user.id, lock, id),
+        .bind(source, now, id, user.id, lock, id),
       env.DB.prepare(`UPDATE build_apps SET git_version_id=NULL,verified_git_version_id=NULL,source_json=?,updated_at=?
         WHERE project_id=? AND user_id=? AND EXISTS(SELECT 1 FROM projects WHERE id=? AND github_link_lock=?)`)
-        .bind(JSON.stringify(result.files), now, id, user.id, id, lock),
+        .bind(source, now, id, user.id, id, lock),
       env.DB.prepare(`DELETE FROM build_git_versions WHERE app_id=? AND EXISTS(SELECT 1 FROM projects WHERE id=? AND user_id=? AND github_link_lock=?)`)
         .bind(id, id, user.id, lock),
       env.DB.prepare(`UPDATE projects SET github_repo=?,github_branch=?,github_commit_id=?,github_paths_json=?,github_cleanup_pending=1,

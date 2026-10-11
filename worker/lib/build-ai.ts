@@ -5,20 +5,25 @@ import { codexInference, localCodexConfigured } from './build-codex';
 import { meteredBuildInference } from './build-billing';
 import { buildTokenCostMicroUsd, readBuildTokenUsage } from './build-pricing';
 import { buildFailure, recordBuildOperation, startBuildOperation, checkpointBuildOperation, type OperationRef } from './build-journal';
+import { BUILD_READ_CHARS, BUILD_LIST_FILES } from './build-source-tools';
 
 const path = z.string().refine(value => validBuildPath(value) && !value.startsWith('public/generated/'));
 export const buildToolSchemas = {
-  list_files: z.object({}).strict(),
-  read_file: z.object({ path }).strict(),
+  list_files: z.object({ offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(1).max(BUILD_LIST_FILES).optional() }).strict(),
+  read_file: z.object({ path, offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(2).max(BUILD_READ_CHARS).optional() }).strict(),
   write_file: z.object({ path, content: z.string().max(64 * 1024) }).strict(),
+  edit_file: z.object({ path, old_text: z.string().min(1).max(BUILD_READ_CHARS), new_text: z.string().max(BUILD_READ_CHARS) }).strict(),
   delete_file: z.object({ path }).strict(),
   run_command: z.object({ command: z.enum(['npm install', 'npm run build']) }).strict(),
   get_logs: z.object({}).strict(),
   generate_image: z.object({ label: z.string().trim().min(1).max(120), prompt: z.string().trim().min(1).max(2048) }).strict(),
 };
 const descriptions: Record<keyof typeof buildToolSchemas, string> = {
-  list_files: 'List saved project source files.', read_file: 'Read a project source file.',
-  write_file: 'Create or replace a complete source file. Relative paths only.', delete_file: 'Delete a source file.',
+  list_files: 'List saved source paths, up to 100 at a time. Use the returned offset to continue.',
+  read_file: 'Read a bounded part of a source file. offset is a zero-based UTF-16 character offset; limit is at most 8192 characters. Large reads return JSON with content, totalChars and nextOffset; continue at nextOffset when needed.',
+  write_file: 'Create or replace a complete source file, up to 64 KiB of characters per call. Relative paths only. Use edit_file for targeted changes to large existing files.',
+  edit_file: 'Replace one unique exact old_text match with new_text, preserving the rest of the file. Read the relevant range first. Ambiguous or missing matches leave the file unchanged.',
+  delete_file: 'Delete a source file.',
   run_command: 'Install dependencies or type-check and compile the application in the isolated Linux container.',
   get_logs: 'Read the output from the last install or build.',
   generate_image: 'Generate an original JPEG image when requested or essential to the app. Describe the subject, composition, lighting and visual style. Returns a local /generated/...jpg path to use in img src or CSS. Up to 4 images per turn and 12 per app. Keep a simple first version to at most one image unless the user requests more.',
@@ -28,6 +33,7 @@ export const buildTools = Object.entries(buildToolSchemas).map(([name, schema]) 
 }));
 export const buildSystemPrompt = `You are Mainbrella's app builder. Create and improve real, complete React + Vite + TypeScript applications.
 Use the file tools to inspect and edit the existing project. You MUST write files, not just describe code. Preserve existing features when making changes.
+Read large files in ranges using read_file offset and limit; follow nextOffset only when you need more content. Use edit_file for small changes to existing files, especially large datasets. Preserve unread content. File lists are paginated; use list_files offset to see more paths.
 The starter uses React 19, Vite 7, TypeScript and lucide-react. Plain CSS is available; Tailwind is not installed. Use lucide-react for icons.
 Make a thoughtful, responsive, accessible interface with realistic content, restrained colors, readable type, working controls and useful empty states.
 Use generate_image when the user requests imagery or an image is essential to the app's core task. A topic alone does not require generated images. Use the returned /generated/...jpg path in the app; these assets are saved, served in previews and included in source exports. Do not use Unsplash, stock-image URLs, placeholder image services or invented external image URLs. Simple forms, settings, tables and utility dashboards do not need decorative images. If generation is unavailable or fails, explain briefly and continue with a suitable CSS treatment; never claim an image was generated when it was not.
@@ -43,6 +49,14 @@ Use src/App.tsx and src/style.css. Prefer no new dependencies and no generated i
 Keep each file compact, aiming for about 150 lines or fewer, and write the required files together when they fit in one response. Get the first version working before adding optional features or polishing it repeatedly.
 Respect features the user explicitly requested and preserve any existing edits when retrying.`;
 export type BuildToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+type BuildToolRequest = { [K in keyof typeof buildToolSchemas]: { name: K; args: z.infer<(typeof buildToolSchemas)[K]> } }[keyof typeof buildToolSchemas];
+export function parseBuildTool(call: BuildToolCall): BuildToolRequest | null {
+  if (!Object.hasOwn(buildToolSchemas, call.function.name)) return null;
+  try {
+    const parsed = buildToolSchemas[call.function.name as keyof typeof buildToolSchemas].safeParse(JSON.parse(call.function.arguments));
+    return parsed.success ? { name: call.function.name, args: parsed.data } as BuildToolRequest : null;
+  } catch { return null; }
+}
 export type BuildAIMessage = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: BuildToolCall[]; tool_call_id?: string; tool_success?: boolean };
 export type BuildAIResult = { message: BuildAIMessage; inputTokens: number; outputTokens: number; cachedInputTokens: number };
 

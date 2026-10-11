@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
-import { BuildError, validBuildPath, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
+import { BUILD_MAX_FILES, BUILD_MAX_FILE_BYTES, BUILD_MAX_SOURCE_BYTES, BuildError, validBuildPath, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
 import { githubBuildAPI, githubBuildUserToken, validGithubBranch } from './github-build';
 import { repoName } from './repo-launch';
 import { downloadGitPack } from './github-import';
 import { buildGitVersion, buildGitEntries, exportBuildGit, BUILD_GIT_IGNORE, type BuildGitRuntime, type BuildGitVersion } from './build-git';
 import { buildImageBytes, buildImagePath, savedBuildImages } from './build-images';
-import { readBuildSource, readBuildText } from './build-storage';
+import { readBuildSource, readBuildText, storeBuildSource } from './build-storage';
 import { acquireStorageLock, releaseStorageLock, storageMetered, listStoredObjects, deleteStoredObjects } from './r2-storage';
 
 export interface GithubProject {
@@ -133,11 +133,22 @@ export async function githubSource(repo: string, sha: string, token: string): Pr
   const files: BuildFiles = {};
   const entries = (await githubTree(repo, sha, token)).filter(entry => entry.type === 'blob' && entry.mode === '100644' && validBuildPath(entry.path)
     && !/\.(png|jpe?g|gif|webp|ico|woff2?|pdf|zip|mp4|mp3)$/i.test(entry.path));
-  if (entries.length > 80 || entries.some(entry => (entry.size ?? 0) > 64 * 1024)) throw new BuildError('github_source_limit', 413);
-  for (const entry of entries) {
-    const bytes = await blobBytes(repo, entry, token);
-    try { files[entry.path] = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-    catch { throw new BuildError('github_source_limit', 413); }
+  if (entries.length > BUILD_MAX_FILES || entries.some(entry => (entry.size ?? 0) > BUILD_MAX_FILE_BYTES)
+    || entries.reduce((size, entry) => size + (entry.size ?? 0), 0) > BUILD_MAX_SOURCE_BYTES) throw new BuildError('github_source_limit', 413);
+  let sourceBytes = 2;
+  for (let offset = 0; offset < entries.length; offset += 8) {
+    const batch = entries.slice(offset, offset + 8);
+    const blobs = await Promise.all(batch.map(entry => blobBytes(repo, entry, token)));
+    for (const [index, entry] of batch.entries()) {
+      const bytes = blobs[index];
+      if (bytes.length > BUILD_MAX_FILE_BYTES) throw new BuildError('github_source_limit', 413);
+      try { files[entry.path] = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { throw new BuildError('github_source_limit', 413); }
+      // Account for JSON escaping as each batch arrives, rather than buffering
+      // an oversized repository before validating the complete source map.
+      sourceBytes += encoder.encode(JSON.stringify(entry.path)).length + encoder.encode(JSON.stringify(files[entry.path])).length + 2;
+      if (sourceBytes - 1 > BUILD_MAX_SOURCE_BYTES) throw new BuildError('github_source_limit', 413);
+    }
   }
   try { validateBuildFiles(files); } catch { throw new BuildError('github_source_limit', 413); }
   return files;
@@ -392,9 +403,10 @@ export async function syncGithubSource(env: Env, params: BuildParams) {
     if (value !== undefined) files[path] = value;
   }
   try { validateBuildFiles(files); } catch { throw new BuildError('github_source_limit', 413); }
+  const source = await storeBuildSource(env, params, files);
   await env.DB.batch([
     env.DB.prepare(`UPDATE build_apps SET source_json=? WHERE id=? AND user_id=? AND active_turn_id=?`)
-      .bind(JSON.stringify(files), params.appId, params.userId, params.turnId),
+      .bind(source, params.appId, params.userId, params.turnId),
     env.DB.prepare(`UPDATE projects SET github_commit_id=?,github_paths_json=? WHERE id=? AND user_id=? AND github_commit_id IS ?
       AND EXISTS(SELECT 1 FROM build_apps WHERE id=? AND active_turn_id=?)`)
       .bind(head, JSON.stringify([...new Set([...JSON.parse(project.github_paths_json), ...Object.keys(files)])]), params.appId, params.userId, project.github_commit_id, params.appId, params.turnId),
@@ -410,18 +422,23 @@ export async function hydrateGithubGit(env: Env, params: BuildParams, runtime: B
   const folder = '/workspace/mainbrella-github';
   const setup = await runtime.run('github-hydrate-directories', `mkdir -p ${folder} /workspace/app`);
   if (setup.status !== 'succeeded') throw new BuildError('github_unavailable');
-  await runtime.write(`${folder}/source.pack`, new Uint8Array(pack));
+  const packs: string[] = [];
+  for (let offset = 0; offset < pack.length; offset += BUILD_MAX_FILE_BYTES) {
+    const path = `${folder}/source-${packs.length}.pack`;
+    await runtime.write(path, new Uint8Array(pack.slice(offset, offset + BUILD_MAX_FILE_BYTES)));
+    packs.push(path);
+  }
   await runtime.write(`${folder}/hydrate.cjs`, `const fs=require('node:fs'),{spawnSync}=require('node:child_process');
 const input=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),repo=input.worktree;
 const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'};
 for(const key of ['GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_CONFIG_COUNT'])delete env[key];
 function git(args,stdin){const r=spawnSync('git',['-c','core.hooksPath=/dev/null',...args],{cwd:repo,env,input:stdin});if(r.status!==0)throw new Error('GitHub checkout failed');return r.stdout.toString().trim();}
-fs.rmSync(repo+'/.git',{recursive:true,force:true});git(['init','--quiet']);git(['index-pack','--stdin'],fs.readFileSync(input.pack));
+fs.rmSync(repo+'/.git',{recursive:true,force:true});git(['init','--quiet']);git(['index-pack','--stdin'],Buffer.concat(input.packs.map(part=>fs.readFileSync(part))));
 git(['cat-file','-e',input.sha+'^{commit}']);fs.writeFileSync(repo+'/.git/shallow',input.sha+'\\n');git(['update-ref','refs/heads/'+input.branch,input.sha]);git(['symbolic-ref','HEAD','refs/heads/'+input.branch]);
 git(['reset','--hard',input.sha]);git(['remote','add','origin','https://github.com/'+input.repo+'.git']);
 `);
   await runtime.write(`${folder}/input.json`, JSON.stringify({ sha: project.github_commit_id, branch: project.github_branch, repo: project.github_repo,
-    worktree: '/workspace/app', pack: `${folder}/source.pack` }));
+    worktree: '/workspace/app', packs }));
   const result = await runtime.run('github-hydrate', `node ${folder}/hydrate.cjs ${folder}/input.json`);
   if (result.status !== 'succeeded') throw new BuildError('github_unavailable');
 }
