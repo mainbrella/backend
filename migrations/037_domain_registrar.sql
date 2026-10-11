@@ -29,7 +29,6 @@ CREATE TABLE domain_orders (
   customer_id TEXT,
   checkout_id TEXT UNIQUE,
   payment_intent_id TEXT UNIQUE,
-  refund_id TEXT,
   status TEXT NOT NULL DEFAULT 'quoted',
   error TEXT,
   provider_order TEXT,
@@ -40,5 +39,5 @@ CREATE TABLE domain_orders (
   expires_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX domain_order_pending ON domain_orders(domain_name)
-  WHERE status IN ('checkout','charging','paid','fulfilling','registered','connecting','refunding','review');
+  WHERE status IN ('checkout','charging','paid','fulfilling','registered','connecting','review');
 CREATE INDEX domain_order_owner ON domain_orders(user_id,created_at);

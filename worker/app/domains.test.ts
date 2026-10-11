@@ -9,7 +9,7 @@ const contact = { firstName: 'Alex', lastName: 'Example', email: 'alex@example.c
   address1: '123 Main St', address2: '', city: 'San Francisco', state: 'CA', zip: '94103', country: 'US' };
 async function fixture(t: TestContext) {
   const f = await billingFixture(t);
-  for (const name of ['014_projects.sql','015_project_domain.sql','016_project_domains.sql','017_project_domain_provider.sql','037_domain_registrar.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
+  for (const name of ['014_projects.sql','015_project_domain.sql','016_project_domains.sql','017_project_domain_provider.sql','037_domain_registrar.sql','038_domain_order_refunds.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
   Object.assign(f.env, { NAMECOM_ENABLED: 'true', NAME_DOT_COM_USERNAME: 'mainbrella', NAME_DOT_COM_TOKEN: 'fake_token', NAMECOM_MARKUP_BPS: '2000' });
   f.sqlite.prepare('INSERT INTO prepaid_accounts (user_id,stripe_customer_id,created_at) VALUES (?,?,?)').run(TEST_USER, TEST_CUSTOMER, Date.now());
   const state = { price: 10, renewal: 12, available: true, paid: false, premium: false, failCreate: 0, loseCreate: false,
@@ -62,6 +62,25 @@ async function fixture(t: TestContext) {
   const purchased = async () => { const order = await quoted(); const response = await request('/checkout', { orderId: order.id, contact, autoRenew: true, termsAccepted: true }); assert.equal(response.status,200); return order; };
   return { ...f, state, request, quoted, purchased };
 }
+test('refund migration preserves existing orders and reserves domains until refunds finish', async t => {
+  const f = await billingFixture(t);
+  for (const name of ['014_projects.sql', '037_domain_registrar.sql']) {
+    f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
+  }
+  const insert = f.sqlite.prepare(`INSERT INTO domain_orders
+    (id,user_id,domain_name,kind,years,cost_cents,amount_cents,renewal_cents,premium,status,created_at,expires_at)
+    VALUES (?,?,'example.com','registration',1,1000,1200,1440,0,?,1,2)`);
+  insert.run('existing', TEST_USER, 'refunding');
+  const before = f.sqlite.prepare('SELECT * FROM domain_orders WHERE id=?').get('existing');
+  f.sqlite.exec(readFileSync(new URL('../../migrations/038_domain_order_refunds.sql', import.meta.url), 'utf8'));
+  assert.deepEqual({ ...f.sqlite.prepare('SELECT * FROM domain_orders WHERE id=?').get('existing') }, { ...before, refund_id: null });
+  f.sqlite.prepare('UPDATE domain_orders SET refund_id=? WHERE id=?').run('re_existing', 'existing');
+  assert.equal((f.sqlite.prepare('SELECT refund_id FROM domain_orders WHERE id=?').get('existing') as any).refund_id, 're_existing');
+  assert.throws(() => insert.run('competing', TEST_USER, 'checkout'), /UNIQUE constraint failed/);
+  f.sqlite.prepare("UPDATE domain_orders SET status='refunded' WHERE id=?").run('existing');
+  insert.run('competing', TEST_USER, 'checkout');
+  assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM domain_orders').get() as any).count, 2);
+});
 test('domain names exclude URLs, subdomains, IDNs, unsupported registries and invalid prices', () => {
   assert.equal(domainName('EXAMPLE.COM'), 'example.com');
   for (const name of ['https://example.com', 'www.example.com', 'xn--abc.com', 'example.ai', '-example.com', 'example.com/path']) assert.equal(domainName(name), null);
