@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, chmodSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -60,13 +60,34 @@ const configPaths = ['api', 'containers', 'admin', 'marketing'].map(name => {
   delete config.route;
   config.vars = { ...config.vars, LOCAL_DEV: 'true' };
   if (name === 'api') {
+    try {
+      const saved = JSON.parse(readFileSync(`${root}.github-build-local-secrets.json`, 'utf8'));
+      const keys = ['GITHUB_BUILD_CLIENT_ID', 'GITHUB_BUILD_CLIENT_SECRET', 'GITHUB_BUILD_APP_SLUG', 'GITHUB_BUILD_ENCRYPTION_KEY'];
+      if (keys.some(key => typeof saved[key] !== 'string' || !saved[key]) || !/^[A-Za-z0-9-]+$/.test(saved.GITHUB_BUILD_APP_SLUG)
+        || !/^[a-f0-9]{64}$/.test(saved.GITHUB_BUILD_ENCRYPTION_KEY)) throw new Error('Invalid local GitHub Build credentials.');
+      // Wrangler treats .env/.dev.vars values as secrets and masks them in logs.
+      // Preserve the user's other settings and honor .dev.vars precedence.
+      const envFile = `${root}${existsSync(`${root}.dev.vars`) ? '.dev.vars' : '.env'}`;
+      let contents = existsSync(envFile) ? readFileSync(envFile, 'utf8') : '';
+      for (const key of keys) {
+        const line = `${key}=${JSON.stringify(saved[key])}`;
+        const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=.*$`, 'gm');
+        if (pattern.test(contents)) contents = contents.replace(pattern, () => line);
+        else contents += `${contents && !contents.endsWith('\n') ? '\n' : ''}${line}\n`;
+      }
+      writeFileSync(envFile, contents, { mode: 0o600 });
+      chmodSync(envFile, 0o600);
+      console.log('GitHub Build: local app configuration loaded.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw new Error('Could not load .github-build-local-secrets.json. Check the local GitHub app registration.');
+    }
     const portIndex = args.indexOf('--port');
     const port = args.find(arg => arg.startsWith('--port='))?.slice('--port='.length)
       ?? (portIndex >= 0 ? args[portIndex + 1] : undefined) ?? config.dev?.port ?? '8787';
     config.vars = { ...config.vars, PROJECT_HOSTING_ENABLED: 'true', PROJECT_DOMAIN_PROVIDER: 'local', LOCAL_PREVIEW_PORT: String(port) };
   }
   const path = `${root}.wrangler-local-${name}-${process.pid}.jsonc`;
-  writeFileSync(path, JSON.stringify(config, null, 2));
+  writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
   return path;
 });
 const removeConfigs = () => { for (const path of configPaths) { try { unlinkSync(path); } catch {} } };

@@ -101,6 +101,18 @@ Projects if credentials expire or installation permissions change.
 
 ### Setup
 
+For local testing, run `npm run github:register-build -- --local` in `backend`
+and open the printed registration URL while signed in to the app's owning GitHub
+organization. This keeps the name **Mainbrella Build**, sets both installation
+and authorization returns to `http://localhost:8787`, and saves credentials in
+the ignored `.github-build-local-secrets.json` with mode `0600`. Restart
+`npm run dev`; it merges these settings into the local `.env` (or `.dev.vars`
+when present), preserving other settings and masking secrets in Wrangler logs,
+and applies local
+migrations. `GET /github/build/config` should then return `{"enabled":true}`.
+Local registration cannot use `--provision`. Use a development registration for
+local tests; a GitHub App's setup URL points to one environment at a time.
+
 Run `npm run github:register-build` in `backend` and open the local registration
 URL printed by the command while signed in to the GitHub organization that owns
 the new app. This creates **Mainbrella Build**, without editing Import. Credentials

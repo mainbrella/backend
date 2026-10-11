@@ -11,3 +11,12 @@ test('Build registration requests repository contents write without workflow per
   assert.equal(manifest.setup_url, 'https://api.mainbrella.com/github/build/setup');
   assert.equal('workflows' in manifest.default_permissions, false);
 });
+
+test('local Build registration keeps the app name and returns installation and OAuth to localhost', () => {
+  const manifest = buildAppManifest('http://127.0.0.1:43188/callback', { local: true });
+  assert.equal(manifest.name, 'Mainbrella Build');
+  assert.deepEqual(manifest.callback_urls, ['http://localhost:8787/github/build/callback']);
+  assert.equal(manifest.setup_url, 'http://localhost:8787/github/build/setup');
+  assert.equal(manifest.request_oauth_on_install, false);
+  assert.deepEqual(manifest.default_permissions, { contents: 'write', metadata: 'read' });
+});

@@ -7,11 +7,16 @@ import { spawn } from 'node:child_process';
 import { serialize } from 'node:v8';
 import { DatabaseSync } from 'node:sqlite';
 
-async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787', aiArgs = [], codexFail = false } = {}) {
+async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787', aiArgs = [], codexFail = false, githubLocal = false, devVars = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'bin', 'node_modules/.bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+  const localSecrets = { GITHUB_BUILD_CLIENT_ID: 'local-client', GITHUB_BUILD_CLIENT_SECRET: 'local-secret', GITHUB_BUILD_APP_SLUG: 'mainbrella-build', GITHUB_BUILD_ENCRYPTION_KEY: 'a'.repeat(64) };
+  if (githubLocal) writeFileSync(join(root, '.github-build-local-secrets.json'), JSON.stringify(localSecrets));
+  const existingEnv = '# Preserve existing settings\nSTRIPE_SECRET_KEY="stripe-test-key"\n';
+  writeFileSync(join(root, '.env'), existingEnv);
+  if (devVars) writeFileSync(join(root, '.dev.vars'), `${existingEnv}GITHUB_BUILD_CLIENT_SECRET="old-local-secret"\n`);
   copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
   for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs', 'codex-bridge.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
   writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }], ai: { binding: 'AI' }, compatibility_flags: ['nodejs_compat', 'global_fetch_strictly_public'] }));
@@ -46,6 +51,8 @@ if (args[0] === 'd1' && args[1] === 'migrations' && args[2] === 'apply') {
   process.exit(process.env.FAIL_LOCAL_MIGRATION === args[3] ? 9 : 0);
 }
 const configs = args.flatMap((v, i) => v === '--config' ? [JSON.parse(fs.readFileSync(args[i+1]))] : []);
+const configModes = args.flatMap((v, i) => v === '--config' ? [fs.statSync(args[i+1]).mode & 0o777] : []);
+fs.writeFileSync('config-modes.json', JSON.stringify(configModes));
 fs.writeFileSync('configs.json', JSON.stringify(configs));
 fs.writeFileSync('args.json', JSON.stringify(args));
 fs.writeFileSync('docker-state.json', JSON.stringify([${JSON.stringify(proxy)}]));
@@ -90,6 +97,18 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
   assert.equal(apiConfig.vars.PROJECT_HOSTING_ENABLED, 'true');
   assert.equal(apiConfig.vars.PROJECT_DOMAIN_PROVIDER, 'local');
   assert.equal(apiConfig.vars.LOCAL_PREVIEW_PORT, expectedPort);
+  if (githubLocal) {
+    for (const [key, value] of Object.entries(localSecrets)) {
+      assert.equal(apiConfig.vars[key], undefined);
+      assert.equal(containerConfig.vars[key], undefined);
+      assert.ok(readFileSync(join(root, devVars ? '.dev.vars' : '.env'), 'utf8').includes(`${key}=${JSON.stringify(value)}\n`));
+    }
+    assert.ok(readFileSync(join(root, devVars ? '.dev.vars' : '.env'), 'utf8').startsWith(existingEnv));
+    if (devVars) assert.equal(readFileSync(join(root, '.env'), 'utf8'), existingEnv);
+    assert.equal(output.includes(localSecrets.GITHUB_BUILD_CLIENT_SECRET), false);
+    assert.equal(output.includes(localSecrets.GITHUB_BUILD_ENCRYPTION_KEY), false);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'config-modes.json'))), [0o600, 0o600, 0o600, 0o600]);
+  }
   assert.equal(containerConfig.vars.PROJECT_HOSTING_ENABLED, undefined);
   assert.equal(containerConfig.vars.PROJECT_DOMAIN_PROVIDER, undefined);
   assert.equal(containerConfig.vars.LOCAL_PREVIEW_PORT, undefined);
@@ -145,4 +164,8 @@ test('opt-in Codex launcher starts and stops the bridge for Wrangler exit, failu
 });
 test('Codex startup failure removes configs and prevents Wrangler startup', { timeout: 10_000 }, async t => {
   await run(t, { aiArgs: ['--ai=codex'], codexFail: true });
+});
+test('dev launcher loads local GitHub secrets without logging values and preserves existing env settings', { timeout: 10_000 }, async t => {
+  await run(t, { githubLocal: true });
+  await run(t, { githubLocal: true, devVars: true });
 });

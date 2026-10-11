@@ -12,3 +12,6 @@ __pycache__/
 /ingress/.env
 .github-import-secrets.json
 .github-build-secrets.json
+.github-build-local-secrets.json
+/.env
+/.dev.vars
