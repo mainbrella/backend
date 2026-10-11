@@ -1,4 +1,5 @@
 import { BuildError } from './build-contract';
+import { repoName } from './repo-launch';
 
 export interface GithubBuildCredentials { access_token: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number }
 interface Connection { credentials: string; expires_at: number; github_user_id: string; github_login: string }
@@ -95,6 +96,34 @@ export async function githubBuildAPI(path: string, token: string, method = 'GET'
   if (!response.ok) throw new BuildError('github_unavailable');
   return data;
 }
+
+export const validGithubRepositoryCursor = (value: string) => /^[1-9]\d{0,5}:(?:[0-9]|[1-9][0-9]):[1-9]\d{0,5}$/.test(value);
+export async function githubBuildRepositories(env: Env, userId: string, cursor = '1:0:1') {
+  const token = await githubBuildUserToken(env, userId);
+  const [installationPage, installationIndex, repositoryPage] = cursor.split(':').map(Number);
+  const data = await githubBuildAPI(`/user/installations?per_page=100&page=${installationPage}`, token);
+  if (!Array.isArray(data?.installations)) throw new BuildError('github_unavailable');
+  const installations = data.installations;
+  const nextInstallation = (index: number) => index < installations.length ? `${installationPage}:${index}:1`
+    : installations.length === 100 ? `${installationPage + 1}:0:1` : null;
+  for (let index = installationIndex; index < installations.length; index++) {
+    const installation = installations[index];
+    // User access tokens expose only the intersection of this app's and the
+    // user's access. Also exclude installations without Contents write access.
+    if (installation.app_slug !== env.GITHUB_BUILD_APP_SLUG || installation.suspended_at
+      || installation.permissions?.contents !== 'write') continue;
+    if (!Number.isSafeInteger(installation.id) || installation.id <= 0) throw new BuildError('github_unavailable');
+    const page = index === installationIndex ? repositoryPage : 1;
+    const result = await githubBuildAPI(`/user/installations/${installation.id}/repositories?per_page=100&page=${page}`, token);
+    if (!Array.isArray(result?.repositories)) throw new BuildError('github_unavailable');
+    const repositories = result.repositories.filter((repo: any) => repo.permissions?.push === true && !repo.archived && !repo.disabled
+      && Number.isSafeInteger(repo.id) && repoName.safeParse(repo.full_name).success && validGithubBranch(repo.default_branch))
+      .map((repo: any) => ({ id: repo.id as number, fullName: repo.full_name as string, defaultBranch: repo.default_branch as string, private: repo.private === true }));
+    return { repositories, nextCursor: result.repositories.length === 100 ? `${installationPage}:${index}:${page + 1}` : nextInstallation(index + 1) };
+  }
+  return { repositories: [], nextCursor: installations.length === 100 ? `${installationPage + 1}:0:1` : null };
+}
+
 
 export async function exchangeGithubBuildCode(env: Env, values: Record<string, string>) { return exchangeToken(env, values); }
 export async function sealGithubBuildCredentials(env: Env, owner: string, credentials: GithubBuildCredentials) { return sealCredentials(env, owner, credentials); }

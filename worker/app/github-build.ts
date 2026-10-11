@@ -1,6 +1,7 @@
 import { authCorsHeaders, authJson, currentUser, hashToken, randomToken, readJSON } from './auth-core';
 import { BuildError } from '../lib/build-contract';
-import { exchangeGithubBuildCode, githubBuildAPI, githubBuildCallbackURL, githubBuildConfigured, githubBuildPKCEChallenge, sealGithubBuildCredentials } from '../lib/github-build';
+import { exchangeGithubBuildCode, githubBuildAPI, githubBuildCallbackURL, githubBuildConfigured, githubBuildPKCEChallenge, sealGithubBuildCredentials,
+  githubBuildRepositories, validGithubRepositoryCursor } from '../lib/github-build';
 import { validGithubBranch } from '../lib/github-build';
 import { repoName } from '../lib/repo-launch';
 
@@ -23,6 +24,12 @@ function returnURL(state: State, result: string) {
   return url.href;
 }
 const redirect = (url: string) => new Response(null, { status: 302, headers: { Location: url, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
+async function authorizeURL(env: Env, pending: { token: string; verifier: string }) {
+  const authorize = new URL('https://github.com/login/oauth/authorize');
+  authorize.search = new URLSearchParams({ client_id: env.GITHUB_BUILD_CLIENT_ID!, redirect_uri: githubBuildCallbackURL(env), state: pending.token,
+    code_challenge: await githubBuildPKCEChallenge(pending.verifier), code_challenge_method: 'S256' }).toString();
+  return authorize.href;
+}
 
 export async function handleGithubBuildRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -30,7 +37,7 @@ export async function handleGithubBuildRequest(request: Request, env: Env): Prom
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), route = url.pathname;
   const methods: Record<string, string[]> = { '/github/build/config': ['GET'], '/github/build/connect': ['POST'],
-    '/github/build/connection': ['GET'], '/github/build/callback': ['GET'], '/github/build/setup': ['GET'] };
+    '/github/build/connection': ['GET'], '/github/build/repositories': ['GET'], '/github/build/callback': ['GET'], '/github/build/setup': ['GET'] };
   if (!methods[route]) return authJson({ error: 'not_found' }, 404, cors);
   if (!methods[route].includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: methods[route].join(', ') });
   const configured = githubBuildConfigured(env);
@@ -41,6 +48,12 @@ export async function handleGithubBuildRequest(request: Request, env: Env): Prom
   try {
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    if (route === '/github/build/repositories') {
+      const cursor = url.searchParams.get('cursor') ?? '1:0:1';
+      if (!validGithubRepositoryCursor(cursor) || url.searchParams.getAll('cursor').length > 1
+        || [...url.searchParams.keys()].some(key => key !== 'cursor')) throw new BuildError('invalid_request', 400);
+      return authJson(await githubBuildRepositories(env, user.id, cursor), 200, cors);
+    }
     if (route === '/github/build/connection') {
       const connection = await env.DB.prepare('SELECT github_login FROM github_build_connections WHERE user_id = ?').bind(user.id).first<{ github_login: string }>();
       return authJson({ connected: Boolean(connection), login: connection?.github_login ?? null,
@@ -48,36 +61,35 @@ export async function handleGithubBuildRequest(request: Request, env: Env): Prom
     }
     if (route === '/github/build/connect') {
       const body = await readJSON(request, 4096);
-      const repo = repoName.safeParse(body?.repo);
+      const repo = body?.repo === undefined ? null : repoName.safeParse(body.repo);
       if (!body || Object.keys(body).some(key => !['projectId', 'repo', 'branch', 'returnTo', 'reauthorize'].includes(key))
-        || typeof body.projectId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.projectId) || !repo.success
+        || typeof body.projectId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.projectId) || repo && !repo.success
+        || !repo && body.branch !== undefined
         || body.branch !== undefined && !validGithubBranch(body.branch)
         || body.returnTo !== undefined && (typeof body.returnTo !== 'string' || !body.returnTo.startsWith('/projects/') || body.returnTo.startsWith('//'))
         || body.reauthorize !== undefined && typeof body.reauthorize !== 'boolean') throw new BuildError('invalid_request', 400);
       if (!await projectOwned(env, body.projectId, user.id)) throw new BuildError('project_not_found', 404);
       const origin = new URL(request.headers.get('Origin')!).origin;
       const branch = (body.branch as string | undefined) ?? 'main';
+      const repository = repo?.success ? repo.data : '';
       const destination = new URL(typeof body.returnTo === 'string' ? body.returnTo : '/projects/', origin);
-      const hasReturnFields = ['githubProject', 'githubRepo', 'githubBranch'].some(key => destination.searchParams.has(key));
       if (destination.origin !== origin || destination.pathname !== '/projects/' || destination.hash
         || [...destination.searchParams.keys()].some(key => !['githubProject', 'githubRepo', 'githubBranch'].includes(key))
         || ['githubProject', 'githubRepo', 'githubBranch'].some(key => destination.searchParams.getAll(key).length > 1)
-        || hasReturnFields && (['githubProject', 'githubRepo', 'githubBranch'].some(key => destination.searchParams.getAll(key).length !== 1)
-          || destination.searchParams.get('githubProject') !== body.projectId || destination.searchParams.get('githubRepo') !== repo.data
-          || destination.searchParams.get('githubBranch') !== branch))
+        || destination.searchParams.has('githubProject') && destination.searchParams.get('githubProject') !== body.projectId
+        || (destination.searchParams.has('githubRepo') || destination.searchParams.has('githubBranch'))
+          && (!repository || destination.searchParams.get('githubRepo') !== repository || destination.searchParams.get('githubBranch') !== branch))
         throw new BuildError('invalid_request', 400);
       destination.searchParams.set('githubProject', body.projectId);
-      destination.searchParams.set('githubRepo', repo.data);
-      destination.searchParams.set('githubBranch', branch);
+      if (repository) {
+        destination.searchParams.set('githubRepo', repository);
+        destination.searchParams.set('githubBranch', branch);
+      }
       const connected = !body.reauthorize && await env.DB.prepare('SELECT user_id FROM github_build_connections WHERE user_id = ?').bind(user.id).first();
-      const values = { user_id: user.id, project_id: body.projectId, repo: repo.data, branch,
-        return_origin: origin, return_path: destination.pathname + destination.search, kind: connected ? 'install' as const : 'authorize' as const };
+      const values = { user_id: user.id, project_id: body.projectId, repo: repository, branch,
+        return_origin: origin, return_path: destination.pathname + destination.search, kind: !repository || connected ? 'install' as const : 'authorize' as const };
       const pending = await newState(env, values);
-      if (connected) return authJson({ url: installURL(env, pending.token) }, 200, cors);
-      const authorize = new URL('https://github.com/login/oauth/authorize');
-      authorize.search = new URLSearchParams({ client_id: env.GITHUB_BUILD_CLIENT_ID!, redirect_uri: githubBuildCallbackURL(env), state: pending.token,
-        code_challenge: await githubBuildPKCEChallenge(pending.verifier), code_challenge_method: 'S256' }).toString();
-      return authJson({ url: authorize.href }, 200, cors);
+      return authJson({ url: values.kind === 'install' ? installURL(env, pending.token) : await authorizeURL(env, pending) }, 200, cors);
     }
     const token = url.searchParams.get('state');
     if (!token || !/^[a-f0-9]{64}$/.test(token)) throw new BuildError('invalid_github_state', 400);
@@ -87,7 +99,13 @@ export async function handleGithubBuildRequest(request: Request, env: Env): Prom
     if (!state || !await projectOwned(env, state.project_id, user.id)) throw new BuildError('invalid_github_state', 400);
     if (route === '/github/build/setup') {
       // GitHub's installation ID is informational. Repository rights are checked with the stored user token by each operation.
-      return redirect(returnURL(state, url.searchParams.get('setup_action') === 'request' ? 'approval_pending' : 'connected'));
+      if (url.searchParams.get('setup_action') === 'request') return redirect(returnURL(state, 'approval_pending'));
+      if (!state.repo) {
+        const pending = await newState(env, { user_id: state.user_id, project_id: state.project_id, repo: '', branch: state.branch,
+          return_origin: state.return_origin, return_path: state.return_path, kind: 'authorize' });
+        return redirect(await authorizeURL(env, pending));
+      }
+      return redirect(returnURL(state, 'connected'));
     }
     const code = url.searchParams.get('code');
     if (url.searchParams.has('error') || !code || code.length > 256) return redirect(returnURL(state, 'cancelled'));
@@ -96,6 +114,7 @@ export async function handleGithubBuildRequest(request: Request, env: Env): Prom
     if (!Number.isSafeInteger(profile?.id) || typeof profile.login !== 'string') throw new BuildError('github_unavailable');
     await env.DB.prepare('INSERT INTO github_build_connections (user_id, github_user_id, github_login, credentials, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET github_user_id = excluded.github_user_id, github_login = excluded.github_login, credentials = excluded.credentials, expires_at = excluded.expires_at, refresh_lock = NULL, refresh_until = 0')
       .bind(user.id, String(profile.id), profile.login, await sealGithubBuildCredentials(env, user.id, credentials), Date.now() + (credentials.expires_in ?? 28_800) * 1000).run();
+    if (!state.repo) return redirect(returnURL(state, 'connected'));
     const pending = await newState(env, { user_id: state.user_id, project_id: state.project_id, repo: state.repo, branch: state.branch,
       return_origin: state.return_origin, return_path: state.return_path, kind: 'install' });
     return redirect(installURL(env, pending.token));

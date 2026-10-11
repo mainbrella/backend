@@ -8,7 +8,7 @@ const endpointMethods: Record<string, string[]> = {
   '/github/import/config': ['get'], '/github/import/connect': ['post'], '/github/import/connection': ['get', 'delete'],
   '/github/import/callback': ['get'], '/github/import/setup': ['get'],
   '/github/build/config': ['get'], '/github/build/connect': ['post'], '/github/build/connection': ['get'],
-  '/github/build/callback': ['get'], '/github/build/setup': ['get'], '/projects/github': ['get', 'put'],
+  '/github/build/callback': ['get'], '/github/build/setup': ['get'], '/github/build/repositories': ['get'], '/projects/github': ['get', 'put'],
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
