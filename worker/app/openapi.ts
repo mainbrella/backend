@@ -7,6 +7,7 @@ import { registerAPIKeyRoutes } from "./openapi-api-keys";
 import { registerProjectRoutes } from "./openapi-projects";
 import { registerProjectHostingRoutes } from './openapi-project-hosting';
 import { registerAdminRoutes } from "./openapi-admin";
+import { registerMarketingEmailRoutes } from "./openapi-marketing-email";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
 import { registerCommandRoutes } from "./openapi-commands";
@@ -60,6 +61,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);
+  registerMarketingEmailRoutes(api, handler);
   registerAccountingRoutes(api, handler);
   registerCapabilityRoutes(api, handler);
   registerActivityRoutes(api, handler);

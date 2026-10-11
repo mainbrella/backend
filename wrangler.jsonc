@@ -46,7 +46,8 @@
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
 	},
 	"send_email": [
-		{ "name": "WELCOME_EMAIL", "allowed_sender_addresses": ["andrew@mainbrella.com"] }
+		{ "name": "WELCOME_EMAIL", "allowed_sender_addresses": ["andrew@mainbrella.com"] },
+		{ "name": "MARKETING_EMAIL" }
 	],
 	"d1_databases": [
 		{

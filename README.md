@@ -143,6 +143,41 @@ Production sends run through `ctx.waitUntil`; failures are logged as
 `welcome_email_failed` and do not prevent signup. Delivery is best effort with
 no automatic retries. Local Wrangler development simulates sending.
 
+## Marketing emails
+
+`POST /api/send-marketing-email` requires the Raindrop admin's current browser
+session (`oneone@gmail.com`) and a trusted `Origin` header. For example, call
+from Raindrop with `credentials: 'include'`:
+
+```ts
+await fetch(`${API_ORIGIN}/api/send-marketing-email`, {
+  method: 'POST',
+  credentials: 'include',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    to: 'foo@bar.com',
+    subj: 'New idea',
+    from: 'Bob Smith <bob.smith@mainbrella.com>',
+    message: 'hey everyone just want to say hi',
+  }),
+});
+```
+
+The `MARKETING_EMAIL` Workers binding sends directly through Cloudflare Email
+Sending, without an account-ID environment variable or API token. The sender
+domain must be onboarded to Email Sending. Bare sender addresses and display
+names are supported. Edit the HTML header and footer in
+`worker/templates/marketing-email.ts`; the plain-text message is escaped and
+inserted between them, preserving line breaks. A plain-text email part is also
+sent. Subjects are limited to 998 characters, messages to 100,000 characters,
+and JSON request bodies to 1 MiB.
+
+The endpoint awaits acceptance and returns HTTP 202 with
+`{ "ok": true, "messageId": "..." }`; acceptance does not confirm inbox delivery.
+Invalid requests return 400, oversized bodies 413, provider rate/quota limits
+429, send failures 502, and an unavailable binding 503. No automatic retries
+are performed. Local Wrangler development simulates sending.
+
 ## Verification
 
 ```sh
