@@ -1,5 +1,6 @@
 // This program runs with native Git on local container disk. Its snapshot is
 // supplied by the Worker, independently of application scripts and Git config.
+export const BUILD_GIT_MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const buildGitProgram = String.raw`
 const fs = require('node:fs');
 const path = require('node:path');
@@ -36,6 +37,12 @@ function reusable() {
 }
 function remember(commitId) {
   fs.writeFileSync(marker, JSON.stringify({ identity: input.identity, commitId }));
+}
+if (input.action === 'publish') {
+  if (!reusable()) throw new Error('Hydrated repository changed');
+  installGit();
+  process.stdout.write(JSON.stringify({ ok: true }));
+  process.exit(0);
 }
 if (input.action === 'check') {
   process.stdout.write(JSON.stringify({ reusable: reusable() }));
@@ -87,7 +94,9 @@ if (input.action === 'hydrate') {
   for (const name of input.paths) {
     if (path.isAbsolute(name) || name.split('/').some(part => !part || part === '.' || part === '..' || part === '.git')) throw new Error('Invalid snapshot path');
     const source = path.join(base, 'snapshot', name);
-    if (!fs.lstatSync(source).isFile()) throw new Error('Invalid snapshot file');
+    const stat = fs.lstatSync(source);
+    if (!stat.isFile()) throw new Error('Invalid snapshot file');
+    if (stat.size > ${BUILD_GIT_MAX_FILE_BYTES}) throw new Error('build_git_file_limit: ' + name + ' exceeds 25 MiB');
     const destination = path.join(repo, name);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(source, destination);
@@ -97,7 +106,6 @@ if (input.action === 'hydrate') {
   const commitId = git(['rev-parse','HEAD']).stdout.trim();
   if (commitId === input.parent?.commitId) {
     remember(commitId);
-    installGit();
     process.stdout.write(JSON.stringify({ commitId, unchanged: true }));
     process.exit(0);
   }
@@ -124,7 +132,6 @@ if (input.action === 'hydrate') {
     }
   } finally { fs.closeSync(fd); }
   remember(commitId);
-  installGit();
   process.stdout.write(JSON.stringify({ commitId, size, parts }));
 }
 `;

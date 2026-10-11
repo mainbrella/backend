@@ -419,3 +419,14 @@ test('production schemas document lifecycle, startup commands, stopped services 
   assert.ok(network.get.parameters.some((parameter: any) => parameter.name === 'lifecycle'));
   assert.deepEqual(network.post.requestBody.content['application/json'].schema.properties.lifecycle.enum, ['ad_hoc', 'production']);
 });
+
+
+test('Build commit schemas document the file limit and complete prepaid storage funding', async () => {
+  const { paths } = await document();
+  const turns = paths['/build/apps/{appId}/turns'].post;
+  assert.match(turns.description, /25 MiB \(26,214,400 uncompressed bytes\)/);
+  assert.match(turns.description, /storage_funding_required/);
+  assert.match(turns.description, /build_git_file_limit/);
+  assert.match(turns.description, /seven-day retention/);
+  assert.match(paths['/build/apps/{appId}/restore'].post.description, /storage_funding_required/);
+});

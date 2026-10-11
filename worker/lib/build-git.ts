@@ -1,10 +1,10 @@
-import { putStoredObject, getStoredObject, listStoredObjects, deleteStoredObjects, storageMetered, acquireStorageLock, releaseStorageLock } from './r2-storage';
+import { putStoredObject, getStoredObject, listStoredObjects, deleteStoredObjects, storageMetered, acquireStorageLock, releaseStorageLock, reserveStorageCommit } from './r2-storage';
 import { BuildError, ownedBuildApp, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
 import { buildImageBytes, buildImagePath, savedBuildImages, buildImageEntries } from './build-images';
-import { buildGitProgram } from './build-git-program';
+import { buildGitProgram, BUILD_GIT_MAX_FILE_BYTES } from './build-git-program';
 import { buildGitPrefix, gitCommitId, readBuildGitChain, validateBuildGitBundle, type BuildGitBundle, type BuildGitPart } from './build-git-bundle';
 import { exportBuildGitBundles } from './build-git-export';
-import { storeBuildSource, storeBuildText, storeBuildObject, buildSourceEntries, buildTextEntry, buildObjectRef, type BuildStorageOwner, type BuildStoredFile } from './build-storage';
+import { storeBuildSource, storeBuildText, storeBuildObject, buildSourceEntries, buildTextEntry, buildObjectRef, buildObjectReference, buildSourceManifest, type BuildStorageOwner, type BuildStoredFile } from './build-storage';
 
 export const BUILD_GIT_ROOT = '/workspace/mainbrella-git';
 export const BUILD_GIT_IGNORE = 'node_modules/\ndist/\n.env\n.env.*\n';
@@ -85,6 +85,10 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
   const source = Object.values(files).join('\n');
   const assets = (await savedBuildImages(env, params.appId)).filter(image => source.includes(buildImagePath(image.id)));
   for (const image of assets) snapshot[`public${buildImagePath(image.id)}`] = buildImageBytes(image.data);
+  for (const [path, content] of Object.entries(snapshot)) {
+    const size = typeof content === 'string' ? new TextEncoder().encode(content).length : content.byteLength;
+    if (size > BUILD_GIT_MAX_FILE_BYTES) throw new BuildError('build_git_file_limit', 413, `${path} exceeds 25 MiB`);
+  }
   const paths = Object.keys(snapshot).sort();
   // The snapshot path is controlled by the Worker; no untracked container files enter Git.
   const directories = [...new Set(paths.filter(path => path.includes('/')).map(path => `${BUILD_GIT_ROOT}/snapshot/${path.slice(0, path.lastIndexOf('/'))}`))];
@@ -97,16 +101,32 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
     reuse: bundle.reuse, identity: params, paths, message,
     date: turn.created_at, force: Boolean(turn.restore_version_id), worktree: '/workspace/app' }));
   const result = await runtime.run('git-commit', `node ${BUILD_GIT_ROOT}/git.cjs ${BUILD_GIT_ROOT}/input.json`);
-  if (result.status !== 'succeeded') throw new BuildError('build_git_unavailable', 503, result.stderr);
+  if (result.status !== 'succeeded') throw new BuildError(result.stderr.includes('build_git_file_limit:') ? 'build_git_file_limit' : 'build_git_unavailable', result.stderr.includes('build_git_file_limit:') ? 413 : 503, result.stderr);
   const output = JSON.parse(result.stdout) as { commitId: string; unchanged?: boolean; size: number; parts: Omit<BuildGitPart, 'key'>[] };
   if (!gitCommitId(output.commitId) || output.unchanged && output.commitId !== parent?.commit_id) throw new BuildError('build_git_unavailable');
   const history = output.unchanged ? null : validateBuildGitBundle(params, { schemaVersion: 2, commitId: output.commitId,
     prerequisiteCommitId: parent?.commit_id ?? null, previousBundleKey: bundle.bundleKey,
     size: output.size, parts: output.parts?.map(part => ({ ...part, key: `${buildGitPrefix(params)}parts/${part.sha256}` })) });
+  const bundleKey = history ? `${buildGitPrefix(params)}bundles/${output.commitId}.json` : bundle.bundleKey!;
+  const manifest = await buildSourceManifest(params, files);
+  const refs = [...manifest.entries, await buildObjectReference(params, manifest.bytes)];
+  for (const [path, content] of Object.entries(snapshot)) if (path === 'package-lock.json' || path === '.gitignore' || content instanceof Uint8Array)
+    refs.push(await buildObjectReference(params, typeof content === 'string' ? new TextEncoder().encode(content) : content));
+  const objects = [...refs.map(ref => ({ key: ref.$r2, size: ref.size })), ...(history?.parts ?? [])];
+  if (history) objects.push({ key: bundleKey, size: new TextEncoder().encode(JSON.stringify(history)).length });
+  const fundCommit = async (writes = objects.length) => {
+    try { await reserveStorageCommit(env, params, objects, writes); }
+    catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      const unfunded = ['storage_funding_required', 'insufficient_balance', 'spend_limit_exceeded'].includes(code);
+      throw new BuildError(unfunded ? 'storage_funding_required' : 'build_billing_unavailable', unfunded ? 402 : 503);
+    }
+  };
   await runtime.persist('Persist Git bundle', async () => {
     // A Workflow step retries this callback, not the surrounding function. D1
     // may have committed before its response was lost, so reconcile on every attempt.
     if (await buildGitVersion(env, params.appId, params.turnId)) return;
+    await fundCommit();
     const source = await storeBuildSource(env, params, files);
     const storedLockfile = lockfile === null ? null : await storeBuildText(env, params, lockfile, 'source');
     for (const [path, content] of Object.entries(snapshot)) if (path === '.gitignore' || content instanceof Uint8Array)
@@ -119,9 +139,11 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
       if (bytes.byteLength !== part.size || hash !== part.sha256) throw new BuildError('build_git_unavailable');
       await putStoredObject(env, params, part.key, bytes, 'history', { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
     }
-    const bundleKey = history ? `${buildGitPrefix(params)}bundles/${output.commitId}.json` : bundle.bundleKey!;
     if (history) await putStoredObject(env, params, bundleKey, JSON.stringify(history), 'history',
       { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
+    // Refresh the complete hold after per-object reservations and before accepting
+    // the head; other account usage may have consumed funds during the uploads.
+    await fundCommit(0);
     // Publish the database head only after all immutable R2 objects exist.
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO build_git_versions (id, app_id, parent_version_id, commit_id, bundle_key, source_json, lockfile, assets_json, message, verified, created_at)
@@ -130,7 +152,15 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
       env.DB.prepare('UPDATE build_apps SET git_version_id = ? WHERE id = ? AND user_id = ? AND active_turn_id = ? AND git_version_id IS ?')
         .bind(params.turnId, params.appId, params.userId, params.turnId, app.git_version_id ?? null),
     ]);
+  }).catch(error => {
+    if (error instanceof Error && ['storage_funding_required', 'insufficient_balance', 'spend_limit_exceeded'].includes(error.message))
+      throw new BuildError('storage_funding_required', 402);
+    throw error;
   });
+  await runtime.write(`${BUILD_GIT_ROOT}/input.json`, JSON.stringify({ action: 'publish', identity: params,
+    parent: { commitId: output.commitId }, worktree: '/workspace/app' }));
+  const published = await runtime.run('git-publish', `node ${BUILD_GIT_ROOT}/git.cjs ${BUILD_GIT_ROOT}/input.json`);
+  if (published.status !== 'succeeded') throw new BuildError('build_git_unavailable', 503, published.stderr);
   return (await buildGitVersion(env, params.appId, params.turnId))!;
 }
 export async function buildGitEntries(env: Env, owner: BuildStorageOwner, version: BuildGitVersion): Promise<BuildStoredFile[]> {

@@ -19,9 +19,19 @@ export function buildObjectRef(value: unknown): BuildObjectRef | null {
 function checkRef(owner: BuildStorageOwner, ref: BuildObjectRef) {
   if (ref.$r2 !== `${buildStoragePrefix(owner)}objects/${ref.sha256}`) throw new BuildError('build_source_unavailable');
 }
+export async function buildObjectReference(owner: BuildStorageOwner, bytes: Uint8Array<ArrayBuffer>): Promise<BuildObjectRef> {
+  const sha256 = await buildContentHash(bytes);
+  return { $r2: `${buildStoragePrefix(owner)}objects/${sha256}`, size: bytes.length, sha256 };
+}
+export async function buildSourceManifest(owner: BuildStorageOwner, files: BuildFiles) {
+  const entries: BuildStoredFile[] = [];
+  for (const [path, text] of Object.entries(files).sort(([a], [b]) => a.localeCompare(b)))
+    entries.push({ path, type: 'text', ...await buildObjectReference(owner, encoder.encode(text)) });
+  return { entries, bytes: encoder.encode(JSON.stringify({ schemaVersion: 1, files: entries })) };
+}
 export async function storeBuildObject(env: Env, owner: BuildStorageOwner, bytes: Uint8Array<ArrayBuffer>, contentType = 'text/plain; charset=utf-8', purpose: StoragePurpose = contentType.startsWith('image/') ? 'assets' : 'source'): Promise<BuildObjectRef> {
   if (!env.BUCKET) throw new BuildError('build_source_unavailable');
-  const sha256 = await buildContentHash(bytes), ref = { $r2: `${buildStoragePrefix(owner)}objects/${sha256}`, size: bytes.length, sha256 };
+  const ref = await buildObjectReference(owner, bytes), sha256 = ref.sha256;
   try {
     await putStoredObject(env, owner, ref.$r2, bytes, purpose, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } });
   } catch (error) {
@@ -51,10 +61,9 @@ export async function readBuildText(env: Env, owner: BuildStorageOwner, stored: 
   return ref ? new TextDecoder().decode(await readBuildObject(env, owner, ref)) : stored;
 }
 export async function storeBuildSource(env: Env, owner: BuildStorageOwner, files: BuildFiles) {
-  const sorted = Object.entries(files).sort(([a], [b]) => a.localeCompare(b));
-  const entries: BuildStoredFile[] = [];
-  for (const [path, text] of sorted) entries.push({ path, type: 'text', ...await storeBuildObject(env, owner, encoder.encode(text)) });
-  return JSON.stringify(await storeBuildObject(env, owner, encoder.encode(JSON.stringify({ schemaVersion: 1, files: entries })), 'application/json'));
+  const manifest = await buildSourceManifest(owner, files);
+  for (const entry of manifest.entries) await storeBuildObject(env, owner, encoder.encode(files[entry.path]));
+  return JSON.stringify(await storeBuildObject(env, owner, manifest.bytes, 'application/json'));
 }
 export async function buildSourceEntries(env: Env, owner: BuildStorageOwner, stored: string): Promise<(BuildStoredFile & { inline?: string })[]> {
   const parsed = JSON.parse(stored), ref = buildObjectRef(parsed);

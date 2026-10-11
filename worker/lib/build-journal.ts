@@ -123,6 +123,8 @@ export function operationExplanation(row: OperationRow): string | null {
     build_billing_unavailable: 'Funding could not be verified. No provider request was sent.',
     build_billing_reconciliation_required: 'Provider usage could not be confirmed. The funding hold is retained for reconciliation.',
     build_usage_storage_unavailable: 'Provider usage was observed, but could not be saved for billing. Execution stopped; accounting can retry independently.',
+    build_git_file_limit: 'A repository file exceeds the 25 MiB limit. The commit was rejected.',
+    storage_funding_required: 'Available credit could not cover storage for this commit. The commit was rejected.',
     build_image_invalid: 'The image provider returned an invalid image.',
   };
   if (failure && reasons[failure.code]) return reasons[failure.code];

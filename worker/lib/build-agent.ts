@@ -428,7 +428,7 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     const code = error instanceof BuildError ? error.message : error instanceof Error && error.message === 'subscription_required' ? 'subscription_required' : 'build_failed';
     const details = (error instanceof BuildError ? error.details : error instanceof Error ? error.message : typeof error === 'string' ? error : '')?.trim().slice(0, 4000);
     console.error('build_turn_failed', { appId: params.appId, turnId: params.turnId, error: code });
-    if (env.BUCKET && currentTurn && code !== 'build_git_unavailable') {
+    if (env.BUCKET && currentTurn && !['build_git_unavailable', 'build_git_file_limit', 'storage_funding_required', 'build_billing_unavailable'].includes(code)) {
       try {
         const app = await ownedBuildApp(env, params.userId, params.appId);
         const files = app ? await readBuildSource(env, params, app.source_json) : null;

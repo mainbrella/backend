@@ -11,6 +11,7 @@ import { handleBuildRequest } from './build';
 import { runBuildAgent } from '../lib/build-agent';
 import { BUILD_MODEL, buildStarter, type BuildAppRow, type BuildFiles, type BuildParams, type BuildTurnRow } from '../lib/build-contract';
 import { BUILD_GIT_ROOT, buildGitVersion, exportBuildGit, hydrateBuildGit, saveBuildGitVersion, type BuildGitRuntime } from '../lib/build-git';
+import { BUILD_GIT_MAX_FILE_BYTES, buildGitProgram } from '../lib/build-git-program';
 import { buildImagePath } from '../lib/build-images';
 import { readBuildSource, readBuildText, storeBuildObject } from '../lib/build-storage';
 import { putStoredObject } from '../lib/r2-storage';
@@ -23,7 +24,8 @@ async function fixture(t: TestContext) {
   for (const name of ['023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql',
     '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql'])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'));
-  await buildBillingFixture(f.env, f.sqlite, USER_ONE);
+  const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
+  f.sqlite.prepare("INSERT INTO r2_meter_state(id,value) VALUES('inventory_complete',?)").run(String(Date.now()));
   // D1 batches commit atomically, including the head guard trigger.
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => {
     f.sqlite.exec('BEGIN');
@@ -173,7 +175,7 @@ async function fixture(t: TestContext) {
     git(['fsck', '--full'], directory);
     return directory;
   }
-  return { ...f, params, app, turn, startTurn, objects, puts, gets, bucket, disk, localPath, runtime, commands, attempts, dispatched, editSource, run, cloneRepository, npm };
+  return { ...f, ...billing, params, app, turn, startTurn, objects, puts, gets, bucket, disk, localPath, runtime, commands, attempts, dispatched, editSource, run, cloneRepository, npm };
 }
 
 function request(appId: string, suffix: string, session = SESSION_ONE, body?: unknown, key = 'restore') {
@@ -543,4 +545,61 @@ test('version history, repository exports and restores enforce app ownership and
   manifest.parts[0].key = `build-git/another-user/another-app/parts/${manifest.parts[0].sha256}`;
   f.objects.set(version!.bundle_key, new TextEncoder().encode(JSON.stringify(manifest)));
   assert.equal((await handleBuildRequest(request(f.params.appId, '/repository'), f.env)).status, 503);
+});
+
+
+test('Git rejects files above 25 MiB before creating a commit and accepts the exact boundary', async t => {
+  for (const extra of [1, 0]) {
+    const f = await fixture(t);
+    await f.runtime.write(`${BUILD_GIT_ROOT}/git.cjs`, buildGitProgram);
+    await f.runtime.write(`${BUILD_GIT_ROOT}/snapshot/large.bin`, new Uint8Array(BUILD_GIT_MAX_FILE_BYTES + extra));
+    await f.runtime.write(`${BUILD_GIT_ROOT}/input.json`, JSON.stringify({ action: 'commit', identity: f.params,
+      paths: ['large.bin'], message: 'Boundary test', date: f.turn(f.params).created_at, worktree: '/workspace/app' }));
+    const result = await f.runtime.run('git-test', `node ${BUILD_GIT_ROOT}/git.cjs ${BUILD_GIT_ROOT}/input.json`);
+    if (extra) {
+      assert.equal(result.status, 'failed');
+      assert.match(result.stderr, /build_git_file_limit: large.bin exceeds 25 MiB/);
+      assert.notEqual(spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: f.localPath(`${BUILD_GIT_ROOT}/repository`) }).status, 0);
+    } else assert.equal(result.status, 'succeeded', result.stderr);
+  }
+});
+
+for (const mode of ['off', 'meter', 'charge'] as const) test(`commit checks the complete storage cost before uploading in ${mode} mode`, async t => {
+  const f = await fixture(t);
+  f.env.R2_BILLING_MODE = mode;
+  f.env.R2_CHARGE_FROM = '2026-10-01T00:00:00Z';
+  const state = f.stored.get('containerAccount') as { spendLimitCents: number };
+  // Positive credit is insufficient for the complete commit's write costs.
+  state.spendLimitCents = 0.000001;
+  f.stored.set('containerAccount', state);
+  await assert.rejects(saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true),
+    { message: 'storage_funding_required', status: 402 });
+  assert.equal(f.puts.length, 0);
+  assert.equal(f.app().git_version_id, null);
+  assert.equal(await buildGitVersion(f.env, f.params.appId, f.params.turnId), null);
+  assert.equal((await f.runtime.read('/workspace/app/.git/HEAD')).status, 404);
+  const reservations = await Promise.all(f.billingCalls.filter(request => new URL(request.url).pathname === '/billing/storage').map(request => request.json()));
+  assert.ok(reservations.length > 0);
+  assert.ok(reservations.every((request: any) => request.bytes > Object.values(buildStarter).reduce((sum, text) => sum + Buffer.byteLength(text), 0)));
+  state.spendLimitCents = 500;
+  f.stored.set('containerAccount', state);
+  const saved = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  assert.equal(f.app().git_version_id, saved.id);
+});
+
+test('an exhausted wallet rejects a new commit and preserves the accepted head in storage and the agent worktree', async t => {
+  const f = await fixture(t);
+  const first = await saveBuildGitVersion(f.env, f.params, f.runtime, f.turn(f.params), buildStarter, true);
+  const next = f.startTurn();
+  await hydrateBuildGit(f.env, next, f.runtime, first, f.turn(next));
+  const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
+  state.wallet.usedUnitMs = 500 * 1800000;
+  f.stored.set('containerAccount', state);
+  const uploads = f.puts.length;
+  await assert.rejects(saveBuildGitVersion(f.env, next, f.runtime, f.turn(next), { ...buildStarter, 'src/change.ts': 'export const changed = true;' }, true),
+    { message: 'storage_funding_required', status: 402 });
+  assert.equal(f.puts.length, uploads);
+  assert.equal(f.app().git_version_id, first.id);
+  assert.equal(await buildGitVersion(f.env, next.appId, next.turnId), null);
+  assert.equal(git(['rev-parse', 'HEAD'], f.localPath('/workspace/app')), first.commit_id);
 });

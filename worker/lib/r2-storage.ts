@@ -42,11 +42,11 @@ async function operation<T>(env: Env, owner: StorageOwner, name: 'put' | 'get' |
   await env.DB.prepare("UPDATE r2_operations SET status='completed' WHERE id=?").bind(id).run();
   return value;
 }
-export async function reserveStorage(env: Env, userId: string) {
-  if (!storageCharging(env) || userId === 'mainbrella') return null;
+export async function reserveStorage(env: Env, userId: string, projected = { bytes: 0, writes: 1, requireFunding: false }) {
+  if ((!projected.requireFunding && !storageCharging(env)) || userId === 'mainbrella') return null;
   const pricing = storagePricing(env);
   const ready = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='inventory_complete'").first();
-  if (!ready) throw new Error('storage_metering_incomplete');
+  if (!ready && storageMetered(env)) throw new Error('storage_metering_incomplete');
   const row = await env.DB.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM r2_objects WHERE user_id=? AND deleted_at IS NULL').bind(userId).first<{ bytes: number }>();
   const today = Math.floor(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS;
   const peak = await env.DB.prepare(`WITH sizes AS(SELECT app_id,at,delta,
@@ -56,10 +56,11 @@ export async function reserveStorage(env: Env, userId: string) {
     .bind(userId, today).first<{ bytes: number }>();
   const operations = await env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN category='a' THEN 4500 WHEN category='b' THEN 360 ELSE 0 END),0) AS nano FROM r2_operations o
     WHERE user_id=? AND NOT EXISTS(SELECT 1 FROM r2_daily_usage d WHERE d.user_id=o.user_id AND d.app_id=o.app_id AND d.day=strftime('%Y-%m-%d',o.started_at/1000,'unixepoch'))`).bind(userId).first<{ nano: number }>();
+  const bytes = row!.bytes + projected.bytes;
   let result: { fundedThrough: number | null; writesBlocked: boolean };
   try { result = await accountBillingRequest<{ fundedThrough: number | null; writesBlocked: boolean }>(env, userId, '/billing/storage', {
-    action: 'reserve', bytes: row!.bytes, retentionNanoUsd: storageRetentionNanoUsd(row!.bytes, pricing.markupBps)
-      + Math.ceil((operations!.nano + 4500 + Math.max(peak!.bytes, row!.bytes) / 2000) * (1 + pricing.markupBps / 10000)), retentionDays: STORAGE_RETENTION_DAYS,
+    action: 'reserve', bytes, retentionNanoUsd: storageRetentionNanoUsd(bytes, pricing.markupBps)
+      + Math.ceil((operations!.nano + 4500 * projected.writes + Math.max(peak!.bytes, bytes) / 2000) * (1 + pricing.markupBps / 10000)), retentionDays: STORAGE_RETENTION_DAYS,
   }); } catch (error) {
     if (!(error instanceof Error) || !['insufficient_balance', 'spend_limit_exceeded'].includes(error.message)) throw error;
     const saved = await env.DB.prepare('SELECT funded_through FROM r2_accounts WHERE user_id=?').bind(userId).first<{ funded_through: number | null }>();
@@ -138,4 +139,19 @@ export async function deleteStoredObjects(env: Env, owner: StorageOwner, keys: s
   await operation(env, owner, 'delete', () => env.BUCKET!.delete(keys));
   if (storageMetered(env)) for (const key of keys) await env.DB.prepare('UPDATE r2_objects SET deleted_at=?,updated_at=? WHERE key=? AND deleted_at IS NULL')
     .bind(Date.now(), Date.now(), key).run();
+}
+
+/** Fund the entire immutable commit before uploading any of it. Existing keys
+ * consume no additional bytes, but conditional puts still incur write costs. */
+export async function reserveStorageCommit(env: Env, owner: StorageOwner, objects: { key: string; size: number }[], writes = objects.length) {
+  const unique = new Map(objects.map(object => [object.key, object.size]));
+  let bytes = 0;
+  for (const [key, size] of unique) {
+    ownedKey(owner, key);
+    const existing = await env.DB.prepare('SELECT size FROM r2_objects WHERE key=? AND deleted_at IS NULL').bind(key).first<{ size: number }>();
+    if (existing && existing.size !== size) throw new Error('storage_object_conflict');
+    if (!existing) bytes += size;
+  }
+  const held = await reserveStorage(env, owner.userId, { bytes, writes, requireFunding: true });
+  if (held?.writesBlocked) throw new Error('storage_funding_required');
 }
