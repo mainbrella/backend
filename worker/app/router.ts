@@ -39,6 +39,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === "/api/get-marketing-users") return handleAdminRequest(request, env);
   if (url.pathname === "/api/send-marketing-email") return handleMarketingEmailRequest(request, env);
   if (url.pathname === "/api/unsubscribe") return handleMarketingUnsubscribeRequest(request, env);
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);

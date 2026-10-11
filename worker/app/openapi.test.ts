@@ -58,6 +58,7 @@ const endpointMethods: Record<string, string[]> = {
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
   "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
+  "/api/get-marketing-users": ["get"],
   "/api/send-marketing-email": ["post"],
   "/api/unsubscribe": ["post"],
   '/admin/accounting/ledger': ['get'], '/admin/accounting/closes': ['get', 'post'], '/admin/accounting/policies': ['get', 'post'],
@@ -210,6 +211,36 @@ test("admin users schema documents restricted cookie access and safe user fields
   const planFields = components.schemas.AdminUser.allOf.find((schema: any) => schema.properties?.plan);
   assert.deepEqual(planFields.properties.plan.enum, ['none', 'builder', 'pro', 'scale']);
   assert.ok(planFields.required.includes('plan'));
+});
+
+test("marketing users schema documents admin access, opt-outs and bounded pagination", async () => {
+  const { paths, components } = await document();
+  const operation = paths["/api/get-marketing-users"].get;
+  assert.equal(operation.operationId, "getMarketingUsers");
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+  assert.match(operation.description, /oneone@gmail\.com/);
+  assert.match(operation.description, /marketing_email_unsubscribed/);
+  assert.match(operation.description, /permanent address opt-out/);
+  assert.match(operation.description, /another unsubscribed account/);
+  assert.match(operation.description, /created_at descending, then id descending/);
+  const offset = operation.parameters.find((parameter: any) => parameter.name === "offset");
+  assert.equal(offset.in, "query");
+  assert.equal(offset.required, false);
+  assert.equal(offset.schema.minimum, 0);
+  assert.equal(offset.schema.maximum, 1_000_000);
+  assert.equal(offset.schema.default, 0);
+  const limit = operation.parameters.find((parameter: any) => parameter.name === "limit");
+  assert.equal(limit.in, "query");
+  assert.equal(limit.required, false);
+  assert.equal(limit.schema.minimum, 1);
+  assert.equal(limit.schema.maximum, 100);
+  assert.equal(limit.schema.default, 25);
+  const response = operation.responses[200].content["application/json"].schema;
+  assert.deepEqual(response.required, ["users", "total", "offset", "limit"]);
+  assert.equal(response.properties.users.items.$ref, "#/components/schemas/MarketingUser");
+  assert.deepEqual(Object.keys(components.schemas.MarketingUser.properties).sort(), ["created_at", "email", "id", "name"]);
+  assert.deepEqual(components.schemas.MarketingUser.properties.email.type, ["string", "null"]);
+  for (const status of [200, 400, 401, 403, 405, 503]) assert.ok(operation.responses[status]);
 });
 
 test("marketing email schema describes admin access, input, and acceptance", async () => {

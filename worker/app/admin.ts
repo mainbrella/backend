@@ -44,6 +44,34 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     if (!env.DB) return authJson({ error: "database_unavailable" }, 503, corsHeaders);
 
     const url = new URL(request.url);
+    if (url.pathname === "/api/get-marketing-users") {
+      const offsetText = url.searchParams.get("offset") ?? "0";
+      const offset = Number(offsetText);
+      if (!/^\d+$/.test(offsetText) || !Number.isSafeInteger(offset) || offset > 1_000_000) {
+        return authJson({ error: "invalid_offset" }, 400, corsHeaders);
+      }
+      const limitText = url.searchParams.get("limit") ?? String(PAGE_SIZE);
+      const limit = Number(limitText);
+      if (!/^\d+$/.test(limitText) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        return authJson({ error: "invalid_limit" }, 400, corsHeaders);
+      }
+      // Match the sender's address-wide opt-outs, including other accounts with the same email.
+      const filter = `WHERE users.marketing_email_unsubscribed = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM marketing_email_unsubscribes WHERE email = lower(trim(users.email))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM users AS unsubscribed
+          WHERE lower(trim(unsubscribed.email)) = lower(trim(users.email))
+            AND unsubscribed.marketing_email_unsubscribed = 1
+        )`;
+      const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM users ${filter}`).first<{ total: number }>();
+      const rows = await env.DB.prepare(
+        `SELECT users.id, users.email, users.name, users.created_at FROM users ${filter}
+         ORDER BY users.created_at DESC, users.id DESC LIMIT ? OFFSET ?`,
+      ).bind(limit, offset).all<Pick<AuthUser, "id" | "email" | "name" | "created_at">>();
+      return authJson({ users: rows.results || [], total: count?.total || 0, offset, limit }, 200, corsHeaders);
+    }
     if (url.pathname === "/admin/users") {
       const rows = await env.DB.prepare(
         `SELECT users.id, users.email, users.name, users.dob, users.created_at,

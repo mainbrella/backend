@@ -3,6 +3,31 @@ import { marketingEmailSchema, marketingUnsubscribeSchema } from "../lib/marketi
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
 export function registerMarketingEmailRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
+  register(api, "get", "/api/get-marketing-users", {
+    operationId: "getMarketingUsers",
+    tags: ["Admin"],
+    summary: "List users who have not unsubscribed from marketing emails",
+    description: "Requires a browser session for oneone@gmail.com. Returns users ordered by created_at descending, then id descending, using offset and limit pagination. Excludes users with marketing_email_unsubscribed set and users whose email matches a permanent address opt-out or another unsubscribed account, using trimmed, lowercase addresses as the marketing sender does. Includes users without an email address (email is null). Returns only id, email, name and created_at; excludes credentials and provider identifiers. Total counts eligible users before pagination. Defaults to offset 0 and limit 25; maximum offset is 1000000 and maximum limit is 100. A supplied Origin must be trusted.",
+    security: cookieSecurity,
+    request: {
+      query: z.object({
+        offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+        limit: z.coerce.number().int().min(1).max(100).default(25),
+      }),
+    },
+    responses: {
+      200: jsonResponse(z.object({
+        users: z.array(z.object({
+          id: z.string(), email: z.string().nullable(), name: z.string(), created_at: z.string(),
+        }).openapi("MarketingUser")),
+        total: z.number().int().min(0),
+        offset: z.number().int().min(0).max(1_000_000),
+        limit: z.number().int().min(1).max(100),
+      })),
+      ...errors(400, 401, 403, 405, 503),
+    },
+  }, handler);
+
   register(api, "post", "/api/send-marketing-email", {
     operationId: "sendMarketingEmail",
     tags: ["Admin"],
