@@ -13,9 +13,14 @@ const footerGroups: [string, [string, string][]][] = [
 
 // Keep the HTML in a TypeScript string so Workers and Node tests use the same
 // bundled template without filesystem access or a separate template build.
-export function renderMarketingEmail(subject: string, message: string): string {
+export function marketingUnsubscribeUrl(email: string): string {
+  return `https://mainbrella.com/unsubscribe?email=${encodeURIComponent(email)}`;
+}
+
+export function renderMarketingEmail(subject: string, message: string, recipientEmail: string): string {
   const title = escapeHtml(subject);
   const content = escapeHtml(message).replace(/\r\n?|\n/g, "<br>\n");
+  const unsubscribeUrl = escapeHtml(marketingUnsubscribeUrl(recipientEmail));
   const footerColumns = footerGroups.map(([heading, links]) => `
     <td width="50%" valign="top" style="width:50%;padding-right:12px;">
       <h2 style="margin:0 0 8px;color:#f2f4f7;font-size:13px;line-height:24px;font-weight:700;">${heading}</h2>
@@ -120,6 +125,9 @@ export function renderMarketingEmail(subject: string, message: string): string {
                 </div>
                 <!--[if mso]></td></tr></table><![endif]-->
               </div>
+              <p style="margin:24px 0 0;text-align:center;">
+                <a href="${unsubscribeUrl}" style="display:inline-block;padding:12px 0;color:#a4adb8;text-decoration:underline;">Unsubscribe</a>
+              </p>
             </td>
           </tr>
         </table>

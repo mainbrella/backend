@@ -59,6 +59,7 @@ const endpointMethods: Record<string, string[]> = {
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
   "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
   "/api/send-marketing-email": ["post"],
+  "/api/unsubscribe": ["post"],
   '/admin/accounting/ledger': ['get'], '/admin/accounting/closes': ['get', 'post'], '/admin/accounting/policies': ['get', 'post'],
   '/acquisition/repositories': ['post'], '/acquisition/link': ['post'],
   '/admin/acquisition/leads': ['get'], '/admin/acquisition/events': ['get'],
@@ -227,8 +228,25 @@ test("marketing email schema describes admin access, input, and acceptance", asy
   assert.equal(body.properties.subj.maxLength, 998);
   assert.equal(body.properties.from.maxLength, 512);
   assert.equal(body.properties.message.maxLength, 100_000);
-  for (const status of [202, 400, 401, 403, 405, 413, 429, 502, 503]) assert.ok(operation.responses[status]);
+  for (const status of [202, 400, 401, 403, 405, 409, 413, 429, 502, 503]) assert.ok(operation.responses[status]);
   assert.ok(operation.responses[202].content["application/json"].schema.properties.messageId);
+  assert.match(operation.description, /marketing_email_unsubscribed/);
+  assert.match(operation.description, /before every send/);
+  assert.match(operation.description, /email_preferences_unavailable without sending/);
+});
+
+test("unsubscribe schema documents public, permanent, address-based opt-outs", async () => {
+  const { paths } = await document();
+  const operation = paths["/api/unsubscribe"].post;
+  assert.equal(operation.operationId, "unsubscribeMarketingEmail");
+  assert.deepEqual(operation.security, []);
+  const body = operation.requestBody.content["application/json"].schema;
+  assert.deepEqual(body.required, ["email"]);
+  assert.equal(body.additionalProperties, false);
+  assert.equal(body.properties.email.format, "email");
+  assert.match(operation.description, /idempotent/);
+  assert.match(operation.description, /current session does not determine the recipient/);
+  for (const status of [200, 400, 403, 405, 413, 503]) assert.ok(operation.responses[status]);
 });
 
 test('workspace schemas describe capture budgets, usage and nonrefundable deletion', async () => {

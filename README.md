@@ -178,6 +178,15 @@ Invalid requests return 400, oversized bodies 413, provider rate/quota limits
 429, send failures 502, and an unavailable binding 503. No automatic retries
 are performed. Local Wrangler development simulates sending.
 
+Both email parts include `https://mainbrella.com/unsubscribe?email=<encoded address>`.
+The public page automatically calls `POST /api/unsubscribe` with `{ "email": "..." }`,
+without signing in. It sets matching users' `marketing_email_unsubscribed` flag
+and permanently saves the address opt-out, including recipients without accounts.
+Every marketing send checks these preferences first. Unsubscribed recipients
+return 409 `recipient_unsubscribed`; preference lookup failures return 503
+`email_preferences_unavailable` and do not send. Apply migration
+`033_marketing_email_unsubscribe.sql` before deploying this change.
+
 ## Verification
 
 ```sh

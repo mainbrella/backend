@@ -11,7 +11,7 @@ import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
 import { handlePrepaidBillingRequest } from './prepaid-billing';
 import { handleAdminRequest } from "./admin";
-import { handleMarketingEmailRequest } from "./marketing-email";
+import { handleMarketingEmailRequest, handleMarketingUnsubscribeRequest } from "./marketing-email";
 import { handleAccountingRequest } from './accounting';
 import { handleContainersRequest } from "./containers";
 import { handleSSHRequest } from "./ssh";
@@ -40,6 +40,7 @@ async function handleLegacyRequest(
 ): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/api/send-marketing-email") return handleMarketingEmailRequest(request, env);
+  if (url.pathname === "/api/unsubscribe") return handleMarketingUnsubscribeRequest(request, env);
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/') || url.pathname === '/admin/acquisition/leads' || url.pathname === '/admin/acquisition/events') return handleAcquisitionRequest(request, env);

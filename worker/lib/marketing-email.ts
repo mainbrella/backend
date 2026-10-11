@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { renderMarketingEmail } from "../templates/marketing-email";
+import { marketingUnsubscribeUrl, renderMarketingEmail } from "../templates/marketing-email";
 
 const emailAddress = z.email().max(254);
 const noHeaderControls = /^[^\x00-\x1f\x7f]+$/;
@@ -29,14 +29,36 @@ export const marketingEmailSchema = z.object({
 
 export type MarketingEmail = z.infer<typeof marketingEmailSchema>;
 
-export async function sendMarketingEmail(binding: SendEmail, email: MarketingEmail): Promise<EmailSendResult> {
+export const marketingUnsubscribeSchema = z.object({
+  email: z.string().trim().toLowerCase().max(254).email(),
+}).strict();
+
+export class MarketingEmailPreferenceError extends Error {
+  constructor(message: "recipient_unsubscribed" | "email_preferences_unavailable") {
+    super(message);
+  }
+}
+
+export async function sendMarketingEmail(env: Pick<Env, "DB" | "MARKETING_EMAIL">, email: MarketingEmail): Promise<EmailSendResult> {
   const sender = marketingSender(email.from);
   if (!sender) throw new Error("invalid_sender");
-  return binding.send({
+  let preference;
+  try {
+    preference = await env.DB.prepare(`SELECT (
+      EXISTS (SELECT 1 FROM users WHERE lower(trim(email)) = ? AND marketing_email_unsubscribed = 1)
+      OR EXISTS (SELECT 1 FROM marketing_email_unsubscribes WHERE email = ?)
+    ) AS unsubscribed`).bind(email.to.trim().toLowerCase(), email.to.trim().toLowerCase()).first<{ unsubscribed: number }>();
+    if (!preference) throw new Error("missing_email_preferences");
+  } catch {
+    // A failed preference check must never permit a marketing send.
+    throw new MarketingEmailPreferenceError("email_preferences_unavailable");
+  }
+  if (preference.unsubscribed) throw new MarketingEmailPreferenceError("recipient_unsubscribed");
+  return env.MARKETING_EMAIL.send({
     from: sender,
     to: email.to,
     subject: email.subj,
-    text: email.message,
-    html: renderMarketingEmail(email.subj, email.message),
+    text: `${email.message}\n\nUnsubscribe: ${marketingUnsubscribeUrl(email.to)}`,
+    html: renderMarketingEmail(email.subj, email.message, email.to),
   });
 }
