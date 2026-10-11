@@ -105,8 +105,7 @@ export function renderMarketingEmail(subject: string, message: string): string {
                 <div class="footer-intro" style="display:inline-block;box-sizing:border-box;width:100%;max-width:220px;padding-right:24px;padding-bottom:24px;vertical-align:top;font-size:12px;line-height:1.6;">
                     <a href="https://mainbrella.com" style="color:#f2f4f7;font-size:18px;line-height:24px;font-weight:700;letter-spacing:-0.03em;text-decoration:none;">mainbrella</a>
                     <p style="margin:8px 0 12px;">Cloud computers for AI agents.</p>
-                    <p style="margin:0;">Mainbrella Co. &middot; Sole proprietorship<br>Andrew Arrow &middot; Culver City, California</p>
-                    <p style="margin:8px 0;">5427 Emporia Ave<br>Culver City, CA 90230</p>
+                    <p style="margin:0;">Mainbrella Co.</p>
                     <p style="margin:0;">
                       <a href="https://www.tiktok.com/@mainbrella" style="display:inline-block;padding:12px 0;color:#a4adb8;text-decoration:none;">TikTok</a>&nbsp;&nbsp;
                       <a href="https://github.com/mainbrella" style="display:inline-block;padding:12px 0;color:#a4adb8;text-decoration:none;">GitHub</a>&nbsp;&nbsp;
