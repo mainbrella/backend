@@ -20,9 +20,9 @@ import { accountBillingRequest } from '../lib/prepaid-billing';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, buildImageEntries, serveBuildImage, type BuildImageRow } from '../lib/build-images';
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
 import { buildGitEntries, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
-import { buildSourceEntries, readBuildSource, storeBuildSource, readBuildText, serveBuildFile, type BuildFileInfo } from '../lib/build-storage';
+import { buildSourceEntries, readBuildSource, storeBuildSource, readBuildText, serveBuildFile, buildGithubSourceRef, type BuildFileInfo } from '../lib/build-storage';
 import { githubProject, publicGithubProject, listGithubVersions, githubVersion, githubVersionDetail, serveGithubVersionFile,
-  cleanupLinkedGithubHistory } from '../lib/build-github';
+  cleanupLinkedGithubHistory, exportGithubSource } from '../lib/build-github';
 import { buildVersionId } from '../lib/build-contract';
 
 export function buildConfigured(env: Env) {
@@ -190,6 +190,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
       const owner = { userId: user.id, appId: id };
       const github = await githubProject(env, user.id, id);
+      const githubSourceRef = buildGithubSourceRef(JSON.parse(app.source_json));
       const retention = await storageRetention(env, user.id);
       if (retention.writesBlocked && ['turns', 'restore', 'resume'].includes(match[3]) && request.method === 'POST')
         return authJson({ error: 'storage_funding_required', retention }, 402, cors);
@@ -199,9 +200,10 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
         const allowedQuery = match[3] === 'files' ? ['versionId'] : ['versionId', 'path'];
         if ([...url.searchParams.keys()].some(key => !allowedQuery.includes(key) || url.searchParams.getAll(key).length !== 1)
           || versionId !== null && !buildVersionId.safeParse(versionId).success || match[3] === 'file' && (!path || path.length > 160)) return authJson({ error: 'invalid_request' }, 400, cors);
-        if (github?.github_repo && versionId) {
-          if (match[3] === 'file') return serveGithubVersionFile(env, github, versionId, path!, cors);
-          const detail = await githubVersion(env, github, versionId, app.github_verified_commit_id ?? null);
+        const githubVersionId = versionId ?? githubSourceRef?.$github;
+        if (github?.github_repo && githubVersionId) {
+          if (match[3] === 'file') return serveGithubVersionFile(env, github, githubVersionId, path!, cors);
+          const detail = await githubVersion(env, github, githubVersionId, app.github_verified_commit_id ?? null);
           return authJson({ revision: app.revision, version: detail.version, files: detail.files }, 200, cors);
         }
         const version = versionId ? await buildGitVersion(env, id, versionId) : null;
@@ -249,12 +251,14 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
             result: result_json ? JSON.parse(await readBuildText(env, owner, result_json)) : null, source: source_json ? await readBuildSource(env, owner, source_json) : null }))), billing }, 200, cors);
       }
       if (match[3] === 'images') {
+        if (github?.github_repo && githubSourceRef) return serveGithubVersionFile(env, github, githubSourceRef.$github, `public${buildImagePath(match[4])}`, cors);
         return await serveBuildImage(env, owner, match[4], cors);
       }
       if (request.method === 'GET') {
         if (match[3] === 'events') return buildAppStream(request, () => detail(env, user.id, id), cors);
         if (match[3] === 'source') return authJson({ revision: app.revision, files: await readBuildSource(env, owner, app.source_json) }, 200, cors);
         if (match[3] === 'export') {
+          if (github?.github_repo && githubSourceRef) return exportGithubSource(env, github, githubSourceRef.$github, cors);
           const assets = Object.fromEntries((await savedBuildImages(env, id)).map(image => [`public${buildImagePath(image.id)}`, buildImageBytes(image.data)]));
           return new Response(buildSourceZip(await readBuildSource(env, owner, app.source_json), assets), { headers: { ...cors,
           'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="mainbrella-app.zip"',

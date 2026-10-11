@@ -5,6 +5,11 @@ export type BuildStorageOwner = { userId: string; appId: string };
 export type BuildObjectRef = { $r2: string; size: number; sha256: string };
 export type BuildStoredFile = BuildObjectRef & { path: string; type: 'text' | 'image' };
 export type BuildFileInfo = { path: string; size: number; type: 'text' | 'image' };
+export function buildGithubSourceRef(value: unknown): { $github: string } | null {
+  if (!value || typeof value !== 'object') return null;
+  const sha = (value as { $github?: unknown }).$github;
+  return typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha) ? { $github: sha } : null;
+}
 const encoder = new TextEncoder();
 export const canonicalBuildSource = (files: BuildFiles) => JSON.stringify(Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))));
 export const buildStoragePrefix = ({ userId, appId }: BuildStorageOwner) => `build-git/${userId}/${appId}/`;
@@ -66,7 +71,9 @@ export async function storeBuildSource(env: Env, owner: BuildStorageOwner, files
   return JSON.stringify(await storeBuildObject(env, owner, manifest.bytes, 'application/json'));
 }
 export async function buildSourceEntries(env: Env, owner: BuildStorageOwner, stored: string): Promise<(BuildStoredFile & { inline?: string })[]> {
-  const parsed = JSON.parse(stored), ref = buildObjectRef(parsed);
+  let parsed = JSON.parse(stored);
+  if (buildGithubSourceRef(parsed)) parsed = await readBuildSource(env, owner, stored);
+  const ref = buildObjectRef(parsed);
   if (!ref) return Promise.all(Object.entries(parsed as BuildFiles).map(async ([path, inline]) => ({ path, type: 'text' as const, inline, $r2: '', size: encoder.encode(inline).length, sha256: await buildContentHash(encoder.encode(inline)) })));
   const manifest = JSON.parse(new TextDecoder().decode(await readBuildObject(env, owner, ref)));
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.files) || manifest.files.length > BUILD_MAX_FILES) throw new BuildError('build_source_unavailable');
@@ -78,6 +85,14 @@ export async function buildSourceEntries(env: Env, owner: BuildStorageOwner, sto
   return manifest.files;
 }
 export async function readBuildSource(env: Env, owner: BuildStorageOwner, stored: string): Promise<BuildFiles> {
+  const github = buildGithubSourceRef(JSON.parse(stored));
+  if (github) {
+    const { githubProject, githubSource } = await import('./build-github');
+    const { githubBuildUserToken } = await import('./github-build');
+    const project = await githubProject(env, owner.userId, owner.appId);
+    if (!project?.github_repo) throw new BuildError('build_source_unavailable');
+    return githubSource(project.github_repo, github.$github, await githubBuildUserToken(env, owner.userId));
+  }
   const entries = await buildSourceEntries(env, owner, stored), files: BuildFiles = {};
   for (const file of entries) files[file.path] = file.inline ?? new TextDecoder().decode(await readBuildObject(env, owner, file));
   return files;

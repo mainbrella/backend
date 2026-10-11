@@ -5,7 +5,8 @@ const domain = z.string().trim().max(253).nullable().openapi({ description: "Opt
 const git = z.boolean().optional().openapi({ description: 'Opt in to Builder Git history by creating an idle source workspace. Defaults to false. Enabling starts no build; the first saved build creates a version. Omitting or passing false preserves any existing workspace and history.' });
 const project = z.object({ id: z.string().uuid(), name: z.string(), domain: z.string().nullable(), created_at: z.string(),
   build_app_id: z.string().uuid().nullable(), git_version_id: z.string().uuid().nullable(),
-  github_repo: z.string().nullable(), github_branch: z.string().nullable(), github_commit_id: z.string().nullable() });
+  github_repo: z.string().nullable(), github_branch: z.string().nullable(), github_commit_id: z.string().nullable(),
+  github_storage: z.enum(['retained', 'deleting', 'github']).nullable().describe('For GitHub-linked projects: retained means Mainbrella still stores a working copy; deleting means physical cleanup is pending; github means the saved source is read from GitHub after deleting the hosted copy. Future builds can create a new working copy.') });
 export function registerProjectRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, "get", "/projects", {
     operationId: "listProjects", tags: ["Projects"], summary: "List your projects", security: cookieSecurity,

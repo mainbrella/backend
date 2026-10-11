@@ -1,7 +1,16 @@
 import { authCorsHeaders, authJson, currentUser } from "./auth-core";
 
 const projectColumns = `SELECT p.id, p.name, p.domain, p.created_at, a.id AS build_app_id,
-  a.git_version_id, p.github_repo, p.github_branch, p.github_commit_id FROM projects p LEFT JOIN build_apps a ON a.project_id = p.id AND a.user_id = p.user_id`;
+  a.git_version_id, p.github_repo, p.github_branch, p.github_commit_id,
+  CASE WHEN p.github_repo IS NULL THEN NULL
+    WHEN EXISTS(SELECT 1 FROM build_git_deletions WHERE app_id=a.id) THEN 'deleting'
+    WHEN json_extract(a.source_json,'$."$github"') IS NOT NULL
+      AND NOT EXISTS(SELECT 1 FROM r2_objects WHERE app_id=a.id AND user_id=p.user_id AND deleted_at IS NULL)
+      AND NOT EXISTS(SELECT 1 FROM build_images WHERE app_id=a.id)
+      AND NOT EXISTS(SELECT 1 FROM build_operations WHERE turn_id IN(SELECT id FROM build_turns WHERE app_id=a.id)
+        AND (source_json IS NOT NULL OR json_type(result_json,'$."$r2"')='text'))
+      THEN 'github' ELSE 'retained' END AS github_storage
+  FROM projects p LEFT JOIN build_apps a ON a.project_id = p.id AND a.user_id = p.user_id`;
 const readProject = (env: Env, userId: string, id: string) => env.DB.prepare(`${projectColumns} WHERE p.id = ? AND p.user_id = ?`).bind(id, userId).first();
 
 // Enabling history creates an idle source workspace. Builds and storage writes

@@ -81,7 +81,8 @@ export async function expireStorageAccount(env: Env, row: RetentionRow) {
       .bind(new Date().toISOString(), row.user_id, ...args),
     env.DB.prepare(`UPDATE build_operations SET source_json=NULL,result_json=NULL WHERE turn_id IN(SELECT id FROM build_turns WHERE user_id=?) AND ${guard}`).bind(row.user_id, ...args),
     ...['build_git_versions', 'build_revisions', 'build_images'].map(table => env.DB.prepare(`DELETE FROM ${table} WHERE app_id IN(SELECT id FROM build_apps WHERE user_id=?) AND ${guard}`).bind(row.user_id, ...args)),
-    env.DB.prepare(`UPDATE build_apps SET source_json='{}',git_version_id=NULL,verified_git_version_id=NULL,active_turn_id=NULL WHERE user_id=? AND ${guard}`).bind(row.user_id, ...args),
+    env.DB.prepare(`UPDATE build_apps SET source_json=CASE WHEN json_type(source_json,'$."$github"')='text' THEN source_json ELSE '{}' END,
+      git_version_id=NULL,verified_git_version_id=NULL,active_turn_id=NULL WHERE user_id=? AND ${guard}`).bind(row.user_id, ...args),
     env.DB.prepare(`UPDATE r2_accounts SET expired_at=? WHERE user_id=? AND expiration_token=? AND ${guard}`).bind(Date.now(), row.user_id, token, ...args),
   ]);
   await finishStorageExpiration(env, row.user_id, token);

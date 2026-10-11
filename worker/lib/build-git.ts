@@ -190,7 +190,13 @@ export async function deleteBuildGit(env: Env, userId: string, appId: string) {
   // Delete and list from the beginning again so deletion does not invalidate a cursor.
   for (;;) {
     const objects = await listStoredObjects(env, { userId, appId }, { prefix: taskPrefix, limit: 1000 });
-    if (!objects.objects.length) return;
+    if (!objects.objects.length) {
+      // The provider delete may have succeeded before its D1 inventory update
+      // failed. Confirming an empty prefix also finishes that billing retry.
+      if (storageMetered(env)) await env.DB.prepare('UPDATE r2_objects SET deleted_at=?,updated_at=? WHERE user_id=? AND app_id=? AND deleted_at IS NULL')
+        .bind(Date.now(), Date.now(), userId, appId).run();
+      return;
+    }
     await deleteStoredObjects(env, { userId, appId }, objects.objects.map(object => object.key));
   }
   } finally { if (token) await releaseStorageLock(env, appId, token); }

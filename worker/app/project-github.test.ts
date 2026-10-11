@@ -7,9 +7,11 @@ import { handleBuildRequest } from './build';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 import { githubBuildUserToken, sealGithubBuildCredentials } from '../lib/github-build';
 import { sealGithubCredentials } from '../lib/github-import';
-import { saveBuildGitVersion } from '../lib/build-git';
+import { saveBuildGitVersion, cleanupDeletedBuildGit } from '../lib/build-git';
 import { commitGithubSnapshot, syncGithubSource } from '../lib/build-github';
-import { readBuildSource } from '../lib/build-storage';
+import { readBuildSource, storeBuildSource, storeBuildText } from '../lib/build-storage';
+import { inventoryObject } from '../lib/r2-storage';
+import { handleRequest } from './router';
 import { BUILD_MAX_FILE_BYTES, BUILD_MAX_FILES, BUILD_MAX_SOURCE_BYTES } from '../lib/build-contract';
 import type { BuildGitRuntime } from '../lib/build-git';
 import type { BuildFiles, BuildParams, BuildTurnRow } from '../lib/build-contract';
@@ -35,7 +37,7 @@ async function fixture(t: TestContext, options: { app?: boolean; source?: BuildF
   const f = await paidContainerFixture(t); t.after(() => f.close());
   const migrations = ['014_projects.sql', '015_project_domain.sql', '020_accounting_ledger.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql',
     '026_build_ai_billing.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '031_r2_billing.sql',
-    '032_storage_retention.sql', '034_shared_projects.sql', '035_project_github.sql'];
+    '032_storage_retention.sql', '034_shared_projects.sql', '035_project_github.sql', '036_github_storage_cleanup.sql'];
   for (const migration of [...migrations.slice(0, 11), '028_github_import.sql', ...migrations.slice(11)])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const prepare = f.env.DB.prepare.bind(f.env.DB);
@@ -143,6 +145,13 @@ async function fixture(t: TestContext, options: { app?: boolean; source?: BuildF
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+const storageRequest = (session = SESSION_ONE, origin: string | null = 'https://mainbrella.com') => new Request(`https://api.mainbrella.com/projects/github/storage?id=${PROJECT}`, {
+  method: 'DELETE', headers: { Cookie: `mainbrella_session=${session}`, ...(origin ? { Origin: origin } : {}) },
+});
+function savedGithubSource(f: Fixture, files: BuildFiles, sha = PARENT) {
+  setLinked(f, sha, Object.keys(files));
+  f.setCommitTree(sha, Object.entries(files).map(([path, content]) => ({ path, size: Buffer.byteLength(content), sha: shaBlob(Buffer.from(content)) })), files);
+}
 function addApp(sqlite: Fixture['sqlite'], files: BuildFiles) {
   sqlite.prepare(`INSERT INTO build_apps(id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at,project_id)
     VALUES(?,?,?,?,?,?,?,?,?)`).run(APP, USER_ONE, 'project:' + PROJECT, '', 'Site', JSON.stringify(files), now, now, PROJECT);
@@ -203,6 +212,177 @@ test('a project cannot be deleted while its GitHub transfer holds the lock', asy
   assert.deepEqual(await response.json(), { error: 'github_project_busy' });
   assert.throws(() => f.sqlite.prepare('DELETE FROM build_apps WHERE id=?').run(APP), /github_project_busy/);
   assert.equal(row(f, 'SELECT id FROM build_apps WHERE id=?', APP).id, APP);
+});
+
+test('explicit storage deletion keeps the project and Builder, removes D1/R2 content, and reads from GitHub without new uploads', async t => {
+  const files = { 'index.html': '<main>Saved on GitHub</main>' };
+  const f = await fixture(t, { app: true, source: files, head: PARENT });
+  savedGithubSource(f, files);
+  const source = await storeBuildSource(f.env, { userId: USER_ONE, appId: APP }, files);
+  const result = await storeBuildText(f.env, { userId: USER_ONE, appId: APP }, '{"ok":true}');
+  f.sqlite.prepare('UPDATE build_apps SET source_json=? WHERE id=?').run(source, APP);
+  insertTurn(f, 'past-turn', 'succeeded');
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id=NULL WHERE id=?').run(APP);
+  f.sqlite.prepare('INSERT INTO build_revisions(app_id,revision,turn_id,source_json,created_at) VALUES(?,1,?,?,?)').run(APP, 'past-turn', source, now);
+  f.sqlite.prepare(`INSERT INTO build_operations(turn_id,operation_id,schema_version,kind,label,status,created_at,updated_at,source_json,result_json)
+    VALUES(?,'saved',1,'source','Saved source','succeeded',0,0,?,?)`).run('past-turn', source, result);
+  for (const kind of ['bundles', 'parts']) f.objects.set(`build-git/${USER_ONE}/${APP}/${kind}/old`, new Uint8Array(3));
+  const unrelated = `build-git/${USER_TWO}/another-project/objects/source`;
+  f.objects.set(unrelated, new Uint8Array(5));
+  f.env.R2_BILLING_MODE = 'meter';
+  for (const [key, bytes] of f.objects) if (key !== unrelated) await inventoryObject(f.env, { userId: USER_ONE, appId: APP }, key, bytes.length, 'source');
+  const puts = f.puts.length;
+  const response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.equal((await response.json() as any).storage, 'github');
+  assert.equal(row(f, 'SELECT github_repo,github_link_lock FROM projects WHERE id=?', PROJECT).github_repo, REPO);
+  assert.equal(row(f, 'SELECT github_link_lock FROM projects WHERE id=?', PROJECT).github_link_lock, null);
+  assert.deepEqual(JSON.parse(row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string), { $github: PARENT });
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_revisions').n, 0);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_git_versions').n, 0);
+  assert.equal(row(f, 'SELECT source_json,result_json FROM build_operations').source_json, null);
+  assert.equal(row(f, 'SELECT source_json,result_json FROM build_operations').result_json, null);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_turns').n, 1);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM r2_objects WHERE deleted_at IS NULL').n, 0);
+  assert.deepEqual([...f.objects.keys()], [unrelated]);
+  assert.deepEqual(await workingSource(f), files);
+  for (const suffix of ['source', 'files', 'file?path=index.html', 'export']) {
+    const read = await handleBuildRequest(new Request(`https://api.mainbrella.com/build/apps/${APP}/${suffix}`, { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+    assert.equal(read.status, 200, suffix);
+    await read.arrayBuffer();
+  }
+  assert.equal(f.puts.length, puts);
+  const listed = await handleRequest(new Request('https://api.mainbrella.com/projects', { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  assert.equal((await listed.json() as any).projects[0].github_storage, 'github');
+  assert.equal((await handleRequest(storageRequest(), f.env)).status, 200);
+  assert.equal(f.head, PARENT);
+});
+
+test('unpushed source and removed files prevent storage deletion', async t => {
+  const cases = [
+    { local: { 'index.html': 'draft' }, remote: { 'index.html': 'saved' } },
+    { local: {}, remote: { 'index.html': 'saved' } },
+  ];
+  for (const entry of cases) await t.test(JSON.stringify(entry.local), async sub => {
+    const f = await fixture(sub, { app: true, source: entry.local, head: PARENT });
+    savedGithubSource(f, entry.remote);
+    const key = `build-git/${USER_ONE}/${APP}/objects/kept`;
+    f.objects.set(key, new Uint8Array(1));
+    const response = await handleRequest(storageRequest(), f.env);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: 'github_source_not_pushed' });
+    assert.deepEqual(JSON.parse(row(f, 'SELECT source_json FROM build_apps WHERE id=?', APP).source_json as string), entry.local);
+    assert.equal(f.objects.has(key), true);
+    assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_git_deletions').n, 0);
+  });
+});
+
+test('referenced images are verified before deletion and remain available in reads, exports and later GitHub commits', async t => {
+  const imageId = '22222222-2222-4222-8222-222222222222';
+  const path = `public/generated/${imageId}.jpg`;
+  const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const files = { 'index.html': `<img src="/generated/${imageId}.jpg">` };
+  const f = await fixture(t, { app: true, source: files, head: PARENT });
+  savedGithubSource(f, files);
+  insertTurn(f, 'image-turn', 'succeeded');
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id=NULL WHERE id=?').run(APP);
+  f.sqlite.prepare('INSERT INTO build_images(id,app_id,turn_id,tool_id,label,prompt,data) VALUES(?,?,?,?,?,?,?)')
+    .run(imageId, APP, 'image-turn', 'image-tool', 'Picture', 'Test picture', Buffer.from(bytes).toString('base64'));
+  let response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 409);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_images').n, 1);
+  const tree = [...Object.entries(files).map(([path, content]) => ({ path, size: Buffer.byteLength(content), sha: shaBlob(Buffer.from(content)) })),
+    { path, size: bytes.length, sha: shaBlob(bytes) }];
+  f.setCommitTree(PARENT, tree, files);
+  f.addBlob(shaBlob(bytes), bytes);
+  f.sqlite.prepare('UPDATE projects SET github_paths_json=? WHERE id=?').run(JSON.stringify([...Object.keys(files), path]), PROJECT);
+  response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 200);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_images').n, 0);
+  const read = await handleBuildRequest(new Request(`https://api.mainbrella.com/build/apps/${APP}/images/${imageId}`, { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  assert.equal(read.status, 200);
+  assert.deepEqual(new Uint8Array(await read.arrayBuffer()), bytes);
+  const archive = await handleBuildRequest(new Request(`https://api.mainbrella.com/build/apps/${APP}/export`, { headers: { Cookie: `mainbrella_session=${SESSION_ONE}` } }), f.env);
+  assert.equal(archive.status, 200);
+  assert.ok(Buffer.from(await archive.arrayBuffer()).includes(Buffer.from(path)));
+  insertTurn(f, 'next-turn');
+  const version = await saveBuildGitVersion(f.env, params('next-turn'), runtime(f), turn('next-turn'), { 'index.html': `${files['index.html']}<p>New</p>` }, false);
+  assert.equal(version.commit_id, NEW_HEAD);
+  const write = f.writes.find(write => write.url.endsWith('/git/trees'))!.body as { tree: { path: string; sha: string | null }[] };
+  assert.ok(!write.tree.some(entry => entry.path === path && entry.sha === null));
+  assert.ok((JSON.parse(row(f, 'SELECT github_paths_json FROM projects WHERE id=?', PROJECT).github_paths_json as string) as string[]).includes(path));
+  assert.deepEqual(f.puts, []);
+});
+
+test('a lost deletion inventory acknowledgement is reconciled from an empty physical prefix', async t => {
+  const files = { 'index.html': 'saved' };
+  const f = await fixture(t, { app: true, source: files, head: PARENT });
+  savedGithubSource(f, files);
+  const key = `build-git/${USER_ONE}/${APP}/objects/remaining`;
+  f.objects.set(key, new Uint8Array(1));
+  f.env.R2_BILLING_MODE = 'meter';
+  await inventoryObject(f.env, { userId: USER_ONE, appId: APP }, key, 1, 'source');
+  const prepare = f.env.DB.prepare.bind(f.env.DB);
+  let fail = true;
+  f.env.DB.prepare = ((sql: string) => {
+    const statement = prepare(sql);
+    let proxy: D1PreparedStatement;
+    proxy = new Proxy(statement, { get(target, property) {
+      if (property === 'run' && sql.startsWith('UPDATE r2_objects SET deleted_at=')) return async () => {
+        if (fail) { fail = false; throw new Error('D1 unavailable'); }
+        return target.run();
+      };
+      if (property === 'bind') return (...values: unknown[]) => { target.bind(...values); return proxy; };
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return proxy;
+  }) as D1Database['prepare'];
+  const response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 202);
+  assert.equal(f.objects.has(key), false);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM r2_objects WHERE deleted_at IS NULL').n, 1);
+  await cleanupDeletedBuildGit(f.env);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM r2_objects WHERE deleted_at IS NULL').n, 0);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_git_deletions').n, 0);
+});
+
+test('partial physical cleanup is reported, blocks builds, and resumes without deleting the GitHub-linked project', async t => {
+  const files = { 'index.html': 'saved' };
+  const f = await fixture(t, { app: true, source: files, head: PARENT });
+  savedGithubSource(f, files);
+  const key = `build-git/${USER_ONE}/${APP}/objects/remaining`;
+  f.objects.set(key, new Uint8Array(1));
+  const original = f.env.BUCKET!.delete.bind(f.env.BUCKET);
+  let fail = true;
+  t.mock.method(f.env.BUCKET!, 'delete', async (...args: Parameters<R2Bucket['delete']>) => {
+    if (fail) { fail = false; throw new Error('R2 unavailable'); }
+    return original(...args);
+  });
+  const response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 202);
+  assert.equal((await response.json() as any).storage, 'deleting');
+  assert.equal(f.objects.has(key), true);
+  assert.throws(() => insertTurn(f, 'new-turn'), /github_project_busy/);
+  await cleanupDeletedBuildGit(f.env);
+  assert.equal(f.objects.has(key), false);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_git_deletions').n, 0);
+  assert.deepEqual(await workingSource(f), files);
+  insertTurn(f, 'new-turn');
+  assert.equal(row(f, 'SELECT github_repo FROM projects WHERE id=?', PROJECT).github_repo, REPO);
+});
+
+test('storage deletion requires owner authentication, a trusted Origin, a pushed branch and an idle project', async t => {
+  const f = await fixture(t, { app: true, source: { 'index.html': 'saved' } });
+  setLinked(f, null);
+  assert.equal((await handleRequest(storageRequest(''), f.env)).status, 401);
+  assert.equal((await handleRequest(storageRequest(SESSION_TWO), f.env)).status, 404);
+  assert.equal((await handleRequest(storageRequest(SESSION_ONE, null), f.env)).status, 403);
+  assert.equal((await handleRequest(storageRequest(SESSION_ONE, 'https://evil.example'), f.env)).status, 403);
+  assert.equal((await handleRequest(storageRequest(), f.env)).status, 409);
+  insertTurn(f, 'active');
+  assert.equal((await handleRequest(storageRequest(), f.env)).status, 409);
+  assert.deepEqual(f.deletes, []);
 });
 
 test('project GitHub routes enforce ownership and do not reuse Import authorization', async t => {

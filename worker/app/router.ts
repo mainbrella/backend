@@ -49,7 +49,7 @@ async function handleLegacyRequest(
   }
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/github/build/')) return handleGithubBuildRequest(request, env);
-  if (url.pathname === '/projects/github') return handleProjectGithubRequest(request, env);
+  if (url.pathname === '/projects/github' || url.pathname === '/projects/github/storage') return handleProjectGithubRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/')) return handleAcquisitionRequest(request, env);
   if (url.pathname === '/billing/storage') return handleStorageBillingRequest(request, env);

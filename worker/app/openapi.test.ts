@@ -9,6 +9,7 @@ const endpointMethods: Record<string, string[]> = {
   '/github/import/callback': ['get'], '/github/import/setup': ['get'],
   '/github/build/config': ['get'], '/github/build/connect': ['post'], '/github/build/connection': ['get'],
   '/github/build/callback': ['get'], '/github/build/setup': ['get'], '/github/build/repositories': ['get'], '/projects/github': ['get', 'put'],
+  '/projects/github/storage': ['delete'],
   '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
@@ -227,6 +228,16 @@ test('Builder source and GitHub linking document storage bounds separately from 
   const link = paths['/projects/github'].put;
   assert.equal(link.operationId, 'linkProjectGithub');
   assert.ok(link.responses[402]); assert.ok(link.responses[413]);
+  assert.match(link.description, /retains the Mainbrella working copy/);
+  const deletion = paths['/projects/github/storage'].delete;
+  assert.equal(deletion.operationId, 'deleteProjectHostedStorage');
+  assert.deepEqual(deletion.security, [{ cookieAuth: [] }]);
+  assert.ok(deletion.parameters.some((parameter: any) => parameter.name === 'Origin' && parameter.required));
+  assert.ok(deletion.parameters.some((parameter: any) => parameter.name === 'id' && parameter.required));
+  assert.ok(deletion.responses[409]); assert.ok(deletion.responses[202]);
+  assert.match(deletion.description, /github_source_not_pushed/);
+  assert.match(deletion.description, /Preserves project identity, Builder access/);
+  assert.deepEqual(paths['/projects'].get.responses[200].content['application/json'].schema.properties.projects.items.properties.github_storage.enum, ['retained', 'deleting', 'github', null]);
 });
 
 test('Build configuration describes the opt-in local Codex provider and preserves cookie authentication', async () => {

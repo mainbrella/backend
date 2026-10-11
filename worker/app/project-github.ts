@@ -2,15 +2,17 @@ import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
 import { BUILD_MAX_APPS, BuildError } from '../lib/build-contract';
 import { repoName } from '../lib/repo-launch';
 import { githubBuildUserToken, validGithubBranch } from '../lib/github-build';
-import { checkGithubWriteAccess, githubProject, publicGithubProject, migrateGithubProject, cleanupGithubHostedHistory } from '../lib/build-github';
+import { checkGithubWriteAccess, githubProject, publicGithubProject, migrateGithubProject, cleanupGithubHostedHistory, deleteGithubHostedStorage, githubStorageState } from '../lib/build-github';
 import { storeBuildSource } from '../lib/build-storage';
 
 export async function handleProjectGithubRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-  if (!['GET', 'PUT'].includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, PUT, OPTIONS' });
-  if (request.method === 'PUT' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
+  const deleting = new URL(request.url).pathname === '/projects/github/storage';
+  const methods = deleting ? ['DELETE'] : ['GET', 'PUT'];
+  if (!methods.includes(request.method)) return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: [...methods, 'OPTIONS'].join(', ') });
+  if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);
   const query = new URL(request.url).searchParams;
   const id = query.get('id');
   if (!id || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)
@@ -23,6 +25,18 @@ export async function handleProjectGithubRequest(request: Request, env: Env): Pr
     const project = await githubProject(env, user.id, id);
     if (!project) return authJson({ error: 'not_found' }, 404, cors);
     if (request.method === 'GET') return authJson({ github: publicGithubProject(project) }, 200, cors);
+    if (deleting) {
+      if (!project.github_repo) throw new BuildError('github_connection_required', 400);
+      lock = crypto.randomUUID();
+      const claimed = await env.DB.prepare(`UPDATE projects SET github_link_lock=?,github_link_until=? WHERE id=? AND user_id=? AND github_repo IS NOT NULL
+        AND (github_link_lock IS NULL OR github_link_until<?) AND NOT EXISTS(SELECT 1 FROM build_apps WHERE project_id=? AND active_turn_id IS NOT NULL)`)
+        .bind(lock, Date.now() + 10 * 60_000, id, user.id, Date.now(), id).run();
+      if (!claimed.meta.changes) throw new BuildError('github_project_busy', 409);
+      await deleteGithubHostedStorage(env, project, lock);
+      const app = await env.DB.prepare('SELECT source_json FROM build_apps WHERE project_id=? AND user_id=?').bind(id, user.id).first<{ source_json: string }>();
+      const pending = await env.DB.prepare('SELECT app_id FROM build_git_deletions WHERE app_id=?').bind(id).first();
+      return authJson({ github: publicGithubProject((await githubProject(env, user.id, id))!), storage: githubStorageState(app?.source_json ?? null, Boolean(pending)) }, pending ? 202 : 200, cors);
+    }
     const body = await readJSON(request, 4096);
     const repo = repoName.safeParse(body?.repo);
     if (!body || Object.keys(body).some(key => !['repo', 'branch'].includes(key)) || !repo.success || body.branch !== undefined && !validGithubBranch(body.branch)) throw new BuildError('invalid_request', 400);

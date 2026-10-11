@@ -4,9 +4,10 @@ import { BUILD_MAX_FILES, BUILD_MAX_FILE_BYTES, BUILD_MAX_SOURCE_BYTES, BuildErr
 import { githubBuildAPI, githubBuildUserToken, validGithubBranch } from './github-build';
 import { repoName } from './repo-launch';
 import { downloadGitPack } from './github-import';
-import { buildGitVersion, buildGitEntries, exportBuildGit, BUILD_GIT_IGNORE, type BuildGitRuntime, type BuildGitVersion } from './build-git';
-import { buildImageBytes, buildImagePath, savedBuildImages } from './build-images';
-import { readBuildSource, readBuildText, storeBuildSource } from './build-storage';
+import { buildGitVersion, buildGitEntries, exportBuildGit, deleteBuildGit, BUILD_GIT_IGNORE, type BuildGitRuntime, type BuildGitVersion } from './build-git';
+import { BUILD_IMAGE_MAX_BYTES, buildImageBytes, buildImagePath, savedBuildImages } from './build-images';
+import { readBuildSource, readBuildText, storeBuildSource, buildGithubSourceRef } from './build-storage';
+import { buildSourceZip } from './build-zip';
 import { acquireStorageLock, releaseStorageLock, storageMetered, listStoredObjects, deleteStoredObjects } from './r2-storage';
 
 export interface GithubProject {
@@ -22,6 +23,8 @@ export const publicGithubProject = (project: GithubProject) => project.github_re
   repo: project.github_repo, branch: project.github_branch!, commitId: project.github_commit_id,
   url: `https://github.com/${project.github_repo}/tree/${encodeURIComponent(project.github_branch!)}`,
 } : null;
+export const githubStorageState = (source: string | null, pending: boolean) => pending ? 'deleting' as const
+  : source && buildGithubSourceRef(JSON.parse(source)) ? 'github' as const : 'retained' as const;
 const refPath = (branch: string) => branch.split('/').map(encodeURIComponent).join('/');
 function assertRepository(repo: string, branch: string) {
   if (!repoName.safeParse(repo).success || !validGithubBranch(branch)) throw new BuildError('invalid_request', 400);
@@ -160,7 +163,82 @@ export async function githubSnapshot(env: Env, params: { userId: string; appId: 
   const source = Object.values(files).join('\n');
   for (const image of await savedBuildImages(env, params.appId)) if (source.includes(buildImagePath(image.id)))
     snapshot[`public${buildImagePath(image.id)}`] = buildImageBytes(image.data);
+  // Deleting the hosted copy removes image rows too. Referenced assets remain
+  // part of subsequent commits, loaded from the authorized GitHub repository.
+  const project = await githubProject(env, params.userId, params.appId);
+  if (project?.github_repo && project.github_commit_id) {
+    const paths: string[] = JSON.parse(project.github_paths_json);
+    const missing = paths.filter(path => /^public\/generated\/[a-f0-9-]+\.jpg$/.test(path)
+      && source.includes(path.slice('public'.length)) && !(path in snapshot));
+    if (missing.length) {
+      const token = await githubBuildUserToken(env, params.userId);
+      const tree = await githubTree(project.github_repo, project.github_commit_id, token);
+      for (const path of missing) {
+        const entry = tree.find(entry => entry.path === path && entry.type === 'blob');
+        if (!entry) throw new BuildError('build_source_unavailable');
+        snapshot[path] = await blobBytes(project.github_repo, entry, token);
+      }
+    }
+  }
   return snapshot;
+}
+
+export async function exportGithubSource(env: Env, project: GithubProject, sha: string, cors: HeadersInit) {
+  const token = await githubBuildUserToken(env, project.user_id);
+  const files = await githubSource(project.github_repo!, sha, token);
+  const images = (await githubTree(project.github_repo!, sha, token)).filter(entry => entry.type === 'blob' && /^public\/generated\/[a-f0-9-]+\.jpg$/.test(entry.path));
+  if (images.length > 12 || images.some(image => (image.size ?? 0) > BUILD_IMAGE_MAX_BYTES)) throw new BuildError('github_source_limit', 413);
+  const assets: Record<string, Uint8Array> = {};
+  for (const image of images) assets[image.path] = await blobBytes(project.github_repo!, image, token);
+  return new Response(buildSourceZip(files, assets), { headers: { ...cors,
+    'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="mainbrella-app.zip"', 'Cache-Control': 'no-store' } });
+}
+
+// Delete content only after checking that the current workspace was pushed.
+// Identity, GitHub authorization, conversation and financial evidence survive.
+export async function deleteGithubHostedStorage(env: Env, project: GithubProject, lock: string) {
+  if (!env.BUCKET) throw new BuildError('storage_unavailable');
+  const app = await env.DB.prepare('SELECT id,source_json,active_turn_id FROM build_apps WHERE project_id=? AND user_id=?')
+    .bind(project.id, project.user_id).first<{ id: string; source_json: string; active_turn_id: string | null }>();
+  if (!app || app.active_turn_id) throw new BuildError('github_project_busy', 409);
+  const pending = await env.DB.prepare('SELECT app_id FROM build_git_deletions WHERE app_id=?').bind(app.id).first();
+  if (pending && !buildGithubSourceRef(JSON.parse(app.source_json))) throw new BuildError('github_project_busy', 409);
+  if (!pending) {
+    const token = await githubBuildUserToken(env, project.user_id);
+    const sha = await githubHead(project.github_repo!, project.github_branch!, token);
+    if (!sha) throw new BuildError('github_source_not_pushed', 409);
+    const files = await readBuildSource(env, { userId: project.user_id, appId: app.id }, app.source_json);
+    const snapshot = await githubSnapshot(env, { userId: project.user_id, appId: app.id }, files);
+    const tree = new Map((await githubTree(project.github_repo!, sha, token)).filter(entry => entry.type === 'blob').map(entry => [entry.path, entry]));
+    const paths: string[] = JSON.parse(project.github_paths_json);
+    if (Object.entries(snapshot).some(([path, bytes]) => path !== '.gitignore' && tree.get(path)?.sha !== gitBlobSha(bytes))
+      || paths.some(path => validBuildPath(path) && !(path in files) && tree.has(path))) throw new BuildError('github_source_not_pushed', 409);
+    // Check Builder's import limits too, so deleting the local copy cannot
+    // strand a workspace whose remote repository has since grown too large.
+    await githubSource(project.github_repo!, sha, token);
+    if (await githubHead(project.github_repo!, project.github_branch!, token) !== sha) throw new BuildError('github_branch_conflict', 409);
+    const guard = 'EXISTS(SELECT 1 FROM projects WHERE id=? AND user_id=? AND github_link_lock=?)';
+    const args = [project.id, project.user_id, lock];
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO build_git_deletions(app_id,user_id,created_at) SELECT ?,?,? WHERE ${guard} ON CONFLICT(app_id) DO NOTHING`)
+        .bind(app.id, project.user_id, new Date().toISOString(), ...args),
+      env.DB.prepare(`UPDATE build_operations SET source_json=NULL,result_json=NULL WHERE turn_id IN(SELECT id FROM build_turns WHERE app_id=?) AND ${guard}`)
+        .bind(app.id, ...args),
+      ...['build_git_versions', 'build_revisions', 'build_images'].map(table => env.DB.prepare(`DELETE FROM ${table} WHERE app_id=? AND ${guard}`).bind(app.id, ...args)),
+      env.DB.prepare(`UPDATE build_apps SET source_json=?,git_version_id=NULL,verified_git_version_id=NULL WHERE id=? AND user_id=? AND active_turn_id IS NULL AND ${guard}`)
+        .bind(JSON.stringify({ $github: sha }), app.id, project.user_id, ...args),
+      env.DB.prepare(`UPDATE projects SET github_commit_id=?,github_cleanup_pending=0 WHERE id=? AND user_id=? AND github_link_lock=?`)
+        .bind(sha, ...args),
+    ]);
+    const saved = await env.DB.prepare('SELECT source_json FROM build_apps WHERE id=? AND user_id=?').bind(app.id, project.user_id).first<{ source_json: string }>();
+    const queued = await env.DB.prepare('SELECT app_id FROM build_git_deletions WHERE app_id=?').bind(app.id).first();
+    if (!saved || buildGithubSourceRef(JSON.parse(saved.source_json))?.$github !== sha || !queued) throw new BuildError('github_project_busy', 409);
+  }
+  // Retry from the beginning of the prefix; successful deletes update billing
+  // inventory. The scheduled deletion worker resumes any partial failure.
+  await deleteBuildGit(env, project.user_id, app.id).then(async () => {
+    await env.DB.prepare('DELETE FROM build_git_deletions WHERE app_id=?').bind(app.id).run();
+  }).catch(() => console.error('github_storage_cleanup_deferred', { projectId: project.id }));
 }
 function gitBlobSha(bytes: Uint8Array) { return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'); }
 function base64(bytes: Uint8Array) {
