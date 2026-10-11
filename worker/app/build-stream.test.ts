@@ -337,6 +337,56 @@ test('budget stops record the exact limit as the turn cause and explain it in di
   });
 });
 
+test('unfinished operations show progress only while their build is active', async t => {
+  const f = await fixture(t);
+  const ref = { params: f.params, id: 'text-0' };
+  await startBuildOperation(f.env, ref, 'text', 'Model response');
+  await saveBuildActivity(f.env, f.params, 0, { id: ref.id, type: 'message', text: 'Building your app.', status: 'running' });
+  const snapshots = async () => {
+    const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+    const report = await (await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${f.turnId}/diagnostics`), f.env)).json() as any;
+    return { turn: data.app.turns[0], report };
+  };
+  for (const status of ['queued', 'running']) {
+    f.sqlite.prepare('UPDATE build_turns SET status = ? WHERE id = ?').run(status, f.turnId);
+    const { turn, report } = await snapshots();
+    assert.equal(turn.activity[0].status, 'running');
+    assert.equal(turn.activity[0].explanation, 'Working on the code. Please stand by...');
+    assert.equal(report.operations[0].explanation, turn.activity[0].explanation);
+  }
+  await failBuildTurn(f.env, { id: f.turnId, app_id: f.appId, user_id: USER_ONE }, 'build_interrupted', ref.id);
+  const { turn, report } = await snapshots();
+  assert.equal(report.operations[0].finished_at, null, 'process loss can leave the operation without a completion record');
+  assert.equal(turn.activity[0].status, 'unknown');
+  assert.match(turn.errorExplanation, /Check your app before trying again/);
+  assert.equal(turn.activity[0].explanation, turn.errorExplanation);
+  assert.equal(report.errorExplanation, turn.errorExplanation);
+  assert.equal(report.operations[0].explanation, turn.errorExplanation);
+});
+
+test('a dropped model connection asks the user to retry instead of waiting for stopped work', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  f.env.AI = { async run() {
+    let reads = 0;
+    return new ReadableStream<Uint8Array>({ pull(controller) {
+      if (reads++ === 0) controller.enqueue(new TextEncoder().encode(delta({ content: 'Building your app.' })));
+      else controller.error(new Error('connection lost'));
+    } });
+  } } as unknown as Ai;
+  await runBuildAgent(f.env, f.params, immediateStep, Date.now());
+  const data = await (await handleBuildRequest(request(f.appId), f.env)).json() as any;
+  const turn = data.app.turns[0];
+  assert.equal(turn.status, 'failed');
+  assert.equal(turn.errorExplanation, 'The connection dropped before we could finish this step. Please try again.');
+  const report = await (await handleBuildRequest(request(f.appId, SESSION_ONE, `/turns/${f.turnId}/diagnostics`), f.env)).json() as any;
+  const inference = report.operations.find((op: any) => op.operation_id === 'text-0');
+  assert.equal(inference.status, 'unknown');
+  assert.equal(inference.evidence.termination, 'read_exception');
+  assert.ok(inference.finished_at);
+  assert.equal(inference.explanation, turn.errorExplanation);
+  assert.equal(report.errorExplanation, turn.errorExplanation);
+});
+
 test('EOF, missing finish reasons and read exceptions retain distinct stream evidence', async () => {
   for (const [text, expected, reject] of [
     [delta({ content: 'partial' }), 'eof', true],

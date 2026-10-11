@@ -171,6 +171,20 @@ test('GitHub Build authorization documents the exact same-origin project return 
   assert.ok(picker.responses[200].content['application/json'].schema.properties.nextCursor);
 });
 
+test('Build explanations document user guidance in progress snapshots and diagnostics', async () => {
+  const { paths, components } = await document();
+  const diagnostics = paths['/build/apps/{appId}/turns/{turnId}/diagnostics'].get.responses[200].content['application/json'].schema;
+  for (const explanation of [
+    components.schemas.BuildTurn.properties.activity.items.properties.explanation,
+    components.schemas.BuildTurn.properties.errorExplanation,
+    diagnostics.properties.operations.items.properties.explanation,
+    diagnostics.properties.errorExplanation,
+  ]) {
+    assert.match(explanation.description, /whether to wait, check the app, or try again/);
+    assert.deepEqual(explanation.type, ['string', 'null']);
+  }
+});
+
 test('Build repository browsing documents manifests and authenticated individual R2 file streams', async () => {
   const { paths, components } = await document();
   const operation = paths['/build/apps/{appId}/versions/{versionId}'].get;

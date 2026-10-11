@@ -38,12 +38,12 @@ function publicApp(row: BuildAppRow, turns?: BuildTurnRow[], activity: BuildActi
       stage: turn.stage, summary: turn.summary, error: turn.error, log: '', model: turn.model, effort: turn.effort ?? null,
       failureOperationId: turn.failure_operation_id ?? null,
       errorExplanation: operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)
-        ? operationExplanation(operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)!) : null,
+        ? operationExplanation(operations.find(op => op.turn_id === turn.id && op.operation_id === turn.failure_operation_id)!, turn.status) : null,
       activity: activity.filter(item => item.turn_id === turn.id).map(({ turn_id, ...item }) => {
         const op = operations.find(op => op.turn_id === turn.id && op.operation_id === item.id);
         const image = operations.find(op => op.turn_id === turn.id && op.operation_id === `image-${item.id}`);
         const state = op ? op.status === 'unknown' && !op.finished_at && ['queued', 'running'].includes(turn.status) ? 'running' : op.status : item.status;
-        return { ...item, status: state, explanation: image ? operationExplanation(image) : op ? operationExplanation(op) : null };
+        return { ...item, status: state, explanation: image ? operationExplanation(image, turn.status) : op ? operationExplanation(op, turn.status) : null };
       }),
       images: images.filter(image => image.turn_id === turn.id).map(publicBuildImage),
       ...turnTokenUsage(turn, operations), aiCostCents: (costs[turn.id] ?? 0) / 10000,
@@ -244,8 +244,8 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
         const { results: billing } = await env.DB.prepare('SELECT * FROM build_ai_usage WHERE turn_id = ? AND user_id = ? ORDER BY created_at')
           .bind(turn.id, user.id).all();
         return authJson({ schemaVersion: 1, turnId: turn.id, status: turn.status, error: turn.error, log: turn.log, failureOperationId: turn.failure_operation_id ?? null,
-          errorExplanation: operations.find(op => op.operation_id === turn.failure_operation_id) ? operationExplanation(operations.find(op => op.operation_id === turn.failure_operation_id)!) : null,
-          operations: await Promise.all(operations.map(async ({ evidence_json, result_json, source_json, ...op }) => ({ ...op, explanation: operationExplanation({ ...op, evidence_json, result_json, source_json }), evidence: JSON.parse(evidence_json),
+          errorExplanation: operations.find(op => op.operation_id === turn.failure_operation_id) ? operationExplanation(operations.find(op => op.operation_id === turn.failure_operation_id)!, turn.status) : null,
+          operations: await Promise.all(operations.map(async ({ evidence_json, result_json, source_json, ...op }) => ({ ...op, explanation: operationExplanation({ ...op, evidence_json, result_json, source_json }, turn.status), evidence: JSON.parse(evidence_json),
             result: result_json ? JSON.parse(await readBuildText(env, owner, result_json)) : null, source: source_json ? await readBuildSource(env, owner, source_json) : null }))), billing }, 200, cors);
       }
       if (match[3] === 'images') {

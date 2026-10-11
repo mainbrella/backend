@@ -1,4 +1,4 @@
-import { BuildError, validateBuildFiles, type BuildParams, type BuildFiles } from './build-contract';
+import { BuildError, validateBuildFiles, type BuildParams, type BuildFiles, type BuildTurnRow } from './build-contract';
 import { storeBuildSource, storeBuildText, canonicalBuildSource } from './build-storage';
 
 export type OperationStatus = 'proposed' | 'skipped' | 'blocked' | 'succeeded' | 'failed' | 'unknown';
@@ -102,14 +102,14 @@ export async function buildOperationTimeline(env: Env, turnId: string) {
   const { results } = await env.DB.prepare('SELECT * FROM build_operations WHERE turn_id = ? ORDER BY created_at, rowid').bind(turnId).all<OperationRow>();
   return results;
 }
-export function operationExplanation(row: OperationRow): string | null {
+export function operationExplanation(row: OperationRow, turnStatus?: BuildTurnRow['status']): string | null {
   const evidence = JSON.parse(row.evidence_json);
   const failure = row.result_json ? JSON.parse(row.result_json).failure as BuildFailure | undefined : undefined;
   if (row.operation_id.startsWith('limit-') && typeof evidence.reason === 'string') return evidence.reason;
   if (row.status === 'skipped') return 'Not run. The build stopped before this operation started.';
   if (row.status === 'proposed') return 'Proposed. Waiting for the model to finish its request.';
   if (row.kind === 'text' && evidence.finishReason === 'length') return `The model reached its ${evidence.tokenAllowance?.toLocaleString() ?? ''} token response limit before finishing. Incomplete tool requests were not run.`;
-  if (row.kind === 'text' && evidence.termination === 'read_exception') return 'The model stream disconnected before a complete response was retained. Its execution outcome is unknown.';
+  if (row.kind === 'text' && evidence.termination === 'read_exception') return 'The connection dropped before we could finish this step. Please try again.';
   if (row.kind === 'text' && failure?.code === 'model_response_incomplete') return `The model stream ended without a complete finish marker${evidence.doneSeen ? ' (the end marker arrived without a finish reason)' : ''}. Incomplete tool requests were not run.`;
   if (failure?.code === 'build_inference_timeout') return 'The model did not respond before the inference timeout. Incomplete tool requests were not run.';
   if (failure?.code === 'build_inference_disconnected') return 'The inference service disconnected before finishing. Incomplete tool requests were not run.';
@@ -129,7 +129,11 @@ export function operationExplanation(row: OperationRow): string | null {
   };
   if (failure && reasons[failure.code]) return reasons[failure.code];
   if (row.kind === 'command' && row.status === 'failed') return `${row.label} exited with code ${evidence.exitCode ?? 'unknown'}. Command output and the checked source are retained in diagnostics.`;
-  if (row.status === 'unknown') return 'Execution may have started, but no definitive result was retained.';
+  if (row.status === 'unknown') {
+    if (!row.finished_at && !failure && (turnStatus === 'queued' || turnStatus === 'running'))
+      return row.kind === 'text' ? 'Working on the code. Please stand by...' : 'Working on this step. Please stand by...';
+    return "We couldn't confirm whether this step finished. Check your app before trying again.";
+  }
   if (row.status === 'blocked') return 'Local validation prevented this operation from running.';
   return null;
 }
