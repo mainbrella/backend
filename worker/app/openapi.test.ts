@@ -57,7 +57,7 @@ const endpointMethods: Record<string, string[]> = {
   "/images": ["get", "post"], "/images/{id}": ["get", "delete"], "/images/{id}/logs": ["get"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
-  "/admin/users": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
+  "/admin/users": ["get"], "/admin/users/{userId}": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
   "/api/get-marketing-users": ["get"],
   "/api/send-marketing-email": ["post"],
   "/api/unsubscribe": ["post"],
@@ -356,6 +356,20 @@ test('prepaid schemas expose one-time funding, payment verification and consent-
   assert.match(paths['/billing/settings'].post.description, /explicitly authorizes/);
   assert.ok(components.schemas.PrepaidBalance.properties.autoRecharge);
   assert.ok(components.schemas.PrepaidBalance.properties.availableBalanceCents);
+});
+
+test('admin user detail documents safe prepaid funding and its allowlisted cookie protection', async () => {
+  const { paths } = await document();
+  const detail = paths['/admin/users/{userId}'].get;
+  assert.equal(detail.operationId, 'getAdminUserDetail');
+  assert.deepEqual(detail.security, [{ cookieAuth: [] }]);
+  assert.match(detail.description, /oneone@gmail\.com/);
+  assert.match(detail.description, /no Stripe requests or billing mutations/);
+  assert.ok(detail.parameters.some((parameter: any) => parameter.in === 'path' && parameter.name === 'userId' && parameter.required));
+  assert.equal(detail.parameters.find((parameter: any) => parameter.name === 'limit').schema.maximum, 100);
+  assert.equal(detail.responses['200'].content['application/json'].schema.properties.balance.$ref, '#/components/schemas/PrepaidBalance');
+  assert.deepEqual(Object.keys(detail.responses['200'].content['application/json'].schema.properties).sort(),
+    ['asOf', 'balance', 'fundings', 'nextFundingCursor', 'user']);
 });
 
 test("schema describes optional container bodies, multipart image source, and WebSocket upgrades", async () => {

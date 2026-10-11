@@ -271,6 +271,93 @@ test("admin users include stored active subscription and trial plan levels", asy
   assert.equal(plans.get('checkout-trial'), 'pro');
 });
 
+test("admin user detail requires the allowlisted cookie session", async t => {
+  const { call, sqlite, adminToken, memberToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  const path = "/admin/users/member";
+  assert.equal((await call(path)).status, 401);
+  assert.equal((await call(path, memberToken)).status, 403);
+  assert.equal((await call(path, adminToken, "GET", "https://example.com")).status, 403);
+  assert.equal((await call(path, adminToken, "POST")).status, 405);
+});
+
+test("admin user detail routes funding history to the requested account and returns only the safe subset", async t => {
+  const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  sqlite.exec(readFileSync(new URL("../../migrations/012_email_password.sql", import.meta.url), "utf8"));
+  const userID = "target-user";
+  sqlite.prepare("INSERT INTO users (id, name, email, dob, created_at, google_sub, password_hash) VALUES (?, 'Target', 'target@example.com', '1990-01-02', '2026-01-03T00:00:00.000Z', 'private-google', 'private-password')").run(userID);
+  let routedName = "";
+  let internalRequest: Request | undefined;
+  const history = {
+    asOf: 1770000000000,
+    balance: { balanceCents: 2000, availableBalanceCents: 1800, reservedBalanceCents: 200, currency: "usd", spendLimitCents: 5000,
+      monthlyUsageCents: 100, productionHourlyCents: 25, fundedRuntimeMs: 60000, minimumProductionRuntimeMs: 86400000,
+      autoRecharge: { enabled: false, amountCents: 500, monthlyLimitCents: 500, spentCents: 0, status: "disabled" } },
+    fundings: [{ id: "pi_safe", createdAt: 1760000000000, amountCents: 2000, revokedCents: 0, reason: null }],
+    nextFundingCursor: "pi_safe", resources: [{ id: "must-not-leak" }], totals: { mustNotLeak: true },
+  };
+  env.CONTAINER_ACCOUNT = { idFromName(name: string) { routedName = name; return name; }, get() { return { async fetch(request: Request) {
+    internalRequest = request;
+    return Response.json(history);
+  } }; } } as unknown as Env["CONTAINER_ACCOUNT"];
+
+  const response = await call(`/admin/users/${userID}?limit=7&fundingCursor=pi_previous`, adminToken);
+  assert.equal(response.status, 200);
+  assert.equal(routedName, `account:${userID}`);
+  assert.equal(internalRequest?.url, "https://internal/billing/history?limit=7&fundingCursor=pi_previous");
+  assert.equal(internalRequest?.headers.get("x-mainbrella-user"), userID);
+  assert.equal(internalRequest?.method, "GET");
+  const body = await response.json() as Record<string, any>;
+  assert.deepEqual(Object.keys(body).sort(), ["asOf", "balance", "fundings", "nextFundingCursor", "user"]);
+  assert.deepEqual(body.user, { id: userID, email: "target@example.com", name: "Target", dob: "1990-01-02", created_at: "2026-01-03T00:00:00.000Z", plan: "none" });
+  assert.deepEqual(body.fundings, history.fundings);
+  assert.deepEqual(body.balance, history.balance);
+  assert.equal(JSON.stringify(body).includes("private-google"), false);
+  assert.equal(JSON.stringify(body).includes("private-password"), false);
+  assert.equal(JSON.stringify(body).includes("must-not-leak"), false);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+});
+
+test("admin user detail validates path and query input and skips the account service for missing users", async t => {
+  const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  let calls = 0;
+  env.CONTAINER_ACCOUNT = { idFromName(name: string) { return name; }, get() { return { async fetch() { calls++; return Response.json({}); } }; } } as unknown as Env["CONTAINER_ACCOUNT"];
+  const absent = await call("/admin/users/absent", adminToken);
+  assert.equal(absent.status, 404);
+  assert.deepEqual(await absent.json(), { error: "not_found" });
+  assert.equal(calls, 0);
+
+  for (const path of [
+    "/admin/users/%ZZ", `/admin/users/${"u".repeat(201)}`, "/admin/users/member?other=x",
+    "/admin/users/member?limit=0", "/admin/users/member?limit=101", "/admin/users/member?limit=1.5",
+    "/admin/users/member?limit=1e2", "/admin/users/member?fundingCursor=", `/admin/users/member?fundingCursor=${"x".repeat(201)}`,
+  ]) {
+    const response = await call(path, adminToken);
+    assert.equal(response.status, 400, path);
+  }
+});
+
+test("admin user detail maps invalid history cursors to 400 and hides account failures", async t => {
+  const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  sqlite.prepare("INSERT INTO users (id, name) VALUES ('target', 'Target')").run();
+  t.mock.method(console, "error", () => {});
+  let failure: "cursor" | "unavailable" = "cursor";
+  env.CONTAINER_ACCOUNT = { idFromName(name: string) { return name; }, get() { return { async fetch() {
+    if (failure === "unavailable") throw new Error("Private account details");
+    return Response.json({ error: "invalid_history_cursor" }, { status: 400 });
+  } }; } } as unknown as Env["CONTAINER_ACCOUNT"];
+  const invalid = await call("/admin/users/target?fundingCursor=bad", adminToken);
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: "invalid_history_cursor" });
+  failure = "unavailable";
+  const unavailable = await call("/admin/users/target", adminToken);
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(await unavailable.json(), { error: "admin_unavailable" });
+});
+
 test("admin table reads require a session for oneone@gmail.com", async () => {
   const { call, sqlite, adminID, adminToken, memberToken } = await fixture();
   assert.equal((await call("/admin/tables")).status, 401);

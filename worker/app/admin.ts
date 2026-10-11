@@ -1,8 +1,27 @@
 import { authCorsHeaders, authJson, currentUser, type AuthUser } from "./auth-core";
 import type { Plan } from "../lib/stripe";
+import { accountBillingRequest, type PrepaidHistory } from "../lib/prepaid-billing";
 
 export const ADMIN_EMAIL = "oneone@gmail.com";
 const PAGE_SIZE = 25;
+
+type AdminUser = Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at"> & { plan: Plan | "none" };
+
+const adminUserQuery = `SELECT users.id, users.email, users.name, users.dob, users.created_at,
+  CASE
+    WHEN billing.subscription_status = 'active' AND billing.current_period_end > ?
+      THEN COALESCE(billing.plan, 'none')
+    WHEN billing.stripe_subscription_id IS NULL AND trial.expires_at > ?
+      THEN trial.plan
+    ELSE 'none'
+  END AS plan
+FROM users
+LEFT JOIN pro_billing AS billing ON billing.user_id = users.id
+LEFT JOIN trial_redemptions AS trial ON trial.user_id = users.id`;
+
+function adminUserArgs() {
+  return [Date.now() / 1000, Date.now()] as const;
+}
 
 type TableDefinition = {
   id: string;
@@ -74,20 +93,45 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     }
     if (url.pathname === "/admin/users") {
       const rows = await env.DB.prepare(
-        `SELECT users.id, users.email, users.name, users.dob, users.created_at,
-          CASE
-            WHEN billing.subscription_status = 'active' AND billing.current_period_end > ?
-              THEN COALESCE(billing.plan, 'none')
-            WHEN billing.stripe_subscription_id IS NULL AND trial.expires_at > ?
-              THEN trial.plan
-            ELSE 'none'
-          END AS plan
-        FROM users
-        LEFT JOIN pro_billing AS billing ON billing.user_id = users.id
-        LEFT JOIN trial_redemptions AS trial ON trial.user_id = users.id
-        ORDER BY users.created_at DESC, users.id DESC`,
-      ).bind(Date.now() / 1000, Date.now()).all<Pick<AuthUser, "id" | "email" | "name" | "dob" | "created_at"> & { plan: Plan | "none" }>();
+        `${adminUserQuery} ORDER BY users.created_at DESC, users.id DESC`,
+      ).bind(...adminUserArgs()).all<AdminUser>();
       return authJson({ users: rows.results || [] }, 200, corsHeaders);
+    }
+    const detailMatch = /^\/admin\/users\/([^/]+)$/.exec(url.pathname);
+    if (detailMatch) {
+      let userId: string;
+      try { userId = decodeURIComponent(detailMatch[1]); }
+      catch { return authJson({ error: "invalid_user_id" }, 400, corsHeaders); }
+      if (!userId || userId.length > 200) return authJson({ error: "invalid_user_id" }, 400, corsHeaders);
+
+      const query = url.searchParams;
+      if ([...query.keys()].some(key => !["limit", "fundingCursor"].includes(key))
+        || query.getAll("limit").length > 1 || query.getAll("fundingCursor").length > 1) {
+        return authJson({ error: "invalid_request" }, 400, corsHeaders);
+      }
+      const limitText = query.get("limit") ?? "50";
+      const limit = Number(limitText);
+      if (!/^\d+$/.test(limitText) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        return authJson({ error: "invalid_limit" }, 400, corsHeaders);
+      }
+      const fundingCursor = query.get("fundingCursor");
+      if (query.has("fundingCursor") && (!fundingCursor || fundingCursor.length > 200)) {
+        return authJson({ error: "invalid_request" }, 400, corsHeaders);
+      }
+
+      const row = await env.DB.prepare(`${adminUserQuery} WHERE users.id = ?`)
+        .bind(...adminUserArgs(), userId).first<AdminUser>();
+      if (!row) return authJson({ error: "not_found" }, 404, corsHeaders);
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (fundingCursor !== null) params.set("fundingCursor", fundingCursor);
+      const history = await accountBillingRequest<PrepaidHistory>(env, userId, `/billing/history?${params}`);
+      return authJson({
+        user: row,
+        asOf: history.asOf,
+        balance: history.balance,
+        fundings: history.fundings,
+        nextFundingCursor: history.nextFundingCursor,
+      }, 200, corsHeaders);
     }
     if (url.pathname === "/admin/tables") {
       return authJson({ tables: TABLES.map(({ id, label, group, columns }) => ({ id, label, group, columns })) }, 200, corsHeaders);
@@ -114,6 +158,9 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     ).bind(...filterArgs, PAGE_SIZE, offset).all<Record<string, unknown>>();
     return authJson({ items: rows.results || [], total: count?.total || 0, offset, limit: PAGE_SIZE }, 200, corsHeaders);
   } catch (error) {
+    if (error instanceof Error && error.message === "invalid_history_cursor") {
+      return authJson({ error: "invalid_history_cursor" }, 400, corsHeaders);
+    }
     console.error("admin_read_error", error);
     return authJson({ error: "admin_unavailable" }, 503, corsHeaders);
   }
