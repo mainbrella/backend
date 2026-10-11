@@ -27,10 +27,10 @@ function fixture(initialPlan='builder'){
       machines.set(name,{ctx,controller,runtime,fetch:req=>controller.fetch(req)});
     }return machines.get(name);
   };
-  const accountFor=user=>{if(!accounts.has(user))accounts.set(user,new ContainerAccountController({storage:new Storage()},machineFor,()=>now));return accounts.get(user);};
+  const accountFor=user=>{if(!accounts.has(user))accounts.set(user,new ContainerAccountController({storage:new Storage()},machineFor,()=>now,async()=> 'invoice_test'));return accounts.get(user);};
   const call=async(path,method='GET',body,headers={},user='owner')=>{
     const response=await accountFor(user).fetch(new Request('https://internal'+path,{method,headers:{'x-mainbrella-user':user,
-      ...entitlementHeaders({active:paid,plan:paid?plan:null,validUntil:paid?now+90*86400_000:null,checkedAt:now}),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})}));
+      ...entitlementHeaders({active:paid,plan:paid?plan:null,validUntil:paid?now+90*86400_000:null,checkedAt:now,...(plan==='usage'?{billing:{customerId:'cus_owner',subscriptionId:'sub_owner',periodStart:Date.UTC(2026,9,1),periodEnd:Date.UTC(2026,10,1)}}:{})}),...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})}));
     return {status:response.status,data:await response.json()};
   };
   const start=async(body={},key=crypto.randomUUID(),user='owner')=>call('/containers','POST',body,{'Idempotency-Key':key},user);
@@ -196,4 +196,198 @@ test('retained workspace receipts are stored in bounded chunks and legacy indexe
   assert.equal((await account.workspaces.index()).records.length,3000);
   f.setTime(now+86400_000);await account.workspaces.prune();assert.equal((await account.workspaces.index()).records.length,0);
   assert.equal((await storage.list({prefix:'workspaceIndex:'})).size,0);
+});
+
+
+const lifecycle = (f, action, source, key=crypto.randomUUID(), extra={}) => f.call(`/containers/${action}`, 'POST', {id:source.id,createdAt:source.createdAt,...extra}, {'Idempotency-Key':key});
+
+test('safe stop preserves bytes, reserves identity without compute, and resumes with a fresh generation after eviction', async()=>{
+  const f=fixture(),source=(await f.start({name:'Development'})).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={binary:new Uint8Array([0,255]),nested:'saved'};
+  const stopped=await lifecycle(f,'stop',source,'stop-1');assert.equal(stopped.status,200);
+  assert.equal(stopped.data.containers[0].status,'stopped');assert.equal(stopped.data.containers[0].id,source.id);
+  assert.ok(stopped.data.containers[0].persistenceExpiresAt>f.now());assert.equal(stopped.data.usage.concurrentComputeUnits,0);
+  assert.equal(stopped.data.usage.reservedComputeUnitHours,0);assert.equal(runtime.running,false);
+  const account=f.accountFor('owner');f.accounts.set('owner',new ContainerAccountController(account.ctx,f.machineFor,f.now));
+  const other=(await f.start()).data.containers.find(c=>c.status==='running');assert.notEqual(other.id,source.id);
+  const resumed=await lifecycle(f,'resume',source,'resume-1');assert.equal(resumed.status,200);
+  const current=resumed.data.containers.find(c=>c.id===source.id);assert.equal(current.status,'running');assert.equal(current.name,'Development');assert.notEqual(current.createdAt,source.createdAt);
+  assert.deepEqual(runtime.files,{binary:new Uint8Array([0,255]),nested:'saved'});
+  assert.equal((await lifecycle(f,'resume',source,'resume-1')).data.creation.id,resumed.data.creation.id);assert.equal(runtime.starts.length,2);
+  assert.equal((await lifecycle(f,'stop',source,'stop-1')).status,200);assert.equal(runtime.running,true);
+  assert.equal((await lifecycle(f,'stop',source,'stale-stop')).status,409);assert.equal(runtime.running,true);
+  assert.equal((await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE')).status,409);assert.equal(runtime.running,true);
+});
+
+test('lost stop response is replayed after controller eviction without recapture or restarting compute',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],machine=f.machineFor('owner',source.id),original=machine.fetch;
+  let lost=true;machine.fetch=async request=>{const response=await original(request);if(lost&&request.method==='DELETE'){lost=false;throw new Error('response_lost');}return response;};
+  assert.equal((await lifecycle(f,'stop',source,'lost-stop')).status,503);assert.equal(machine.runtime.running,false);
+  const account=f.accountFor('owner');f.accounts.set('owner',new ContainerAccountController(account.ctx,f.machineFor,f.now));
+  const retried=await lifecycle(f,'stop',source,'lost-stop');assert.equal(retried.status,200);assert.equal(retried.data.containers[0].status,'stopped');assert.equal(machine.runtime.captures,1);
+  assert.equal((await lifecycle(f,'stop',{...source,createdAt:new Date(f.now()+1).toISOString()},'lost-stop')).status,409);
+});
+
+test('failed and ambiguous stop captures retain the live source and never recapture an uncertain provider operation',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={important:'keep'};runtime.captureFails=true;
+  assert.equal((await lifecycle(f,'stop',source,'failed-capture')).status,503);assert.equal(runtime.running,true);
+  runtime.captureFails=false;assert.equal((await lifecycle(f,'stop',source,'failed-capture')).status,503);
+  assert.equal(runtime.captures,1);assert.deepEqual(runtime.files,{important:'keep'});
+  assert.equal((await lifecycle(f,'stop',source,'new-operation')).status,200);assert.equal(runtime.captures,2);
+});
+
+test('expired or deleted stop snapshots never launch an empty replacement and deletion frees the suspended identity',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0];
+  const stopped=(await lifecycle(f,'stop',source)).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  f.setTime(stopped.persistenceExpiresAt);
+  assert.equal((await lifecycle(f,'resume',source)).status,410);assert.equal(runtime.starts.length,1);
+  assert.equal((await f.call('/containers')).data.containers[0].stopReason,'workspace_expired');
+  const deleted=await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE');assert.equal(deleted.status,200);assert.deepEqual(deleted.data.containers,[]);
+  const next=(await f.start()).data.containers[0];assert.equal(next.id,source.id);assert.notEqual(next.createdAt,source.createdAt);
+  const again=(await lifecycle(f,'stop',next)).data.containers[0];
+  await f.call('/workspaces?workspaceId='+again.workspaceId,'DELETE');assert.equal((await lifecycle(f,'resume',next)).status,404);assert.equal(runtime.starts.length,2);
+});
+
+test('failed restore retains the suspended checkpoint for a later explicitly keyed retry',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={data:'preserved'};await lifecycle(f,'stop',source);runtime.restoreFails=true;
+  assert.equal((await lifecycle(f,'resume',source,'bad-restore')).data.error,'workspace_restore_failed');
+  assert.ok(runtime.starts.at(-1).containerSnapshot);assert.equal(runtime.starts.at(-1).image,undefined);
+  f.setTime(f.now()+91000);assert.equal((await f.call('/containers')).data.containers[0].status,'stopped');
+  runtime.restoreFails=false;assert.equal((await lifecycle(f,'resume',source,'good-restore')).status,200);assert.deepEqual(runtime.files,{data:'preserved'});
+});
+
+test('filesystem fork keeps the source running and mutations isolated, with idempotent creation and generation fencing',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={dependencies:'installed'};
+  const forked=await lifecycle(f,'fork',source,'fork-1',{name:'Branch'});assert.equal(forked.status,200);
+  const clone=forked.data.containers.find(c=>c.id!==source.id),cloneRuntime=f.machineFor('owner',clone.id).runtime;
+  assert.equal(clone.name,'Branch');assert.equal(runtime.running,true);assert.deepEqual(cloneRuntime.files,runtime.files);
+  cloneRuntime.files.dependencies='changed';assert.equal(runtime.files.dependencies,'installed');
+  assert.equal((await lifecycle(f,'fork',source,'fork-1',{name:'Branch'})).data.creation.id,forked.data.creation.id);assert.equal(runtime.captures,1);
+  assert.equal((await lifecycle(f,'fork',source,'fork-1',{name:'Changed'})).status,409);
+  assert.equal((await lifecycle(f,'fork',{...source,createdAt:new Date(f.now()+1).toISOString()})).status,409);
+  assert.equal((await f.call('/containers/fork','POST',{id:source.id,createdAt:source.createdAt},{'Idempotency-Key':'other'},'other')).status,409);
+});
+
+test('fork capture replay can finish after source deletion, with no second provider capture',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={marker:'checkpoint'};
+  // Persist a capture but fail preflight before the target creation reservation.
+  const target=f.machineFor('owner','c1'),original=target.fetch;
+  target.fetch=async request=>new URL(request.url).pathname==='/workspaces/restore-preflight-v1'?Response.json({error:'unavailable'},{status:503}):original(request);
+  assert.equal((await lifecycle(f,'fork',source,'retry-fork')).status,503);assert.equal(runtime.captures,1);
+  await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE');target.fetch=original;
+  const retried=await lifecycle(f,'fork',source,'retry-fork');assert.equal(retried.status,200);assert.equal(runtime.captures,1);
+  assert.deepEqual(f.machineFor('owner',retried.data.creation.containerId).runtime.files,{marker:'checkpoint'});
+});
+
+test('fork and normal create cannot share an idempotency key and capacity rejection captures nothing',async()=>{
+  const f=fixture(),first=await f.start({},'normal-key'),source=first.data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  assert.equal((await lifecycle(f,'fork',source,'normal-key')).status,409);assert.equal(runtime.captures,0);
+  for(let i=0;i<4;i++)assert.equal((await f.start()).status,200);
+  assert.equal((await lifecycle(f,'fork',source)).data.error,'container_limit_exceeded');assert.equal(runtime.captures,0);
+});
+
+test('production explicit stop prevents recovery until resume and restores the latest stop checkpoint on later recovery',async()=>{
+  const f=fixture('usage'),source=(await f.start({lifecycle:'production',startupCommand:'node server.js',name:'Service'})).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  runtime.files={upload:'saved'};assert.equal((await lifecycle(f,'stop',source)).status,200);
+  assert.equal((await f.call('/containers')).data.containers[0].status,'stopped');assert.equal(runtime.starts.length,1);
+  const resumed=await lifecycle(f,'resume',source);assert.equal(resumed.status,200);
+  const current=resumed.data.containers[0];assert.equal(current.lifecycle,'production');assert.equal(current.name,'Service');assert.deepEqual(runtime.files,{upload:'saved'});
+  assert.ok(runtime.starts.at(-1).entrypoint.join(' ').includes('node server.js'));
+  runtime.files.unsaved='not checkpointed';runtime.running=false;
+  const recovered=await f.call('/containers');assert.equal(recovered.status,200);assert.equal(recovered.data.containers[0].createdAt,current.createdAt);
+  assert.deepEqual(runtime.files,{upload:'saved'});assert.ok(runtime.starts.at(-1).containerSnapshot);
+});
+
+
+test('resuming pending status never lets the old stopped generation delete the replacement',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],machine=f.machineFor('owner',source.id);
+  await lifecycle(f,'stop',source);
+  let release,entered;
+  const booted=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+  const exec=machine.runtime.exec;
+  machine.runtime.exec=async function(argv){entered();await gate;return exec.call(this,argv);};
+  const resume=lifecycle(f,'resume',source);await booted;
+  try{
+    const pending=await f.call('/containers');assert.equal(pending.data.containers[0].status,'starting');assert.notEqual(pending.data.containers[0].createdAt,source.createdAt);
+    assert.equal((await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE')).status,409);
+  }finally{release();}
+  assert.equal((await resume).status,200);assert.equal(machine.runtime.running,true);
+});
+
+test('production recovery cannot resurrect a deleted filesystem checkpoint or fall back to its image',async()=>{
+  const f=fixture('usage'),source=(await f.start({lifecycle:'production',startupCommand:'node app.js'})).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  const stopped=(await lifecycle(f,'stop',source)).data.containers[0];await lifecycle(f,'resume',source);
+  await f.call('/workspaces?workspaceId='+stopped.workspaceId,'DELETE');runtime.running=false;
+  const recovered=await f.call('/containers');assert.equal(recovered.data.containers[0].status,'stopped');assert.equal(recovered.data.containers[0].stopReason,'workspace_not_found');assert.equal(runtime.starts.length,2);
+});
+
+test('stop/resume and forks retain outbound restrictions and vault bindings without exposing provider handles',async()=>{
+  const f=fixture(),account=f.accountFor('owner'),policy={allow:['api.example.com'],deny:[]},bindings=['sec_00000000-0000-4000-8000-000000000001'];
+  account.security={validateSelection:async()=>null};
+  for(const id of ['small','c1'])f.machineFor('owner',id).controller.security={available:()=>true,install:async()=>{}};
+  const source=(await f.start({networkPolicy:policy,secretBindings:bindings})).data.containers[0];assert.deepEqual(source.networkPolicy,policy);
+  const forked=await lifecycle(f,'fork',source),clone=forked.data.containers.find(c=>c.id!==source.id);assert.equal(forked.status,200);assert.deepEqual(clone.networkPolicy,policy);assert.deepEqual(clone.secretBindings,bindings);
+  assert.equal(f.machineFor('owner',clone.id).runtime.starts[0].enableInternet,false);
+  const stopped=await lifecycle(f,'stop',source);assert.equal(stopped.status,200);assert.ok(!JSON.stringify(stopped.data).includes('containerSnapshot'));
+  const resumed=await lifecycle(f,'resume',source);assert.equal(resumed.status,200);const current=resumed.data.containers.find(c=>c.id===source.id);
+  assert.deepEqual(current.networkPolicy,policy);assert.deepEqual(current.secretBindings,bindings);assert.equal(f.machineFor('owner',source.id).runtime.starts.at(-1).enableInternet,false);
+});
+
+test('lost capture receipts remain recoverable after the source runtime stops, without recapture',async()=>{
+  for(const action of ['stop','save']){
+    const f=fixture(),source=(await f.start({name:'Durable receipt'})).data.containers[0],machine=f.machineFor('owner',source.id),original=machine.fetch;
+    machine.runtime.files={important:'receipt-backed'};let lost=true;
+    machine.fetch=async request=>{const response=await original(request);if(lost&&new URL(request.url).pathname==='/workspaces/snapshot-v1'){lost=false;throw new Error('response_lost');}return response;};
+    const call=()=>action==='stop'?lifecycle(f,'stop',source,'receipt-key'):f.save(source,{stop:true},'receipt-key');
+    assert.equal((await call()).status,503);machine.runtime.running=false;
+    const recovered=await call();assert.ok([200,201].includes(recovered.status),JSON.stringify(recovered));assert.equal(machine.runtime.captures,1);
+    if(action==='stop'){
+      assert.equal(recovered.data.containers[0].status,'stopped');assert.equal(recovered.data.containers[0].name,'Durable receipt');
+      assert.equal((await lifecycle(f,'resume',source)).status,200);assert.deepEqual(machine.runtime.files,{important:'receipt-backed'});
+    }else assert.equal(recovered.data.stopCompleted,true);
+  }
+});
+
+test('workspace chunks remain below provider value limits with maximum outbound policy metadata',async()=>{
+  const f=fixture(),account=f.accountFor('owner'),storage=account.ctx.storage;
+  const networkPolicy={allow:Array.from({length:64},(_,i)=>`${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${i}.example.com`),deny:Array.from({length:64},(_,i)=>`${'d'.repeat(63)}.${'e'.repeat(63)}.${'f'.repeat(63)}.${i}.example.com`)};
+  const records=Array.from({length:40},(_,i)=>({id:String(i),networkPolicy,name:'x'.repeat(80),expiresAt:f.now()+86400000}));
+  const put=storage.put.bind(storage);storage.put=async(k,v)=>{assert.ok(Buffer.byteLength(JSON.stringify(v))<128*1024);return put(k,v);};
+  await account.workspaces.persist({records,usage:{},captureUsage:{}});assert.deepEqual((await account.workspaces.index()).records,records);
+});
+
+
+test('oversized account policy growth rejects creation and fork before capture or compute reservation',async()=>{
+  const f=fixture(),account=f.accountFor('owner'),policy={allow:['api.example.com'],deny:[]};
+  account.security={validateSelection:async()=>null};f.machineFor('owner','small').controller.security={available:()=>true,install:async()=>{}};
+  const source=(await f.start({networkPolicy:policy})).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
+  const state=await account.ctx.storage.get('containerAccount');state.retainedAccountingEvidence='x'.repeat(112*1024);await account.ctx.storage.put('containerAccount',state);
+  const rejected=await f.start({networkPolicy:policy});assert.equal(rejected.status,409);assert.equal(rejected.data.error,'network_policy_capacity_exceeded');
+  assert.equal((await lifecycle(f,'fork',source)).data.error,'network_policy_capacity_exceeded');assert.equal(runtime.captures,0);
+  assert.equal((await f.call('/containers')).data.usage.starts,1);
+});
+
+
+test('revoked secret bindings reject a fork before snapshot cost',async()=>{
+  const f=fixture(),account=f.accountFor('owner');account.security={validateSelection:async()=>null};
+  f.machineFor('owner','small').controller.security={available:()=>true,install:async()=>{}};
+  const source=(await f.start({networkPolicy:{allow:['api.example.com']},secretBindings:['sec_00000000-0000-4000-8000-000000000001']})).data.containers[0];
+  account.security.validateSelection=async()=> 'secret_not_found';
+  const fork=await lifecycle(f,'fork',source);assert.equal(fork.status,404);assert.equal(fork.data.error,'secret_not_found');assert.equal(f.machineFor('owner',source.id).runtime.captures,0);
+});
+
+
+test('a lost stop capture can recover its workspace without stopping a newer slot generation',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],machine=f.machineFor('owner',source.id),original=machine.fetch;let lost=true;
+  machine.runtime.files={old:'checkpoint'};
+  machine.fetch=async request=>{const response=await original(request);if(lost&&new URL(request.url).pathname==='/workspaces/snapshot-v1'){lost=false;throw new Error('response_lost');}return response;};
+  assert.equal((await lifecycle(f,'stop',source,'old-capture')).status,503);machine.runtime.running=false;
+  const replacement=(await f.start()).data.containers[0];assert.equal(replacement.id,source.id);assert.notEqual(replacement.createdAt,source.createdAt);
+  assert.equal((await lifecycle(f,'stop',source,'old-capture')).status,409);assert.equal(machine.runtime.running,true);assert.equal(machine.runtime.captures,1);
+  const saved=(await f.call('/workspaces')).data.workspaces[0];assert.equal(saved.status,'ready');
+  const restored=await f.start({workspaceId:saved.id});assert.equal(restored.status,200);assert.deepEqual(f.machineFor('owner',restored.data.creation.containerId).runtime.files,{old:'checkpoint'});
 });

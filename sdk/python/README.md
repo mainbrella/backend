@@ -153,3 +153,37 @@ client.workspaces.delete(saved["id"])
 ```
 
 `client.workspaces.list()`, `.get(id)` and `.update(id, name=…, archived=True)` manage metadata. Retry an ambiguous save with the original body and key (`error.idempotency_key`). Restore consumes one start and requires the saved image digest, size and internet policy. Filesystem bytes return in a fresh generation; RAM, processes and previews do not resume. Quotas and expiry apply. Archive retains quota; deletion revokes future restores without immediately erasing provider-held bytes.
+
+## Unreleased filesystem lifecycle and security helpers
+
+The following helpers are implemented in this checkout; they are not part of the
+published 0.1.0 package. Install from this checkout to test them and check live
+capabilities before use. Backend deployment and SDK publication are separate.
+
+```python
+sandbox.stop(idempotency_key="stop-my-job")
+resumed = sandbox.resume(idempotency_key="resume-my-job")
+fork = resumed.fork(name="Experiment", idempotency_key="fork-my-job")
+fork.delete()  # destructive; kill() and context-manager cleanup stay destructive
+
+secret = client.secrets.create("Upstream API", os.environ["UPSTREAM_API_KEY"],
+                               "api.example.com", prefix="Bearer ")
+restricted = client.create(network_policy={"allow": ["api.example.com"], "deny": []},
+                           secret_bindings=[secret["id"]])
+client.secrets.rotate(secret["id"], os.environ["REPLACEMENT_API_KEY"])
+client.secrets.delete(secret["id"])
+```
+
+Stop captures files before releasing compute; Resume returns a new generation,
+and Fork leaves the source running. Each capture uses saved-workspace retention
+and quota; a resume/fork consumes a normal start. Preserve the same key on an
+uncertain result. There is no RAM/process preservation or automatic capture on
+provider crash. Production recovery after an explicit resume uses its saved
+checkpoint, so later writes still need external durable storage.
+
+Restricted machines require `networking.egressPolicies`; secret bindings require
+`secrets.vault`. Policy implies internet disabled and permits only mediated HTTP
+and HTTPS to allowed public destinations. CIDR/domain denies take precedence.
+The relay injects credentials outside the guest into the configured HTTPS host
+and header. Secret values are never readable through the SDK. Choose a trusted
+upstream and scoped tokens; an upstream can disclose transformed credentials.

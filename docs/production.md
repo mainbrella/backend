@@ -17,8 +17,8 @@ limit. Explicit deletion removes desired state before cleanup. Revoked or
 cap-stopped desired services remain visible and only recover with authorized
 compute. Legacy subscriptions cannot create Production services.
 
-Provider recovery uses a fresh reservation, the pinned image and saved startup
-command, with backoff from 30 seconds to five minutes. The logical service identity
+Provider recovery uses a fresh reservation, the pinned image (or the most recent
+explicit-stop checkpoint after a resume) and saved startup command, with backoff from 30 seconds to five minutes. The logical service identity
 stays stable; explicit recreation gets a new identity. Private outbound routing
 is reinstalled, while project binding and network membership remain attached.
 Managed command handles and live connections are closed on a runtime stop.
@@ -32,9 +32,20 @@ removing the desired service. There is no new unpaid grace period. Interrupted
 compute automatically resumes with the same logical identity once access is
 verified. Confirmed stopped intervals are excluded from billing.
 
-Use stateless applications with external durable storage. Recovery starts from
-the image, not unsaved local files or RAM. This release provides no persistent
-disk, replica failover, HTTP health monitoring, rollback, or uptime SLA.
+When lifecycle persistence is enabled, safe stop captures the writable filesystem
+before stopping compute and suspends desired service recovery. Resume restores
+that checkpoint and startup command into the same slot with a fresh generation.
+Later provider recovery also uses the checkpoint, subject to workspace retention,
+archive and deletion policy. An expired or revoked checkpoint fails closed; it
+never silently boots an empty image.
+
+Writes made after the last successful stop are not continuously checkpointed.
+A newly created service without a checkpoint still recovers from its image.
+Use external durable storage for databases and uploads that must survive an
+unexpected provider stop without data loss. Filesystem checkpoints do not save
+RAM/process state and have the documented workspace quotas and expiry. This
+release provides no mounted persistent disk, replica failover, HTTP health
+monitoring, rollback, or uptime SLA.
 
 Deploy the private runtime, account/API worker, then web UI. The account checks
 production feature discovery and uses /container/production-v1 so old runtimes

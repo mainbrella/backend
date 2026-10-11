@@ -209,3 +209,41 @@ with Mainbrella and choose **Run repository** to allocate. Flags include `--ref`
 After publishing the updated package, the one-shot form is
 `npx --package @mainbrella/sdk mainbrella repo acme/demo --open`. Until then, run
 `node sdk/javascript/cli.mjs repo acme/demo --open` from this checkout.
+
+## Unreleased filesystem lifecycle and security helpers
+
+The following helpers are implemented in this checkout; they are not part of the
+published 0.1.0 package. Install from this checkout to test them and check live
+capabilities before use. Backend deployment and SDK publication are separate.
+
+```js
+await sandbox.stop({ idempotencyKey: 'stop-my-job' });
+const resumed = await sandbox.resume({ idempotencyKey: 'resume-my-job' });
+const fork = await resumed.fork({ name: 'Experiment', idempotencyKey: 'fork-my-job' });
+// Destructive cleanup is explicit; kill() retains its existing behavior.
+await fork.delete();
+
+const secret = await client.secrets.create({ name: 'Upstream API',
+  value: process.env.UPSTREAM_API_KEY, hostname: 'api.example.com',
+  header: 'authorization', prefix: 'Bearer ' });
+const restricted = await client.create({
+  networkPolicy: { allow: ['api.example.com'], deny: [] },
+  secretBindings: [secret.id],
+});
+await client.secrets.rotate(secret.id, process.env.REPLACEMENT_API_KEY);
+await client.secrets.delete(secret.id);
+```
+
+Stop captures files before releasing compute; Resume returns a new generation,
+and Fork leaves the source running. Each capture uses saved-workspace retention
+and quota; a resume/fork consumes a normal start. Preserve the same key on an
+uncertain result. There is no RAM/process preservation or automatic capture on
+provider crash. Production recovery after an explicit resume uses its saved
+checkpoint, so later writes still need external durable storage.
+
+Restricted machines require `networking.egressPolicies`; secret bindings require
+`secrets.vault`. Policy implies internet disabled and permits only mediated HTTP
+and HTTPS to allowed public destinations. CIDR/domain denies take precedence.
+The relay injects credentials outside the guest into the configured HTTPS host
+and header. Secret values are never readable through the SDK. Choose a trusted
+upstream and scoped tokens; an upstream can disclose transformed credentials.

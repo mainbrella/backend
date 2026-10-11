@@ -4,7 +4,7 @@ import { resolveEntitlement } from './entitlements';
 import { observeRunningWorkspaces } from './acquisition-sources';
 
 export type ContainerState = { plan: string | null; active: boolean; containers: { id: string; createdAt: string; expiresAt: string; status: string }[] };
-export type ContainerImageSelection = { name?: string; imageKey?: string; imageId?: string; imageName?: string; size?: string; internet?: boolean; workspaceId?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string };
+export type ContainerImageSelection = { name?: string; imageKey?: string; imageId?: string; imageName?: string; size?: string; internet?: boolean; workspaceId?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string; networkPolicy?: { allow: string[]; deny: string[] }; secretBindings?: string[] };
 export async function accountResponse(env: Env, userId: string, entitlement: Entitlement, method = 'GET', id?: string | null, createdAt?: string | null, selection?: ContainerImageSelection, idempotencyKey?: string | null): Promise<Response> {
   if (!env.CONTAINER_ACCOUNT || !env.USER_CONTAINER) throw new Error('containers_unavailable');
   const account = env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${userId}`));

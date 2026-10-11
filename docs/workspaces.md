@@ -1,6 +1,6 @@
 # Persistent workspace rollout and qualification
 
-V1 saves the writable root filesystem and restores it into a new generation. It provides authenticated ownership, save/stop, restore, archive, deletion, reserved-capacity quotas, fixed retention and bounded portable `/workspace` export. There is no automatic persistence on stop, RAM/process restore, mounted-volume persistence or fork API. See API.md for the customer contract.
+V1 saves the writable root filesystem and restores it into a new generation. It provides authenticated ownership, save/stop, restore, archive, deletion, reserved-capacity quotas, fixed retention and bounded portable `/workspace` export. The lifecycle API adds safe stop/resume and filesystem-only forks behind `WORKSPACE_LIFECYCLE_ENABLED`. It does not preserve RAM or running processes, and it is not a mounted volume or continuous crash-safe disk. See API.md for the customer contract.
 
 Deploy the container runtime first, then the API with WORKSPACE_PERSISTENCE_ENABLED unset or false. Existing APIs keep their behavior. The private versioned snapshot/start protocol and digest preflight prevent restoring through a runtime that ignores the snapshot selection. Saved handles stay inside account/runtime Durable Object storage. The account serializes admissions, quota reservations and saves; chunked indexes avoid per-value storage limits. Capture intent is durable before contacting the provider. Ambiguous provider capture is never retried as a new capture. Native capture holds the generation lifecycle lock until the provider call settles.
 
@@ -39,6 +39,46 @@ requests, metadata, payment fees and other costs. This is a stress assumption,
 not a Cloudflare quote. Revisit the caps against actual provider billing before
 increasing them. Sources: https://developers.cloudflare.com/containers/platform/pricing/
 and https://developers.cloudflare.com/containers/guides/snapshots/.
+
+## Safe stop, resume and fork
+
+`POST /containers/stop`, `/containers/resume` and `/containers/fork` accept the
+source `{id, createdAt}` and require `Idempotency-Key`; fork also accepts `name`.
+They return the ordinary account status. Resume and fork include the existing
+`creation` receipt. `DELETE /containers` retains permanent deletion semantics.
+
+Safe stop reserves the same workspace capture/count/disk budgets and retention
+as an explicit save. Capture completes durably before compute stops. Capture
+failure leaves the live source running; ambiguous provider captures cannot be
+blindly repeated. The stopped descriptor preserves its slot and generation,
+with `workspaceId`, `status: "stopped"` and `persistenceExpiresAt` in epoch
+milliseconds. Stopped identities occupy no compute/concurrency allowance and
+cannot be reused by unrelated starts. They remain visible after expiry until
+deleted. The associated save is visible in Workspaces and counts toward its
+limits. Deleting or archiving it can prevent resume.
+
+Resume uses the same slot with a fresh fenced runtime generation and reapplies
+its image, size, network policy, secret bindings and production startup command.
+It reserves a new start and runtime lease. A failed restore never falls back to
+an empty image; its checkpoint stays available for a new keyed retry after the
+uncertain start reservation is reconciled. Old access credentials and stale
+lifecycle requests cannot act on the new generation. A completed stop retry is
+safe even after the machine resumes.
+
+Fork captures the live source and starts an independent Ad Hoc machine from
+that filesystem. It leaves the source running, retains its network restrictions
+and secret bindings, and uses ordinary start/compute capacity limits. The capture
+and creation have durable replay receipts, so a retry can finish from a captured
+source even if that source has since stopped. Filesystem writes diverge after
+fork; processes and RAM are not copied. Applications that need a transactionally
+consistent database snapshot must quiesce writes themselves before capture.
+
+Explicit lifecycle operations were exercised with local runtime doubles,
+including binary files, lost replies, controller eviction, capture/restore
+failure, expiry/deletion, generation fencing, quotas, independent fork writes,
+and Production checkpoint recovery. These are not new paid-provider
+qualification results. Keep lifecycle issuance gated until a deployed runtime,
+API, SDK and dashboard qualification is completed under an approved budget.
 
 ## Installed SDK workspace qualification
 

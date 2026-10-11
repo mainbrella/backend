@@ -9,6 +9,7 @@ from datetime import datetime
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from ._network_policy import normalize_network_policy
 
 _USER_AGENT = "mainbrella-python/0.1.0"
 
@@ -70,6 +71,7 @@ class Mainbrella:
         self.timeout = timeout
         self._transport = transport
         self.workspaces = _Workspaces(self)
+        self.secrets = _Secrets(self)
 
     def request(self, path, method="GET", body=None, headers=None, binary=False, timeout=None):
         if not path.startswith("/") or path.startswith("//") or urlsplit(path).scheme:
@@ -113,8 +115,16 @@ class Mainbrella:
     def connect(self, container_id, created_at):
         return Sandbox(self, container_id, created_at)
 
-    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None, internet=None, workspace_id=None):
+    def create(self, catalog_id=None, image_id=None, idempotency_key=None, wait_timeout=120, poll_interval=1, size=None, internet=None, workspace_id=None, name=None, lifecycle=None, startup_command=None, network_policy=None, secret_bindings=None):
         key = idempotency_key or str(uuid.uuid4())
+        if network_policy is not None:
+            network_policy = normalize_network_policy(network_policy)
+            if network_policy is None:
+                raise MainbrellaError('invalid_creation_options')
+        if secret_bindings is not None:
+            if not isinstance(secret_bindings, list) or not all(isinstance(item, str) for item in secret_bindings):
+                raise MainbrellaError('invalid_creation_options')
+            secret_bindings = sorted(set(secret_bindings))
         if catalog_id and image_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or wait_timeout <= 0 or poll_interval <= 0:
             raise MainbrellaError("invalid_creation_options")
         body = {"imageId": image_id} if image_id else {"catalogId": catalog_id} if catalog_id else {}
@@ -131,13 +141,34 @@ class Mainbrella:
         if internet is not None:
             if not isinstance(internet, bool):
                 raise MainbrellaError('invalid_creation_options')
-            if internet is False and self.capabilities().get('networking', {}).get('internetControl') is not True:
+            if internet is False and network_policy is None and self.capabilities().get('networking', {}).get('internetControl') is not True:
                 raise MainbrellaError('network_policy_unavailable', 503, idempotency_key=key)
             body['internet'] = internet
+        if network_policy is not None:
+            if not isinstance(network_policy, dict) or not isinstance(network_policy.get('allow'), list) or internet is True:
+                raise MainbrellaError('invalid_creation_options')
+            if self.capabilities().get('networking', {}).get('egressPolicies') is not True:
+                raise MainbrellaError('network_policy_unavailable', 503, idempotency_key=key)
+            body['networkPolicy'] = network_policy
+        if secret_bindings is not None:
+            if not isinstance(secret_bindings, list) or network_policy is None:
+                raise MainbrellaError('invalid_creation_options')
+            if secret_bindings and self.capabilities().get('secrets', {}).get('vault') is not True:
+                raise MainbrellaError('secrets_unavailable', 503, idempotency_key=key)
+            body['secretBindings'] = secret_bindings
+        for field, value in (('name', name), ('lifecycle', lifecycle), ('startupCommand', startup_command)):
+            if value is not None:
+                body[field] = value
+        return self._wait_for_creation('/containers', body, key, wait_timeout, poll_interval,
+                                       False if network_policy is not None else internet, workspace_id, network_policy, secret_bindings)
+
+    def _wait_for_creation(self, path, body, key, wait_timeout=120, poll_interval=1, internet=None, workspace_id=None, network_policy=None, secret_bindings=None):
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', key) or wait_timeout <= 0 or poll_interval <= 0:
+            raise MainbrellaError('invalid_creation_options')
         deadline = time.monotonic() + wait_timeout
         while time.monotonic() < deadline:
             try:
-                result = self.request("/containers", "POST", body, {"Idempotency-Key": key},
+                result = self.request(path, "POST", body, {"Idempotency-Key": key},
                                       timeout=min(self.timeout, max(0.001, deadline - time.monotonic())))
                 creation = result.get("creation", {})
                 if not creation.get("id") or creation.get("status") not in ("starting", "running"):
@@ -151,19 +182,49 @@ class Mainbrella:
                         raise MainbrellaError('network_policy_unconfirmed', 409)
                     if workspace_id is not None and selected.get('workspaceId') != workspace_id:
                         raise MainbrellaError('workspace_restore_unconfirmed', 409)
+                    if network_policy is not None:
+                        returned_policy = normalize_network_policy(selected.get('networkPolicy'))
+                        if returned_policy != normalize_network_policy(network_policy):
+                            raise MainbrellaError('network_policy_unconfirmed', 409)
+                    if secret_bindings is not None and sorted(selected.get('secretBindings', [])) != sorted(set(secret_bindings)):
+                        raise MainbrellaError('secret_bindings_unconfirmed', 409)
                     sandbox = self.connect(selected["id"], selected["createdAt"])
                     sandbox.creation_id = creation["id"]
                     sandbox.image_digest = selected.get("imageDigest")
                     sandbox.instance = selected.get("instance")
                     sandbox.internet = selected.get('internet')
                     sandbox.workspace_id = selected.get('workspaceId')
+                    sandbox.network_policy = selected.get('networkPolicy')
+                    sandbox.secret_bindings = selected.get('secretBindings')
                     return sandbox
             except MainbrellaError as error:
-                if error.code in ('network_policy_unavailable', 'persistence_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
+                if error.code in ('network_policy_unavailable', 'persistence_unavailable', 'secrets_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
                     error.idempotency_key = key
                     raise
             time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
         raise MainbrellaError("creation_ambiguous", idempotency_key=key)
+
+
+class _Secrets:
+    def __init__(self, client):
+        self.client = client
+
+    def _path(self, secret_id):
+        if not isinstance(secret_id, str) or not re.fullmatch(r'sec_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', secret_id):
+            raise MainbrellaError('invalid_secret_identity')
+        return '/secrets/' + secret_id
+
+    def list(self):
+        return self.client.request('/secrets')
+
+    def create(self, name, value, hostname, header='authorization', prefix=''):
+        return self.client.request('/secrets', 'POST', dict(name=name, value=value, hostname=hostname, header=header, prefix=prefix))
+
+    def rotate(self, secret_id, value):
+        return self.client.request(self._path(secret_id), 'PUT', {'value': value})
+
+    def delete(self, secret_id):
+        return self.client.request(self._path(secret_id), 'DELETE')
 
 
 class _Workspaces:
@@ -459,6 +520,55 @@ class Sandbox:
                 c.get("id") == self.id and c.get("createdAt") == self.created_at for c in result["containers"]):
             raise MainbrellaError("cleanup_unconfirmed")
         return result
+
+    def delete(self):
+        return self.kill()
+
+    def stop(self, idempotency_key=None):
+        key = idempotency_key or str(uuid.uuid4())
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', key):
+            raise MainbrellaError('invalid_lifecycle_options')
+        try:
+            if self.client.capabilities().get('persistence', {}).get('filesystemAfterStop') is not True:
+                raise MainbrellaError('persistence_unavailable', 503)
+            result = self.client.request('/containers/stop', 'POST', {'id': self.id, 'createdAt': self.created_at}, {'Idempotency-Key': key})
+            if not any(c.get('id') == self.id and c.get('createdAt') == self.created_at and c.get('status') == 'stopped' and c.get('workspaceId') for c in result.get('containers', [])):
+                raise MainbrellaError('stop_unconfirmed')
+            return result
+        except MainbrellaError as error:
+            error.idempotency_key = key
+            raise
+
+    def resume(self, idempotency_key=None, wait_timeout=120, poll_interval=1):
+        return self._lifecycle('resume', idempotency_key, wait_timeout, poll_interval)
+
+    def fork(self, name=None, idempotency_key=None, wait_timeout=120, poll_interval=1):
+        return self._lifecycle('fork', idempotency_key, wait_timeout, poll_interval, name)
+
+    def _lifecycle(self, action, idempotency_key, wait_timeout, poll_interval, name=None):
+        key = idempotency_key or str(uuid.uuid4())
+        original_policy = getattr(self, 'network_policy', None)
+        network_policy = normalize_network_policy(original_policy) if original_policy is not None else None
+        secret_bindings = getattr(self, 'secret_bindings', None)
+        secret_bindings = list(secret_bindings) if secret_bindings is not None else None
+        if original_policy is not None and network_policy is None:
+            raise MainbrellaError('invalid_creation_options')
+        try:
+            feature = 'filesystemFork' if action == 'fork' else 'filesystemAfterStop'
+            if self.client.capabilities().get('persistence', {}).get(feature) is not True:
+                raise MainbrellaError('persistence_unavailable', 503)
+            body = {'id': self.id, 'createdAt': self.created_at}
+            if name is not None:
+                body['name'] = name
+            result = self.client._wait_for_creation('/containers/' + action, body, key, wait_timeout, poll_interval,
+                                                     getattr(self, 'internet', None), network_policy=network_policy, secret_bindings=secret_bindings)
+            if (action == 'resume' and (result.id != self.id or result.created_at == self.created_at)
+                    or action == 'fork' and result.id == self.id):
+                raise MainbrellaError('invalid_creation_response')
+            return result
+        except MainbrellaError as error:
+            error.idempotency_key = key
+            raise
 
     def save_workspace(self, name, stop=False, idempotency_key=None):
         key = idempotency_key or str(uuid.uuid4())

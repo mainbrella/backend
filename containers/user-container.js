@@ -12,6 +12,15 @@ import { exportWorkspace } from './workspace-export.js';
 import { publishActivity, validActivityUser } from './activity.js';
 import { validContainerId } from './container-account-core.js';
 import { ContainerPrivateServices, relayPrivateService } from './private-services-runtime.js';
+import { ContainerSecurity, relayContainerEgress } from './security-runtime.js';
+import { privateTarget } from './private-services-contract.js';
+
+export class EgressOutbound extends WorkerEntrypoint {
+  fetch(request) {
+    return privateTarget(request) ? relayPrivateService(request, this.env, this.ctx.props)
+      : relayContainerEgress(request, this.env, this.ctx.props);
+  }
+}
 
 export class PrivateServiceOutbound extends WorkerEntrypoint {
   fetch(request) { return relayPrivateService(request, this.env, this.ctx.props); }
@@ -21,6 +30,8 @@ export class UserContainer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.controller = new UserContainerController(ctx);
+    this.security = new ContainerSecurity(this.controller, env, props => ctx.exports.EgressOutbound({ props }));
+    this.controller.security = this.security;
     this.privateServices = new ContainerPrivateServices(this.controller, props => ctx.exports.PrivateServiceOutbound({ props }));
     this.terminals = new Set();
     this.commands = new Set();
@@ -52,6 +63,7 @@ export class UserContainer extends DurableObject {
       if (ctx.container.running) {
         const metadata = await ctx.storage.get('builderMachine');
         await ctx.container.setInactivityTimeout(metadata?.idleTimeoutMs ?? 10 * 60_000);
+        await this.security.restore();
         await this.privateServices.restore();
         this.monitor(metadata?.createdAt);
       }
@@ -67,6 +79,7 @@ export class UserContainer extends DurableObject {
       if (!owner) await this.ctx.storage.put('activityOwner', { userId, containerId });
     }
     const path = new URL(request.url).pathname;
+    if (path === '/security/status-v1') return this.security.status(request);
     if (request.headers.has('x-private-network')) return this.privateServices.forward(request);
     if (path.startsWith('/private-services/')) return this.privateServices.manage(request);
     if (path === '/features') return this.controller.fetch(request);

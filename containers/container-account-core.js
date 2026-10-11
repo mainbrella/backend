@@ -1,3 +1,6 @@
+import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
+import { AccountLifecycle } from './account-lifecycle.js';
+import { validGeneration } from './workspace-contract.js';
 import { AccountProduction } from './account-production.js';
 import { PRODUCTION_LEASE_MS, PRODUCTION_POLL_MS, validLifecycle, validStartupCommand } from './production-policy.js';
 import { PLAN_LIMITS, NO_PLAN_LIMITS, entitlementHeaders, requestEntitlement, validEntitlement, MACHINE_SIZES, machineSize } from './plan-policy.js';
@@ -24,6 +27,7 @@ export class ContainerAccountController {
     this.production = new AccountProduction(this);
     this.tail = Promise.resolve();
     this.workspaces = new AccountWorkspaces(this);
+    this.lifecycle = new AccountLifecycle(this);
     this.billing = new AccountBilling(this, invoiceUsage, recharge);
   }
   async serialized(fn) {
@@ -34,16 +38,23 @@ export class ContainerAccountController {
     try { return await fn(); } finally { release(); }
   }
   respond(data, status = 200) { return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } }); }
+  policyStateFits(state, selection) {
+    // Admission stays below the provider's 128 KiB value cap, including the
+    // desired Production selection and operation/billing reservation overhead.
+    const encoder = new TextEncoder();
+    return encoder.encode(JSON.stringify(state)).byteLength + 2 * encoder.encode(JSON.stringify(selection)).byteLength + 4096 <= 112 * 1024;
+  }
   async machine(state, id, method, entitlement, reservationId = state.reservations?.[id], selection) {
     // A versioned private start path prevents a runtime downgrade between
     // discovery and boot from silently ignoring the internet-off selection.
-    const path = method === 'POST' && selection?.lifecycle === 'production' ? '/container/production-v1' : method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
+    const path = method === 'POST' && selection?.networkPolicy ? '/container/egress-v1' : method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.lifecycle === 'production' ? '/container/production-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
     const response = await this.machineFor(state.userId, id).fetch(new Request(`https://internal${path}`, {
       method, headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': state.userId, 'x-mainbrella-container': id, ...(selection?.recover ? { 'x-mainbrella-recover': '1' } : {}), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
     }));
     if (!response.ok) {
       if (path === '/container/production-v1' && response.status === 404) throw new Error('production_unavailable');
+      if (path === '/container/egress-v1' && response.status === 404) throw new Error('network_policy_unavailable');
       if (path === '/container/network-v1' && response.status === 404) throw new Error('network_policy_unavailable');
       if (path === '/container/workspace-v1' && response.status === 404) throw new Error('persistence_unavailable');
       const data = await response.json().catch(() => null);
@@ -211,18 +222,31 @@ export class ContainerAccountController {
     for (let offset = 0; offset < state.slots.length; offset += 20) {
       const ids = state.slots.slice(offset, offset + 20);
       const batch = await Promise.allSettled(ids.map(async id => {
+        if (state.suspended?.[id] && !state.suspended[id].resuming) {
+          const stopped = await this.machine(state, id, 'DELETE', entitlement);
+          this.settleLease(state, id, stopped.lastRun?.stoppedAt ?? this.now());
+          delete state.pending[id];
+          return null;
+        }
         const reservation = state.pending[id];
         if (reservation && this.now() < reservation + 90_000) {
           this.clampLease(state, id, Math.min(reservation + (state.production?.[id] ? PRODUCTION_LEASE_MS : PLAN_LIMITS[entitlement.plan].maxSessionMs), entitlement.validUntil));
           return { id, name: state.leases[id]?.name ?? (id === 'small' ? 'Small container' : `Small container ${Number(id.slice(1)) + 1}`),
             lifecycle: state.production?.[id] ? 'production' : 'ad_hoc', size: state.leases[id]?.size ?? 'lite', instance: machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').instance,
-            computeUnits: machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, internet: state.leases[id]?.internet ?? true, status: 'starting', createdAt: new Date(reservation).toISOString(),
+            computeUnits: machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, internet: state.leases[id]?.internet ?? true, status: 'starting', createdAt: new Date(Math.max(reservation, state.leases[id]?.generationFloor ?? reservation)).toISOString(),
             expiresAt: new Date(Math.min(reservation + (state.production?.[id] ? PRODUCTION_LEASE_MS : PLAN_LIMITS[entitlement.plan].maxSessionMs), entitlement.validUntil, state.leases[id]?.endAt ?? Infinity)).toISOString() };
         }
         delete state.pending[id];
         const data = await this.machine(state, id, 'GET', entitlement);
         state.imageCatalog = data.imageCatalog ?? [];
         if (!data.containers?.[0]) {
+          if (state.suspended?.[id]?.resuming) {
+            const stopped = await this.machine(state, id, 'DELETE', entitlement);
+            this.settleLease(state, id, stopped.lastRun?.stoppedAt ?? this.now());
+            delete state.suspended[id].resuming;
+            delete state.production?.[id];
+            return null;
+          }
           // Fence delayed boot dispatches before releasing an apparently empty
           // slot, including recovery after an interrupted provisioning request.
           if (state.production?.[id]) {
@@ -246,6 +270,7 @@ export class ContainerAccountController {
           }
           data.containers[0] = clamped.containers[0];
         }
+        if (state.suspended?.[id]?.resuming) delete state.suspended[id];
         if (state.production?.[id]) state.production[id].createdAt = data.containers[0].createdAt;
         this.clampLease(state, id, Date.parse(data.containers[0].expiresAt));
         this.billing.record(state, state.leases[id], this.now());
@@ -306,7 +331,7 @@ export class ContainerAccountController {
         computeUnitHours: prepaid ? (prepaid.monthly - prepaid.monthlyInference) / 3600000 : Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
         reservedComputeUnitHours: (prepaid ? prepaid.monthReserved - prepaid.inferenceReserved - prepaid.storageReserved : reservedUnitMs) / 3600000,
         availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
-        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers, imageCatalog: state.imageCatalog ?? [] };
+        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers: [...containers, ...this.lifecycle.descriptors(state)], imageCatalog: state.imageCatalog ?? [] };
   }
   prepaidEntitlement(state) {
     const active = Boolean(state.wallet && !state.wallet.fundingRevoked && this.billing.wallet.metrics(state).balance > 0);
@@ -398,8 +423,11 @@ export class ContainerAccountController {
       });
     }
     if (url.pathname === '/workspaces') return this.workspaces.fetch(request);
+    if (url.pathname === '/containers/stop') return this.lifecycle.stop(request);
+    const lifecycleAction = url.pathname === '/containers/resume' ? 'resume' : url.pathname === '/containers/fork' ? 'fork' : null;
+    if (lifecycleAction && request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
     const billingRequest = url.pathname === '/billing';
-    if (url.pathname !== '/containers' && !billingRequest) return this.respond({ error: 'not_found' }, 404);
+    if (url.pathname !== '/containers' && !billingRequest && !lifecycleAction) return this.respond({ error: 'not_found' }, 404);
     if (!['GET', 'POST', 'DELETE', 'PUT'].includes(request.method)) return this.respond({ error: 'method_not_allowed' }, 405);
     const userId = request.headers.get('x-mainbrella-user');
     if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return this.respond({ error: 'not_authenticated' }, 401);
@@ -408,23 +436,36 @@ export class ContainerAccountController {
     const suppliedEntitlement = requestEntitlement(request, this.now());
     const cleanupOnly = request.method === 'DELETE' && request.headers.get('x-mainbrella-cleanup') === '1';
     const idempotencyKey = request.method === 'POST' ? request.headers.get('Idempotency-Key') : null;
-    if (idempotencyKey !== null && !validIdempotencyKey(idempotencyKey)) return this.respond({ error: 'invalid_idempotency_key' }, 400);
+    if ((lifecycleAction || idempotencyKey !== null) && !validIdempotencyKey(idempotencyKey)) return this.respond({ error: 'invalid_idempotency_key' }, 400);
     let reservation;
     try {
       let selection = request.method === 'POST' && request.body ? await request.json() : undefined;
+      if (lifecycleAction && (!selection || typeof selection !== 'object' || Array.isArray(selection) || Object.keys(selection).some(k => !(lifecycleAction === 'fork' ? ['id','createdAt','name'] : ['id','createdAt']).includes(k)) || !validContainerId(selection.id) || !validGeneration(selection.createdAt))) return this.respond({ error: 'invalid_request' }, 400);
+      const actionSource = lifecycleAction ? { ...selection } : null;
       let size = machineSize(selection?.size ?? 'lite');
       if (!size) return this.respond({ error: 'invalid_size' }, 400);
       if (selection?.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
+      if (selection?.networkPolicy !== undefined) {
+        const policy = normalizeNetworkPolicy(selection.networkPolicy);
+        if (!policy || selection.internet === true) return this.respond({ error: 'invalid_network_policy' }, 400);
+        selection.networkPolicy = policy; selection.internet = false;
+      }
+      if (selection?.secretBindings !== undefined) {
+        const bindings = normalizeSecretBindings(selection.secretBindings);
+        if (!bindings || bindings.length && !selection.networkPolicy) return this.respond({ error: 'invalid_secret_bindings' }, 400);
+        selection.secretBindings = bindings;
+      }
       if (selection?.name !== undefined) {
         if (!validContainerName(selection.name)) return this.respond({ error: 'invalid_container_name' }, 400);
         selection.name = selection.name.trim();
       }
       if (selection?.lifecycle !== undefined && !validLifecycle(selection.lifecycle)) return this.respond({ error: 'invalid_lifecycle' }, 400);
       if (selection?.startupCommand !== undefined && (!validStartupCommand(selection.startupCommand) || selection.lifecycle !== 'production')) return this.respond({ error: 'invalid_startup_command' }, 400);
-      const baseFingerprint = selection?.workspaceId ? JSON.stringify(['workspace', selection.workspaceId, selection.size ?? null, selection.internet ?? null])
+      let baseFingerprint = selection?.workspaceId ? JSON.stringify(['workspace', selection.workspaceId, selection.size ?? null, selection.internet ?? null])
         : JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null, size.id, ...(selection?.internet === false ? [false] : [])]);
+      if (selection?.networkPolicy || selection?.secretBindings?.length) baseFingerprint = JSON.stringify([baseFingerprint, selection.networkPolicy ?? null, selection.secretBindings ?? []]);
       const namedFingerprint = selection?.name === undefined ? baseFingerprint : JSON.stringify([baseFingerprint, selection.name]);
-      const fingerprint = selection?.lifecycle === 'production' ? JSON.stringify([namedFingerprint, 'production', selection.startupCommand ?? '']) : namedFingerprint;
+      const fingerprint = lifecycleAction ? JSON.stringify([lifecycleAction, actionSource.id, actionSource.createdAt, actionSource.name ?? null]) : selection?.lifecycle === 'production' ? JSON.stringify([namedFingerprint, 'production', selection.startupCommand ?? '']) : namedFingerprint;
       const result = await this.serialized(async () => {
         const state = await this.initialize(userId, suppliedEntitlement);
         await this.pruneCreations(state);
@@ -446,7 +487,7 @@ export class ContainerAccountController {
         }
         if (request.method === 'POST') {
           if (selection?.lifecycle === 'production' && entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
-          if (selection?.lifecycle === 'production' && selection?.workspaceId) return this.respond({ error: 'invalid_request' }, 400);
+          if (selection?.lifecycle === 'production' && selection?.workspaceId && !lifecycleAction) return this.respond({ error: 'invalid_request' }, 400);
           if (entitlement.plan === 'usage') {
             if (!entitlement.billing || entitlement.billing.kind !== 'prepaid' && !this.billing.invoiceUsage) return this.respond({ error: 'billing_unavailable' }, 503);
             this.billing.checkPending(state);
@@ -458,16 +499,45 @@ export class ContainerAccountController {
           if (idempotencyKey) {
             const record = await this.ctx.storage.get(CREATION_PREFIX + idempotencyKey);
             if (record && record.expiresAt > this.now()) {
-              const legacyFingerprint = selection?.lifecycle !== 'production' && selection?.name === undefined && size.id === 'lite' && selection?.internet !== false ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
+              const legacyFingerprint = !lifecycleAction && !selection?.networkPolicy && !selection?.secretBindings?.length && selection?.lifecycle !== 'production' && selection?.name === undefined && size.id === 'lite' && selection?.internet !== false ? JSON.stringify([selection?.imageKey ?? 'terminal', selection?.imageId ?? null]) : null;
               if (record.fingerprint !== fingerprint && record.fingerprint !== legacyFingerprint) return this.respond({ error: 'idempotency_key_conflict' }, 409);
               return this.creationResponse(state, containers, record);
             }
+          }
+          let resumeTarget;
+          if (lifecycleAction === 'resume') {
+            const suspended = state.suspended?.[actionSource.id];
+            if (!suspended || suspended.createdAt !== actionSource.createdAt || suspended.resuming) return this.respond({ error: 'container_not_stopped' }, 409);
+            if (suspended.persistenceExpiresAt <= this.now()) return this.respond({ error: 'workspace_expired' }, 410);
+            resumeTarget = actionSource.id;
+            selection = { ...suspended.selection, workspaceId: suspended.workspaceId };
+            if (selection.lifecycle === 'production' && entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
+          } else if (lifecycleAction === 'fork') {
+            const source = containers.find(c => c.id === actionSource.id && c.createdAt === actionSource.createdAt && c.status === 'running');
+            if (source) {
+              if (source.networkPolicy && !this.policyStateFits(state, source)) return this.respond({ error: 'network_policy_capacity_exceeded' }, 409);
+              const error = this.security ? await this.security.validateSelection(state, source) : source.networkPolicy ? 'network_policy_unavailable' : null;
+              if (error) return this.respond({ error }, ['secrets_unavailable','network_policy_unavailable'].includes(error) ? 503 : error === 'secret_not_found' ? 404 : 400);
+              const policy = PLAN_LIMITS[entitlement.plan], sourceSize = machineSize(source.size);
+              if (state.slots.length >= policy.maxContainers) return this.respond({ error: 'container_limit_exceeded' }, 409);
+              const units = state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0);
+              if (units + sourceSize.computeUnits > policy.maxConcurrentComputeUnits) return this.respond({ error: 'compute_capacity_exceeded' }, 409);
+              const month = new Date(this.now()).toISOString().slice(0, 7);
+              if ((state.usage[month] ?? 0) >= policy.maxStartsPerMonth) return this.respond({ error: 'container_quota_exceeded' }, 429);
+            }
+            // A durable snapshot receipt lets a retry continue after the source stops.
+            const captured = await this.workspaces.capture(state, source, `fork:${idempotencyKey}`, { id: actionSource.id, createdAt: actionSource.createdAt, name: actionSource.name?.trim() ?? `Fork ${actionSource.id}`, stop: false });
+            if (captured instanceof Response) return captured;
+            selection = { workspaceId: captured.record.id, ...(actionSource.name === undefined ? {} : { name: actionSource.name.trim() }) };
           }
           const catalogImage = IMAGE_CATALOG.find(image => image.key === selection?.imageKey);
           if (selection?.workspaceId) {
             selection = await this.workspaces.restoreSelection(state, selection);
             size = machineSize(selection.size);
           }
+          if (selection?.networkPolicy && !this.policyStateFits(state, selection)) return this.respond({ error: 'network_policy_capacity_exceeded' }, 409);
+          const securityError = this.security ? await this.security.validateSelection(state, selection ?? {}) : selection?.networkPolicy ? 'network_policy_unavailable' : selection?.secretBindings?.length ? 'secrets_unavailable' : null;
+          if (securityError) return this.respond({ error: securityError }, ['secrets_unavailable','network_policy_unavailable'].includes(securityError) ? 503 : securityError === 'secret_not_found' ? 404 : 400);
           if (catalogImage && !(state.imageCatalog ?? []).some(image => image.id === catalogImage.id)) {
             return this.respond({ error: 'image_not_available' }, 409);
           }
@@ -488,7 +558,8 @@ export class ContainerAccountController {
           const endAt = Math.min(startAt + (selection?.lifecycle === 'production' ? PRODUCTION_LEASE_MS : limits.maxSessionMs), entitlement.validUntil, entitlement.plan === 'usage' ? entitlement.billing.kind === 'prepaid' ? Infinity : entitlement.billing.periodEnd : monthEnd,
             startAt + Math.floor(remaining / size.computeUnits));
           if (endAt <= startAt || (entitlement.plan === 'usage' && endAt - startAt < 1000)) return this.respond({ error: entitlement.plan === 'usage' ? 'spend_limit_reached' : 'compute_allowance_exhausted' }, 429);
-          const slot = Array.from({ length: limits.maxContainers }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate));
+          const slot = resumeTarget ?? Array.from({ length: 500 }, (_, index) => index === 0 ? 'small' : `c${index}`).find(candidate => !state.slots.includes(candidate) && !state.suspended?.[candidate]);
+          if (!slot) return this.respond({ error: 'container_limit_exceeded' }, 409);
           if (selection?.workspaceId) {
             const response = await this.machineFor(state.userId, slot).fetch(new Request('https://internal/workspaces/restore-preflight-v1', {
               method:'POST',body:JSON.stringify({imageKey:selection.imageKey,imageDigest:selection.imageDigest,expiresAt:selection.workspaceExpiresAt}) }));
@@ -497,21 +568,23 @@ export class ContainerAccountController {
               return this.respond({error:data?.error==='workspace_image_incompatible'?'workspace_image_incompatible':data?.error==='workspace_expired'?'workspace_expired':'persistence_unavailable'}, data?.error==='workspace_expired'?410:data?.error==='workspace_image_incompatible'?409:503);
             }
           }
-          if (selection?.internet === false || selection?.lifecycle === 'production') {
+          if (selection?.networkPolicy || selection?.internet === false || selection?.lifecycle === 'production') {
             try {
               const signal = AbortSignal.timeout(5000);
               const response = await this.machineFor(state.userId, slot).fetch(new Request('https://internal/features', { signal }));
               const bytes = await readFileBytes(response.body, 2048, signal);
               const features = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+              if (selection?.networkPolicy && (!response.ok || features?.protocol !== 1 || features?.egressPolicies !== 1)) throw new Error('network_policy_unavailable');
               if (selection?.lifecycle === 'production' && (!response.ok || features?.protocol !== 1 || features?.production !== 1)) return this.respond({ error: 'production_unavailable' }, 503);
               if (selection?.internet === false && (!response.ok || features?.protocol !== 1 || features?.internetControl !== true)) throw new Error('network_policy_unavailable');
             } catch { return this.respond({ error: selection?.lifecycle === 'production' ? 'production_unavailable' : 'network_policy_unavailable' }, 503); }
           }
           state.usage[month] = (state.usage[month] ?? 0) + 1;
           state.slots.push(slot);
+          if (resumeTarget) state.suspended[resumeTarget].resuming = true;
           const unitMs = (endAt - startAt) * size.computeUnits;
           state.computeUsage[month] = (state.computeUsage[month] ?? 0) + unitMs;
-          state.leases[slot] = { size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true, ...(selection?.name === undefined ? {} : { name: selection.name }) };
+          state.leases[slot] = { ...(resumeTarget ? { generationFloor: Date.parse(state.suspended[resumeTarget].createdAt) + 1 } : {}), size: size.id, startAt, endAt, month, unitMs, internet: selection?.internet ?? true, ...(selection?.name === undefined ? {} : { name: selection.name }) };
           if (selection?.lifecycle === 'production') {
             state.leases[slot].lifecycle = 'production';
             this.production.remember(state, slot, { ...selection, size: size.id });
@@ -532,12 +605,14 @@ export class ContainerAccountController {
           return null;
         }
         if (request.method === 'DELETE') {
-          if (!id && containers.length > 1) return this.respond({ error: 'container_id_required' }, 400);
-          const target = id ?? containers[0]?.id;
-          if (target && !state.slots.includes(target)) return this.respond({ error: 'container_not_running' }, 409);
+          if (!id && this.status(state, containers).containers.length > 1) return this.respond({ error: 'container_id_required' }, 400);
+          const listed = this.status(state, containers).containers;
+          const target = id ?? listed[0]?.id;
+          if (target && !state.slots.includes(target) && !state.suspended?.[target]) return this.respond({ error: 'container_not_running' }, 409);
           const generation = url.searchParams.get('createdAt');
-          if (generation && containers.find(c => c.id === target)?.createdAt !== generation) return this.respond({ error: 'container_not_running' }, 409);
+          if (generation && listed.find(c => c.id === target)?.createdAt !== generation) return this.respond({ error: 'container_not_running' }, 409);
           if (target) {
+            await this.lifecycle.discard(state, target);
             if (state.production?.[target]) { delete state.production[target]; await this.ctx.storage.put(KEY, state); }
             const stopped = await this.machine(state, target, 'DELETE', entitlement);
             this.settleLease(state, target, stopped.lastRun?.stoppedAt ?? this.now());

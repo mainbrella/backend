@@ -6,6 +6,7 @@ import { acceptPreviewObservation } from '../lib/acquisition-sources';
 import { DurableObject } from 'cloudflare:workers';
 import { ContainerAccountController, machineName } from '../../containers/container-account-core.js';
 import { PrivateServicesController } from '../../containers/private-services.js';
+import { AccountSecurity } from '../../containers/account-security.js';
 
 export class ContainerAccount extends DurableObject<Env> {
   private controller: ContainerAccountController;
@@ -17,9 +18,11 @@ export class ContainerAccount extends DurableObject<Env> {
       return env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(machineName(userId, id)));
     };
     this.controller = new ContainerAccountController(ctx, machineFor, undefined, event => invoiceResourceUsage(env, event), userId => resolveEntitlement(env, userId), entry => prepaidRecharge(env, entry), event => appendAccountingEvent(env, event));
+    this.controller.security = new AccountSecurity(this.controller, env);
     this.privateServices = new PrivateServicesController(ctx, machineFor);
   }
   fetch(request: Request): Promise<Response> {
+    if (['/secrets', '/security/egress'].includes(new URL(request.url).pathname)) return this.controller.security.fetch(request);
     if (new URL(request.url).pathname === '/acquisition/preview-observed') {
       const owner = request.headers.get('x-mainbrella-user') ?? '';
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(owner) || !this.env.CONTAINER_ACCOUNT

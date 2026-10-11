@@ -119,11 +119,11 @@ remain explicit gates. An unreachable online control cannot establish denial.
 Turn the API flag off after this bounded check while any release gate remains
 open. Do not enable permanent customer issuance based on this report alone.
 
-## Next policy and secrets work
+## Policy and secrets architecture
 
 Cloudflare's native API supports outbound HTTP interception through a Fetcher, including HTTPS only with interception enabled and the provider CA trusted by the guest. Non-HTTP traffic needs internet disabled to avoid bypass. This codebase currently uses native Durable Object containers, so adding the separate Containers library would be a deliberate architectural choice rather than an incidental dependency.
 
-Before customer policies or secret injection, qualify native interception, exact host and port matching, redirects, IP/DNS rebinding, alternate protocols, guest CA modification, generation revocation and provider transport limits. Restrict destinations and injected header names/values server-side. Credentials must remain in trusted control-plane storage and never enter guest files/env, request URLs, API read responses, logs, snapshots or SDK archives. Response reflection by a credentialed endpoint is also part of the threat model; a mediated credential is not unextractable merely because it was injected outside the guest. A trusted relay and scoped/revocable upstream tokens are likely necessary.
+The customer implementation described below must pass live qualification of native interception, exact host and port matching, redirects, IP/DNS rebinding, alternate protocols, guest CA modification, generation revocation and provider transport limits before rollout. Restrict destinations and injected header names/values server-side. Credentials must remain in trusted control-plane storage and never enter guest files/env, request URLs, API read responses, logs, snapshots or SDK archives. Response reflection by a credentialed endpoint is also part of the threat model; a mediated credential is not unextractable merely because it was injected outside the guest. A trusted relay and scoped/revocable upstream tokens are likely necessary.
 
 Sources: [Cloudflare outbound traffic](https://developers.cloudflare.com/containers/configuration/outbound-traffic/) and [native Durable Object container API](https://developers.cloudflare.com/containers/api/durable-object-container/). Live provider feasibility and bypass/revocation checks remain mandatory before enabling a customer-facing policy or secrets feature.
 
@@ -142,4 +142,125 @@ const result = await probe.run({ enabled: true });
 
 The single-use probe reserves a two-minute cleanup alarm and starts one Lite guest with internet disabled. It installs both native HTTP and wildcard HTTPS interception before start, tests the fixed relay with provider CA trust, rejects other destinations, checks direct TCP to an IP/alternate port and TXT resolution, then replaces the interceptors with denial and checks revocation. Credentials stay in the Worker environment and never enter guest argv/env, entrypoint props, result storage or forwarded receiver responses. A failed check fails the report; failed destruction leaves the alarm for another attempt. Runtime restart destroys the guest rather than silently resuming an incomplete experiment.
 
-This provides a bounded mechanism test, not complete network/secrets qualification. Independent internet-on controls are needed to distinguish denied traffic from unreachable destinations. Add IPv6/UDP, certificate/CA changes, redirects/rebinding, same-connection behavior, in-flight acceptance, runtime restart, generation reuse and upstream revocation evidence before product work. Interceptor replacement cannot undo an already accepted upstream request. The native API cannot remove installed intercepts from a running guest, so changing policy must replace the trusted handler. Customer policy/secrets endpoints remain absent and `egressPolicies` stays false.
+This provides a bounded mechanism test, not complete network/secrets qualification. Independent internet-on controls are needed to distinguish denied traffic from unreachable destinations. Add IPv6/UDP, certificate/CA changes, redirects/rebinding, same-connection behavior, in-flight acceptance, runtime restart, generation reuse and upstream revocation evidence before product work. Interceptor replacement cannot undo an already accepted upstream request. The native API cannot remove installed intercepts from a running guest, so changing policy must replace the trusted handler. The later customer implementation below adds policy/secrets endpoints; production `egressPolicies` stays false until its separate release gate passes.
+
+
+## Customer policy and encrypted vault implementation (October 11)
+
+Creation accepts `networkPolicy: {allow: string[], deny?: string[]}` and
+`secretBindings: string[]`. Rules support exact domains, `*.example.com`
+(subdomains only), `*`, public IPv4/IPv6 addresses and CIDR ranges. Deny wins.
+An empty allow list denies all public egress. The lists normalize before
+idempotency comparison. Policy plus `internet:true` is rejected; a restricted
+machine always starts with native `enableInternet:false` and HTTP80/HTTPS443
+interception installed before boot. Alternate ports, raw TCP/UDP and arbitrary
+DNS exfiltration are outside the allow rules and remain disabled by the native
+policy. Provider HTTPS interception of a bare IP is unsupported; use hostnames
+for HTTPS. CIDR deny rules also check every resolved address of an allowed hostname.
+CIDR-only grants authorize literal IP requests; a hostname must match an allow
+domain before the relay resolves it, preventing denied names from leaking data
+through relay DNS queries.
+
+The immutable policy and secret IDs appear in container metadata and survive
+filesystem capture, fork, stop/resume and production recovery. Secret values
+never appear in those records, guest environment variables or entrypoint props.
+Deleting a required secret blocks subsequent mediated requests from every bound
+machine. Rotation takes effect on the next admission. A response from a stopped,
+replaced or recovered runtime, or a superseded secret version, is withheld.
+Runtime incarnation fencing is independent of a production service's logical
+`createdAt` identity. Revocation cannot undo an upstream request already accepted.
+
+`POST /secrets` accepts `{name,value,hostname,header,prefix?}`. `GET /secrets`
+returns metadata only. `PUT /secrets/:id` rotates `{value}`;
+`DELETE /secrets/:id` revokes the binding. Names and exact HTTPS host/header scope
+are immutable. Permitted header names are `authorization`, `x-api-key`, and
+`api-key`; a prefix such as `Bearer ` is optional. Secret values are nonempty
+printable ASCII without whitespace, up to 4096 bytes. There are at most 100
+secrets per account and 16 bindings per generation. Two bindings cannot inject
+the same host/header. Create/rotate requires paid access; list/delete remains
+available for cleanup without a paid subscription. AES-256-GCM uses a fresh IV
+for every write and authenticates account plus secret identity. Storage contains
+ciphertext and redacted metadata. Keep the encryption key stable: replacing it
+without re-encrypting existing records makes those secrets unreadable.
+
+`containers/account-security.js` authorizes each request against the live
+runtime and decrypts only exact-host HTTPS bindings. The independent
+`services/egress-relay.mjs` service resolves every address, rejects private,
+loopback, link-local, multicast and reserved addresses, evaluates all domain/CIDR
+rules, and pins the selected IP into Node's transport lookup. The original host
+still controls Host, SNI and TLS certificate verification. No later DNS lookup or
+redirect can change the authorized target. The relay overwrites scoped headers,
+strips internal/transport headers, never follows redirects, and rejects compressed
+upstream responses. Request bodies are bounded to 4 MiB, responses to 8 MiB and
+request time to 30 seconds. Account mediation permits two concurrent requests;
+the relay defaults to eight. Responses are buffered for reflection checks, so
+this initial transport does not provide streaming/SSE or outbound WebSockets.
+
+The relay blocks literal, JSON, URL-encoded and base64 credential reflections in
+response headers/body. This is defense in depth, not a guarantee against an
+upstream that deliberately transforms its credentials. Use trusted upstream
+services and scoped, revocable credentials. An owner can select their upstream;
+MainBrella cannot make credentials unextractable from a malicious authorized
+endpoint. Avoid arbitrary echo/debug endpoints and upstreams that execute
+caller-selected requests using the injected credential.
+
+Provider CA trust variables are set for common Node, Python, curl and Git clients
+in startup and managed execution. The standard Debian images also install the
+provider CA in the system trust store during readiness. Custom runtimes with
+independent certificate stores may need their own trust configuration; changing
+the guest trust store cannot enable direct internet access. Account-authorized
+`*.internal` HTTP private services retain their separate membership policy.
+
+### Operator setup and release gate
+
+Nothing in this change deploys a service, starts a paid guest, or enables the
+production gates. The relay is runnable with Node 24 and no new dependencies:
+
+```sh
+node services/egress-relay.mjs
+```
+
+Supply `EGRESS_RELAY_TOKEN` through the service secret store (32–256 printable
+non-space characters). It listens on `127.0.0.1:8081` by default; configure
+`EGRESS_RELAY_BIND` and `EGRESS_RELAY_PORT` if needed. Put an HTTPS ingress in
+front of `/v1/egress`, retain body/time limits, and disable request/response body
+and authorization-header logging at that ingress. The endpoint requires the
+bearer token and has no unauthenticated forwarding route. Configure the API's
+`EGRESS_RELAY_URL` to that exact HTTPS endpoint and install the matching
+`EGRESS_RELAY_TOKEN`. The control plane sends credentials only to this fixed,
+operator-controlled relay over TLS. Protect its operator access accordingly.
+
+Install `SECRETS_ENCRYPTION_KEY` as a 32-byte, standard-base64 Worker secret.
+`SECRETS_VAULT_ENABLED=true` enables vault writes. Policy admission additionally
+requires `EGRESS_POLICIES_ENABLED=true` on both the API and private runtime,
+relay configuration, and the runtime's protocol-1 `egressPolicies:1` probe. The
+versioned `/container/egress-v1` route prevents a runtime downgrade from silently
+dropping the policy. API gate withdrawal also denies ongoing public mediation.
+Metadata reads and secret deletion remain available with the vault gate off.
+
+Local tests exercise ciphertext ownership/tamper rejection, write-only metadata,
+rotation/deletion, scope validation, native installation-before-boot, runtime
+incarnation revocation, forged guest headers, domain/CIDR denial, mixed private
+DNS responses, DNS cancellation, credential reflection, response size limits and
+actual authenticated relay HTTP handling. Run:
+
+```sh
+node --test containers/security.test.mjs scripts/egress-relay.test.mjs
+```
+
+These tests do not establish Cloudflare isolation. Before enabling customer
+issuance, deploy an isolated relay and private runtime, retain all default gates
+off, and agree an explicit account/start budget. Use an owned acknowledgment
+upstream with a disposable scoped credential, not an echo service. Record pinned
+API/runtime/image/relay versions, start counts and cleanup. Compare online and
+restricted guests; test allowed HTTPS and denied domain/CIDR requests, arbitrary
+DNS, direct IPv4/IPv6, UDP, alternate ports, TLS CA changes and redirects. Attempt
+DNS rebinding using mixed public/private A/AAAA answers. Exercise secret rotation
+and deletion during a slow request, provider recovery with the same logical
+identity, snapshot/fork/resume, expiry, runtime downgrade, SSH, browser terminal,
+and protected preview/WebSocket compatibility. No guest file, environment,
+process argument, snapshot, API response or operator log should contain a raw
+credential. Confirm default-deny behavior when relay, encryption key or runtime
+configuration is withdrawn. Disable gates after bounded qualification while any
+check remains unresolved. The historical internet-off probe does not qualify
+this new relay or customer mediation path.

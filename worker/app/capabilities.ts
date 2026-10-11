@@ -12,13 +12,15 @@ import { OBSERVATION_RETENTION_MS, MAX_LIFECYCLE_EVENTS } from '../../containers
 import { webhooksConfigured } from '../../containers/webhook-contract.js';
 import { activityConfigured } from './activity';
 import { privateServicesConfigured } from './private-services';
+import { filesystemLifecycleConfigured } from './container-lifecycle';
+import { egressConfigured, vaultConfigured } from '../../containers/account-security.js';
 import { projectHostingCapabilities } from '../lib/project-hosting';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
 export function capabilities(env: Env) {
   return {
-    apiVersion: '2026-10-05',
+    apiVersion: '2026-10-11',
     authentication: { apiKeys: true, browserSessions: true, browserTerminalCookieOnly: true },
     containers: { idempotentCreate: true, creationRetentionMs: 86_400_000, generationRequired: true,
       accountLimitsPath: '/containers', configurableDeadline: false },
@@ -32,7 +34,7 @@ export function capabilities(env: Env) {
       mkdir: true, delete: true, move: true, chmod: true, watch: false, maxDirectoryEntries: MAX_DIRECTORY_ENTRIES,
       maxDirectoryOffset: MAX_DIRECTORY_OFFSET, maxMetadataBytes: MAX_FILESYSTEM_OUTPUT_BYTES, maxFileBytes: MAX_FILE_BYTES,
       maxPathBytes: MAX_FILE_PATH_BYTES, timeoutMs: FILE_TIMEOUT_MS, sharedExecutionPool: true },
-    persistence: { filesystemAfterStop: false, snapshots: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.WORKSPACE_PERSISTENCE_ENABLED==='true'), workspaces:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), exports:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), memory: false, volumes: false },
+    persistence: { filesystemAfterStop: filesystemLifecycleConfigured(env), filesystemFork: filesystemLifecycleConfigured(env), snapshots: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.WORKSPACE_PERSISTENCE_ENABLED==='true'), workspaces:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), exports:Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT), memory: false, volumes: false },
     observability: { lifecycleEvents: true, activityWebSocket: activityConfigured(env), metrics: metricsConfigured(env), webhooks: Boolean(env.USER_CONTAINER && webhooksConfigured(env)), otlp: false,
       eventRetentionMs: OBSERVATION_RETENTION_MS, maxLifecycleEvents: MAX_LIFECYCLE_EVENTS, maxMetricRangeMs: MAX_METRIC_RANGE_MS, metricBucketMs: METRIC_BUCKET_MS },
     previews: { supported: previewsConfigured(env), signedUrls: false },
@@ -40,7 +42,8 @@ export function capabilities(env: Env) {
     images: { catalog: true, availableCatalogPath: '/containers',
       customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
-    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: false, regionSelection: false },
+    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env)), regionSelection: false },
+    secrets: { vault: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env) && vaultConfigured(env)) },
     access: ACCESS_LIMITS,
   };
 }

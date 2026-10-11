@@ -13,6 +13,8 @@ import { registerAdminRoutes } from "./openapi-admin";
 import { registerMarketingEmailRoutes } from "./openapi-marketing-email";
 import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
+import { registerContainerLifecycleRoutes } from './openapi-container-lifecycle';
+import { registerSecretRoutes } from './openapi-secrets';
 import { registerCommandRoutes } from "./openapi-commands";
 import { registerFileRoutes } from "./openapi-files";
 import { registerFilesystemRoutes } from './openapi-filesystem';
@@ -42,7 +44,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
       openapi: "3.1.0",
       info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API. Admin and marketing endpoints retain this origin and are forwarded to independently deployed Workers." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
-      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build"].map(name => ({ name })),
+      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Secrets", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build"].map(name => ({ name })),
     },
   });
   const securitySchemes = {
@@ -86,6 +88,8 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerPrepaidBillingRoutes(api, handler);
   registerStorageBillingRoutes(api, handler);
   registerContainerRoutes(api, handler);
+  registerContainerLifecycleRoutes(api, handler);
+  registerSecretRoutes(api, handler);
   registerCommandRoutes(api, handler);
   registerFileRoutes(api, handler);
   registerFilesystemRoutes(api, handler);

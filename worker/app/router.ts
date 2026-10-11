@@ -16,6 +16,8 @@ import { handlePrepaidBillingRequest } from './prepaid-billing';
 import { forwardServiceRequest } from "../shared/service-proxy";
 import { serviceForPath } from "../shared/service-routing";
 import { handleContainersRequest } from "./containers";
+import { handleContainerLifecycleRequest } from './container-lifecycle';
+import { handleSecretsRequest } from './secrets';
 import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
@@ -41,6 +43,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/secrets' || url.pathname.startsWith('/secrets/')) return handleSecretsRequest(request, env);
   if (url.pathname === '/domains' || url.pathname.startsWith('/domains/')) return handleDomainsRequest(request, env);
   const service = serviceForPath(url.pathname);
   if (service === "admin") {
@@ -59,6 +62,7 @@ async function handleLegacyRequest(
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
   if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);
+  if (['/containers/stop', '/containers/resume', '/containers/fork'].includes(url.pathname)) return handleContainerLifecycleRequest(request, env);
   if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
 
   if (url.pathname === '/capabilities') return handleCapabilitiesRequest(request, env);

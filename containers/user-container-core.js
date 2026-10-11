@@ -4,6 +4,8 @@ import { IMAGE_CATALOG, availableCatalog } from './image-catalog.js';
 import { WorkloadObservations } from './observations.js';
 import { captureWorkspace } from './workspaces.js';
 import { validWorkspaceId } from './workspace-contract.js';
+import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
+import { EGRESS_CA_ENV } from './security-runtime.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
 const METADATA_KEY = "builderMachine";
@@ -41,7 +43,7 @@ export class UserContainerController {
     if(path==='/workspaces/snapshot-v1') return captureWorkspace(this,request);
     return this.serialized(async () => {
       const url = new URL(request.url);
-      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, production: 1 });
+      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, production: 1, ...(this.security?.available() ? { egressPolicies: 1 } : {}) });
       if(path==='/workspaces/restore-preflight-v1' && request.method==='POST') {
         let body;try{body=await request.json();}catch{return this.respond({error:'invalid_request'},400);}
         if(!body || body.expiresAt<=this.now())return this.respond({error:'workspace_expired'},410);
@@ -51,15 +53,17 @@ export class UserContainerController {
       if (url.pathname.startsWith('/observations/')) return this.observations.fetch(request);
       const productionStart = url.pathname === '/container/production-v1';
       const networkStart = url.pathname === '/container/network-v1';
+      const egressStart = url.pathname === '/container/egress-v1';
       const workspaceStart = url.pathname === '/container/workspace-v1';
-      if (url.pathname !== '/container' && !networkStart && !workspaceStart && !productionStart) return this.respond({ error: "Not found" }, 404);
+      if (url.pathname !== '/container' && !networkStart && !workspaceStart && !productionStart && !egressStart) return this.respond({ error: "Not found" }, 404);
+      if (egressStart && (request.method !== 'POST' || !this.security?.available())) return this.respond({ error: 'network_policy_unavailable' }, 503);
       if((workspaceStart || productionStart) && request.method!=='POST')return this.respond({error:'method_not_allowed'},405);
       if (networkStart && request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       const rawReservation = request.headers.get('x-mainbrella-reservation');
       const reservationId = rawReservation === null ? null : Number(rawReservation);
       if (reservationId !== null && (!Number.isSafeInteger(reservationId) || reservationId < 1)) return this.respond({ error: 'invalid_reservation' }, 400);
       const fence = (await this.ctx.storage.get('machineReservation')) ?? { accepted: 0, canceled: 0 };
-      const recovering = productionStart && request.headers.get('x-mainbrella-recover') === '1';
+      const recovering = (productionStart || egressStart || workspaceStart) && request.headers.get('x-mainbrella-recover') === '1';
       if (recovering) {
         if (reservationId === null || reservationId < fence.accepted || reservationId <= fence.canceled) return this.respond({ error: 'container_start_canceled' }, 409);
         fence.accepted = reservationId;
@@ -127,7 +131,9 @@ export class UserContainerController {
         try {
           const selection = request.body ? await request.json() : {};
           if(workspaceStart && (!validWorkspaceId(selection?.workspaceId) || !selection?.containerSnapshot?.id))return this.respond({error:'invalid_request'},400);
-          if(!workspaceStart && selection?.containerSnapshot)return this.respond({error:'invalid_request'},400);
+          if(!workspaceStart && !egressStart && selection?.containerSnapshot)return this.respond({error:'invalid_request'},400);
+          if (egressStart && (!normalizeNetworkPolicy(selection?.networkPolicy) || selection?.containerSnapshot && (!validWorkspaceId(selection.workspaceId) || !selection.containerSnapshot.id))) return this.respond({ error: 'invalid_network_policy' }, 400);
+          if (!egressStart && (selection?.networkPolicy !== undefined || selection?.secretBindings?.length)) return this.respond({ error: 'network_policy_unavailable' }, 503);
           if (networkStart && selection?.internet !== false) return this.respond({ error: 'invalid_internet_policy' }, 400);
           if (productionStart && selection?.lifecycle !== 'production') return this.respond({ error: 'invalid_lifecycle' }, 400);
           const result = await this.start(selection, recovering);
@@ -167,6 +173,7 @@ export class UserContainerController {
           computeUnits: machineSize(metadata.size ?? 'lite').computeUnits,
           status: "running",
           internet: metadata.internet ?? true,
+          ...(metadata.networkPolicy ? { networkPolicy: metadata.networkPolicy, secretBindings: metadata.secretBindings ?? [] } : {}),
           lifecycle: metadata.lifecycle ?? 'ad_hoc',
           ...(metadata.imageName ? { imageName: metadata.imageName } : {}),
           ...(metadata.imageId ? { imageId: metadata.imageId } : {}),
@@ -222,7 +229,7 @@ export class UserContainerController {
         || expiresAt <= this.now() || expiresAt > metadata.expiresAt) {
         throw new Error("Machine unavailable");
       }
-      return this.container.exec(argv, options);
+      return this.container.exec(argv, metadata.networkPolicy ? { ...options, env: { ...EGRESS_CA_ENV, ...options?.env } } : options);
     });
   }
 
@@ -277,6 +284,10 @@ export class UserContainerController {
     const size = machineSize(selection.size ?? 'lite');
     if (!size) return this.respond({ error: 'invalid_size' }, 400);
     if (selection.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
+    const networkPolicy = selection.networkPolicy === undefined ? undefined : normalizeNetworkPolicy(selection.networkPolicy);
+    const secretBindings = normalizeSecretBindings(selection.secretBindings ?? []);
+    if (networkPolicy === null || !secretBindings || secretBindings.length && !networkPolicy || networkPolicy && selection.internet === true) return this.respond({ error: 'invalid_network_policy' }, 400);
+    if (networkPolicy && !this.security?.available()) return this.respond({ error: 'network_policy_unavailable' }, 503);
     if (selection.computeExpiresAt !== undefined && (!Number.isSafeInteger(selection.computeExpiresAt) || selection.computeExpiresAt <= this.now())) return this.respond({ error: 'compute_allowance_exhausted' }, 429);
     const imageKey = selection.imageKey || "terminal";
     const recoveryMetadata = recovering ? await this.ctx.storage.get(METADATA_KEY) : null;
@@ -306,7 +317,8 @@ export class UserContainerController {
       createdAt,
       telemetryId: crypto.randomUUID(),
       size: size.id,
-      internet: selection.internet ?? true,
+      internet: networkPolicy ? false : selection.internet ?? true,
+      ...(networkPolicy ? { networkPolicy, secretBindings } : {}),
       lifecycle: selection.lifecycle ?? 'ad_hoc',
       ...(selection.lifecycle === 'production' ? { startupCommand: selection.startupCommand ?? '' } : {}),
       reservationId: (await this.ctx.storage.get('machineReservation'))?.accepted,
@@ -329,11 +341,13 @@ export class UserContainerController {
         await this.ctx.storage.deleteAlarm();
         return this.respond({ error: 'subscription_required' }, 402);
       }
+      await this.security?.install(metadata);
       this.container.start({
         ...(selection.workspaceId ? {containerSnapshot:{id:selection.containerSnapshot.id}} : {image}),
         instance: size.instance,
         entrypoint: metadata.lifecycle === 'production' ? productionEntrypoint(metadata.startupCommand) : ['sleep', 'infinity'],
         enableInternet: metadata.internet,
+        ...(metadata.networkPolicy ? { env: EGRESS_CA_ENV } : {}),
         labels: { mb_generation: metadata.telemetryId },
       });
       await this.onStarted?.(metadata.createdAt);
@@ -346,7 +360,8 @@ export class UserContainerController {
           // limit and breaks Python's socket.getfqdn()/http.server. Rename it
           // before admitting commands, including after snapshot restore. Local
           // Docker and unprivileged custom images may not allow this operation.
-          const process = await this.container.exec(["sh", "-lc", "hostname mainbrella || true; uname -a"]);
+          const trust = metadata.networkPolicy ? 'if command -v update-ca-certificates >/dev/null 2>&1 && [ -r /etc/cloudflare/certs/cloudflare-containers-ca.crt ]; then cp /etc/cloudflare/certs/cloudflare-containers-ca.crt /usr/local/share/ca-certificates/mainbrella-egress.crt && update-ca-certificates >/dev/null 2>&1 || true; fi; ' : '';
+          const process = await this.container.exec(["sh", "-lc", trust + "hostname mainbrella || true; uname -a"]);
           return process.output();
         })();
         const timeout = new Promise((_, reject) => {
@@ -383,6 +398,8 @@ export class UserContainerController {
     // Revoke terminal access before asking the platform to destroy the VM;
     // a failed platform cleanup must not leave authenticated shells attached.
     this.onStopped?.();
+    this.revokedEgressGeneration = (await this.ctx.storage.get(METADATA_KEY))?.telemetryId;
+    if (this.revokedEgressGeneration) await this.ctx.storage.put('revokedEgressGeneration', this.revokedEgressGeneration);
     await this.container.destroy(reason);
     const metadata = await this.ctx.storage.get(METADATA_KEY);
     if (metadata && metadata.computeStoppedAt === undefined) await this.recordStopped(metadata,

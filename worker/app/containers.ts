@@ -8,6 +8,9 @@ import { validContainerId, validContainerName, validIdempotencyKey } from '../..
 import { machineSize } from '../../containers/plan-policy.js';
 import { IMAGE_CATALOG } from '../../containers/image-catalog.js';
 import { validWorkspaceId } from '../../containers/workspace-contract.js';
+import { normalizeNetworkPolicy, normalizeSecretBindings } from '../../containers/security-contract.js';
+import { egressConfigured, vaultConfigured } from '../../containers/account-security.js';
+import { readFileBytes } from '../../containers/file-contract.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -44,7 +47,12 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     }
     let selection: ContainerImageSelection | undefined;
     if (request.method === 'POST' && request.body) {
-      const body = await request.json().catch(() => null) as { name?: unknown; imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown; workspaceId?: unknown; lifecycle?: unknown; startupCommand?: unknown } | null;
+      let bytes: Uint8Array;
+      try { bytes = await readFileBytes(request.body, 65536, request.signal); }
+      catch { return authJson({ error: 'request_too_large' }, 413, cors); }
+      let body: { name?: unknown; imageId?: unknown; catalogId?: unknown; size?: unknown; internet?: unknown; workspaceId?: unknown; lifecycle?: unknown; startupCommand?: unknown; networkPolicy?: unknown; secretBindings?: unknown } | null;
+      try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+      catch { return authJson({ error: 'invalid_request' }, 400, cors); }
       if (!body || typeof body !== 'object' || Array.isArray(body)) return authJson({ error: 'invalid_request' }, 400, cors);
       if (body.lifecycle !== undefined && !validLifecycle(body.lifecycle)) return authJson({ error: 'invalid_lifecycle' }, 400, cors);
       if (body.startupCommand !== undefined && (!validStartupCommand(body.startupCommand) || body.lifecycle !== 'production')) return authJson({ error: 'invalid_startup_command' }, 400, cors);
@@ -57,7 +65,12 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
       }
       if (body.size !== undefined && !machineSize(body.size)) return authJson({ error: 'invalid_size' }, 400, cors);
       if (body.internet !== undefined && typeof body.internet !== 'boolean') return authJson({ error: 'invalid_internet_policy' }, 400, cors);
-      if (body.internet === false && env.NETWORK_INTERNET_CONTROL_ENABLED !== 'true') return authJson({ error: 'network_policy_unavailable' }, 503, cors);
+      if (body.internet === false && body.networkPolicy === undefined && env.NETWORK_INTERNET_CONTROL_ENABLED !== 'true') return authJson({ error: 'network_policy_unavailable' }, 503, cors);
+      const networkPolicy = body.networkPolicy === undefined ? undefined : normalizeNetworkPolicy(body.networkPolicy);
+      const secretBindings = body.secretBindings === undefined ? undefined : normalizeSecretBindings(body.secretBindings);
+      if (networkPolicy === null || secretBindings === null || networkPolicy && body.internet === true || secretBindings && !networkPolicy) return authJson({ error: 'invalid_network_policy' }, 400, cors);
+      if (networkPolicy && !egressConfigured(env)) return authJson({ error: 'network_policy_unavailable' }, 503, cors);
+      if (secretBindings?.length && !vaultConfigured(env)) return authJson({ error: 'secrets_unavailable' }, 503, cors);
       if (body.catalogId !== undefined) {
         if (body.imageId !== undefined || typeof body.catalogId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);
         const image = IMAGE_CATALOG.find(image => image.id === body.catalogId);
@@ -79,11 +92,13 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
       if (body.internet !== undefined) selection = { ...selection, internet: body.internet as boolean };
       if (body.lifecycle !== undefined) selection = { ...selection, lifecycle: body.lifecycle };
       if (body.startupCommand !== undefined) selection = { ...selection, startupCommand: body.startupCommand as string };
+      if (networkPolicy) selection = { ...selection, networkPolicy, internet: false };
+      if (secretBindings) selection = { ...selection, secretBindings };
     }
     // Forward only the server-resolved image, never browser image keys or resources.
     const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection, idempotencyKey);
     const data = await response.json() as { error?: string };
-    if (response.status === 503 && ['network_policy_unavailable', 'production_unavailable'].includes(data.error ?? '')) return authJson(data, 503, cors);
+    if (response.status === 503 && ['network_policy_unavailable', 'production_unavailable', 'secrets_unavailable'].includes(data.error ?? '')) return authJson(data, 503, cors);
     if ([400, 402, 404, 409, 410, 429].includes(response.status) || response.status===503&&data.error==='persistence_unavailable') return authJson(data, response.status, cors);
     if (!response.ok) throw new Error('machine_request_failed');
     return authJson(data, response.status, cors);

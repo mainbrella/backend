@@ -33,10 +33,17 @@ export class AccountWorkspaces {
     // each storage value small and commit chunks plus their index atomically.
     const storage=this.account.ctx.storage;
     await storage.transaction(async tx=>{
-      const previous=await tx.get(KEY),chunks=Math.ceil(index.records.length/32);
-      for(let i=0;i<chunks;i++)await tx.put(`${KEY}:${i}`,index.records.slice(i*32,(i+1)*32));
-      await tx.put(KEY,{chunks,usage:index.usage,captureUsage:index.captureUsage});
-      for(let i=chunks;i<(previous?.chunks??0);i++)await tx.delete(`${KEY}:${i}`);
+      const previous=await tx.get(KEY),batches=[];
+      let batch=[],bytes=2;
+      for(const record of index.records){
+        const size=new TextEncoder().encode(JSON.stringify(record)).byteLength+1;
+        if(batch.length&&(batch.length>=32||bytes+size>96*1024)){batches.push(batch);batch=[];bytes=2;}
+        batch.push(record);bytes+=size;
+      }
+      if(batch.length)batches.push(batch);
+      for(let i=0;i<batches.length;i++)await tx.put(`${KEY}:${i}`,batches[i]);
+      await tx.put(KEY,{chunks:batches.length,usage:index.usage,captureUsage:index.captureUsage});
+      for(let i=batches.length;i<(previous?.chunks??0);i++)await tx.delete(`${KEY}:${i}`);
     });
   }
   async prune(){
@@ -72,8 +79,46 @@ export class AccountWorkspaces {
     if(record.expiresAt<=this.account.now())throw new Error('workspace_expired');
     if(!record.handle || record.archived)throw new Error('workspace_not_ready');
     if(selection.size!==undefined && selection.size!==record.size || selection.internet!==undefined && selection.internet!==record.internet)throw new Error('workspace_policy_conflict');
+    if(selection.networkPolicy!==undefined&&JSON.stringify(selection.networkPolicy)!==JSON.stringify(record.networkPolicy)||selection.secretBindings!==undefined&&JSON.stringify(selection.secretBindings)!==JSON.stringify(record.secretBindings??[]))throw new Error('workspace_policy_conflict');
     return {...selection,size:record.size,internet:record.internet,imageKey:record.imageKey,imageDigest:record.imageDigest,
-      imageId:record.imageId,imageName:record.imageName,containerSnapshot:record.handle,workspaceExpiresAt:record.expiresAt};
+      imageId:record.imageId,imageName:record.imageName,networkPolicy:record.networkPolicy,secretBindings:record.secretBindings,containerSnapshot:record.handle,workspaceExpiresAt:record.expiresAt};
+  }
+  async capture(state, source, key, body, existing) {
+    const account=this.account, now=account.now(), index=existing?.index??await this.prune();
+    const fingerprint=JSON.stringify([body.id,body.createdAt,body.name,body.stop??false]);
+    let record=existing?.record??index.records.find(r=>r.operationKey===key&&r.operationExpiresAt>now);
+    if(record&&record.fingerprint!==fingerprint)return fail('idempotency_key_conflict',409);
+    if(record?.deleted)return fail('workspace_not_found',404);
+    if(record?.expiresAt<=now)return fail('workspace_expired',410);
+    if(record?.handle)return {record,index};
+    if(!source&&!record)return fail('container_not_running',409);
+    if(source&&(typeof source.imageDigest!=='string'||!source.imageDigest))return fail('workspace_image_incompatible',409);
+    const runtime=account.machineFor(state.userId,body.id);
+    if(!record){
+      const features=await runtime.fetch(new Request('https://internal/features'));
+      if(!features.ok || (await features.json()).workspaceSnapshots!==1)return fail('persistence_unavailable',503);
+      const policy=WORKSPACE_POLICY[state.entitlement.plan],size=machineSize(source.size),reservedBytes=size.diskGB*1_000_000_000;
+      const saved=index.records.filter(r=>!r.deleted&&r.expiresAt>now),month=new Date(now).toISOString().slice(0,7);
+      if(saved.length>=policy.maxSaved || saved.reduce((sum,r)=>sum+(r.reservedBytes??0),0)+reservedBytes>policy.maxReservedBytes)return fail('workspace_quota_exceeded',429);
+      if((index.usage[month]??0)>=policy.maxSavesPerMonth)return fail('workspace_save_limit',429);
+      const captures=captureUsage(index,now);
+      if(captures.captureBytesThisMonth+reservedBytes>policy.maxCaptureBytesPerMonth)return fail('workspace_capture_budget_exceeded',429);
+      if(captures.retainedCaptureBytes+reservedBytes>policy.maxRetainedCaptureBytes)return fail('workspace_retained_budget_exceeded',429);
+      record={id:crypto.randomUUID(),name:body.name,sourceReservationId:state.reservations?.[body.id],sourceSelection:{name:source.name,lifecycle:source.lifecycle??'ad_hoc',...(state.production?.[body.id]?.selection.startupCommand===undefined?{}:{startupCommand:state.production[body.id].selection.startupCommand})},source:{id:body.id,createdAt:body.createdAt},createdAt:new Date(now).toISOString(),expiresAt:now+policy.retentionMs,
+        size:source.size,internet:source.internet??true,networkPolicy:source.networkPolicy,secretBindings:source.secretBindings,imageDigest:source.imageDigest,imageId:source.imageId,imageName:source.imageName,catalogId:source.catalogId,
+        operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false};
+      index.records.push(record);index.usage[month]=(index.usage[month]??0)+1;
+      reserveCapture(index,reservedBytes,now);
+      await this.persist(index);await account.saveState(state);
+    }
+    if(!record.handle){
+      const response=await runtime.fetch(new Request('https://internal/workspaces/snapshot-v1',{method:'POST',headers:{...entitlementHeaders(state.entitlement),'Content-Type':'application/json'},body:JSON.stringify({id:record.id,createdAt:body.createdAt,expiresAt:record.expiresAt})}));
+      const capture=await response.json();if(!response.ok)return fail(capture.error==='container_not_running'?'container_not_running':'workspace_save_unavailable',response.status===409?409:503);
+      if(typeof capture.handle?.id!=='string' || capture.handle.id.length>1024 || !capture.handle.id || !Number.isSafeInteger(capture.handle.size) || capture.handle.size<0 || capture.handle.size>record.reservedBytes || capture.imageDigest!==record.imageDigest)return fail('workspace_save_unavailable',503);
+      record.handle={id:capture.handle.id,size:capture.handle.size};record.bytes=capture.handle.size;record.imageKey=capture.imageKey;
+      await this.persist(index);
+    }
+    return {record,index};
   }
   async fetch(request){
     const url=new URL(request.url),id=url.searchParams.get('workspaceId'),account=this.account;
@@ -120,34 +165,12 @@ export class AccountWorkspaces {
         record.stopCompleted=true;await this.persist(index);await account.saveState(state);
         return account.respond(publicWorkspace(record,now));
       }
-      if(!source)return fail('container_not_running',409);
-      if(typeof source.imageDigest!=='string'||!source.imageDigest)return fail('workspace_image_incompatible',409);
-      const runtime=account.machineFor(userId,body.id);
-      if(!record){
-        const features=await runtime.fetch(new Request('https://internal/features'));
-        if(!features.ok || (await features.json()).workspaceSnapshots!==1)return fail('persistence_unavailable',503);
-        const policy=WORKSPACE_POLICY[state.entitlement.plan],size=machineSize(source.size),reservedBytes=size.diskGB*1_000_000_000;
-        const saved=index.records.filter(r=>!r.deleted&&r.expiresAt>now),month=new Date(now).toISOString().slice(0,7);
-        if(saved.length>=policy.maxSaved || saved.reduce((sum,r)=>sum+(r.reservedBytes??0),0)+reservedBytes>policy.maxReservedBytes)return fail('workspace_quota_exceeded',429);
-        if((index.usage[month]??0)>=policy.maxSavesPerMonth)return fail('workspace_save_limit',429);
-        const captures=captureUsage(index,now);
-        if(captures.captureBytesThisMonth+reservedBytes>policy.maxCaptureBytesPerMonth)return fail('workspace_capture_budget_exceeded',429);
-        if(captures.retainedCaptureBytes+reservedBytes>policy.maxRetainedCaptureBytes)return fail('workspace_retained_budget_exceeded',429);
-        record={id:crypto.randomUUID(),name:body.name,source:{id:body.id,createdAt:body.createdAt},createdAt:new Date(now).toISOString(),expiresAt:now+policy.retentionMs,
-          size:source.size,internet:source.internet??true,imageDigest:source.imageDigest,imageId:source.imageId,imageName:source.imageName,catalogId:source.catalogId,
-          operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false};
-        index.records.push(record);index.usage[month]=(index.usage[month]??0)+1;
-        reserveCapture(index,reservedBytes,now);
-        await this.persist(index);await account.saveState(state);
-      }
-      if(!record.handle){
-        const response=await runtime.fetch(new Request('https://internal/workspaces/snapshot-v1',{method:'POST',headers:{...entitlementHeaders(state.entitlement),'Content-Type':'application/json'},body:JSON.stringify({id:record.id,createdAt:body.createdAt,expiresAt:record.expiresAt})}));
-        const capture=await response.json();if(!response.ok)return fail(capture.error==='container_not_running'?'container_not_running':'workspace_save_unavailable',response.status===409?409:503);
-        if(typeof capture.handle?.id!=='string' || capture.handle.id.length>1024 || !capture.handle.id || !Number.isSafeInteger(capture.handle.size) || capture.handle.size<0 || capture.handle.size>record.reservedBytes || capture.imageDigest!==record.imageDigest)return fail('workspace_save_unavailable',503);
-        record.handle={id:capture.handle.id,size:capture.handle.size};record.bytes=capture.handle.size;record.imageKey=capture.imageKey;
-        await this.persist(index);
-      }
-      if(record.stop){
+      if(!source&&!record)return fail('container_not_running',409);
+      const captured=await this.capture(state,source,key,body,{record,index});
+      if(captured instanceof Response)return captured;
+      record=captured.record;
+      if(record.stop&&!source){record.stopCompleted=true;await this.persist(index);}
+      else if(record.stop){
         // Snapshot is durable before stop. Reservation fencing protects replacements.
         const stopped=await account.machine(state,body.id,'DELETE',state.entitlement);
         account.settleLease(state,body.id,stopped.lastRun?.stoppedAt??account.now());delete state.pending[body.id];record.stopCompleted=true;

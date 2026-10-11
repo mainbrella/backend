@@ -150,7 +150,7 @@ issuing a preview, and save generation-qualified cleanup instructions.
 
 This produces a **temporary preview**, not persistent hosting. The preview expires
 no later than the container's hard lease; inactivity can stop the container sooner.
-Ordinary stop discards the upload. Report the returned preview `expiresAt` beside
+Destructive deletion discards the upload; a resumable stop requires the filesystem persistence capability. Report the returned preview `expiresAt` beside
 the URL, rather than calculating expiration from the requested TTL. Container IDs
 are opaque: an ID such as `small` does not establish the requested machine size.
 
@@ -293,7 +293,7 @@ Launch custom images only after status is `ready`; inspect logs for a failed bui
 | --- | --- |
 | `GET /containers` | 200: current containers, effective plan, limits, and usage. Does not renew idle time. |
 | `POST /containers` | 200: reserves a start and boots the selected machine size (default lite) using the default Node image or optional JSON `{catalogId, size}` / `{imageId, size}` selection; returns status after readiness. 402 without paid access; 409 if the concurrency cap is occupied; optional `Idempotency-Key` resolves retries to one reservation for 24 hours and adds `creation` identity/status; 429 if monthly starts are exhausted. |
-| `DELETE /containers?id=<id>&createdAt=<generation>` | 200: stops the selected container and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
+| `DELETE /containers?id=<id>&createdAt=<generation>` | 200: permanently deletes the selected container without saving its filesystem and returns status. Generation is optional but recommended to reject stale actions. An explicit ID is required when multiple containers exist. Does not refund starts. |
 | `POST /containers/exec?id=small&createdAt=<ISO generation>` with `{"command":"echo hello","timeoutMs":30000}` | 200: `{stdout, stderr, exitCode, timedOut, outputTruncated}`. ID and exact generation are required. Runs a foreground `/bin/sh -lc` command without SSH or a PTY. |
 | `GET /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` | 200: raw `application/octet-stream` bytes for a regular file, up to 1 MiB. ID, exact generation, and URL-encoded path are required. |
 | `PUT /containers/files?id=<id>&createdAt=<generation>&path=<absolute-path>` with a raw byte body | 200: `{path, size}` after writing up to 1 MiB. An empty body creates an empty file. Requires an existing parent directory. |
@@ -336,7 +336,7 @@ Lifecycle response example (UTC timestamps and usage month):
 }
 ```
 
-The response also includes a `sizes` catalog (omitted above for brevity). `containers` is empty when Ad Hoc containers stop; Production desired services remain visible with `status: "stopped"`. During a concurrent launch, a reserved slot
+The response also includes a `sizes` catalog (omitted above for brevity). `containers` retains explicitly suspended Ad Hoc machines until deletion; destructive or automatic expiry stops remove them; Production desired services remain visible with `status: "stopped"`. During a concurrent launch, a reserved slot
 may appear with `status: "starting"`; terminal and SSH access require `running`.
 Unpaid status has `plan: null`, `active: false` and zero limits. An unpaid first
 start returns 402 without provisioning or consuming quota. If an existing billing
@@ -355,8 +355,7 @@ terminal connections (browser/SSH combined). An account permits ten live SSH
 access tokens, each lasting at most 15 minutes or the machine deadline. Process
 resume after stop, custom resources, teams, advanced logs/audits and
 priority capacity are unavailable. New accounts fund compute with one-time payments; unused balance carries forward. Existing fixed-price subscriptions retain their terms.
-Ordinary stop discards unsaved filesystem changes; save a workspace explicitly
-to restore its filesystem into a fresh container.
+Use `POST /containers/stop` and `/containers/resume` when `persistence.filesystemAfterStop` is enabled. Destructive DELETE and automatic expiry do not save files. Saved workspaces provide explicit captures independently of resumable stop.
 
 Ownership and resources come from the authenticated account and server policy.
 Request bodies and client headers cannot override the owner, plan, registry image, raw resource configuration,
@@ -428,7 +427,7 @@ directory operations below when supported by the deployment.
 Runtime file operations are bounded by 30 seconds and the hard container deadline,
 share the four-command execution pool, and renew idle activity. Disconnect or stop
 requests cancellation. A lost response may hide a completed write; read to reconcile
-before retrying. Ordinary stop discards unsaved files; save a workspace or export
+before retrying. Destructive deletion discards unsaved files; save a workspace or export
 outputs first. Custom
 images must retain `/bin/sh` and GNU coreutils, supplied by Mainbrella's base image.
 
@@ -685,8 +684,7 @@ machines share the same monthly spending cap, concurrency and start safeguards.
 
 A startup command must be one line and at most 4,096 characters. The dashboard
 requires it; API callers can omit it for an always-on shell machine. The command
-runs from the selected immutable image on every machine recovery. Include all
-required setup in the image or command. Application processes are supervised
+runs from the selected immutable image on recovery unless the machine was explicitly stopped and resumed from a checkpoint. Checkpoint-backed production recovery restores that saved filesystem and fails closed if the checkpoint becomes unavailable. Writes since that checkpoint are not crash-durable. Include required setup in the image or command. Application processes are supervised
 with restart backoff up to 60 seconds; output goes to
 `/tmp/mainbrella-production.log`. Runtime recovery backs off from 30 seconds to
 five minutes. Recovery retains the logical `id` and `createdAt`, private network
@@ -834,8 +832,7 @@ Expired, foreign-generation or missing records return 404 `execution_not_found`.
 New execution admission requires paid access and a running generation. On a
 runtime restart, unfinished jobs become `interrupted` and their matching container
 generation stops to revoke orphan processes. This can terminate other work on that
-generation. Jobs are never replayed automatically. Filesystem/process persistence
-across stop or restart is not supported.
+generation. Jobs are never replayed automatically. Process state is not preserved. Filesystem-only Stop/Resume is available when advertised by capability discovery.
 
 ## Outbound internet selection
 
@@ -908,9 +905,47 @@ Create with `{"catalogId":"node","size":"medium"}`. `GET /containers` returns `s
 
 Errors: 400 `invalid_size`; 409 `compute_capacity_exceeded`; 429 `compute_allowance_exhausted`. A changed size with an existing creation key returns 409 `idempotency_key_conflict`. Legacy plans have no overages. Prepaid accounts meter compute at $0.02 per unit-hour, subject to confirmed funding and a spending cap.
 
+## Filesystem Stop, Resume and Fork
+
+These endpoints are implemented in the current checkout and require deployment qualification before issuance. Discover `persistence.filesystemAfterStop` for Stop/Resume and `persistence.filesystemFork` for Fork. All three require paid access, `{id,createdAt}` for an owned generation, and a persisted `Idempotency-Key`. Retry an uncertain response with the same body and key; never substitute a fresh key to resolve an ambiguous operation.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /containers/stop` | Captures the filesystem before stopping compute. A failed capture leaves the source running. Returns account status with a retained `stopped` container, `workspaceId` and `persistenceExpiresAt` (Unix milliseconds). |
+| `POST /containers/resume` | Restores that stopped slot with a fresh `createdAt` and one normal paid start. Returns account status and a `creation` receipt, as creation does. |
+| `POST /containers/fork` | Captures a running source and boots a separate machine. Optional `name` labels the fork. Source continues running. Returns account status and a `creation` receipt. |
+| `DELETE /containers?id=...&createdAt=...` | Permanently deletes the selected machine or suspended slot. Does not create a snapshot. Remains available during billing outages. |
+
+A stopped machine reserves its logical slot but no running compute or concurrency. Snapshot storage, retention and capture budgets are the same as saved workspaces. Expired, archived, deleted and image-incompatible snapshots fail closed; resume never silently boots an empty image. Expired stopped records remain visible until explicitly deleted. Restore/Fork inherit the saved image, size, internet policy, allow/deny rules and secret IDs. Revoked secrets prevent a new restricted launch. Forks start as Ad Hoc machines, including forks of Production sources.
+
+Filesystem captures do not preserve RAM, running processes or mounted volumes. Quiesce databases and other writers before capture for application consistency. Old generation credentials and connections do not transfer to an explicit resume or fork. Automatic idle/session shutdown and an unexpected provider crash do not capture new state. A Production machine resumed from a checkpoint recovers from that checkpoint on later runtime interruption; writes after it remain vulnerable. This is not a mounted durable disk or a database durability guarantee.
+
+## Outbound policies and protected secrets
+
+These features require a qualified deployment and report `networking.egressPolicies` and `secrets.vault` in `/capabilities`. They default off in the checked-in rollout configuration. They are distinct from the existing boolean internet switch.
+
+Create a restricted machine with:
+
+```json
+{"catalogId":"node","networkPolicy":{"allow":["api.example.com","*.packages.example.com"],"deny":["blocked.packages.example.com"]},"secretBindings":["sec_d688d42a-25ef-4c13-9b28-21a0fde6e163"]}
+```
+
+`allow` is required and may be empty; `deny` defaults to empty. Each accepts up to 64 rules: exact hostname, `*.domain`, IPv4/IPv6 CIDR, or `*`. Deny wins. Rules are normalized, immutable for the generation and part of the creation fingerprint. Admission returns `409 network_policy_capacity_exceeded` before reserving a start when account policy metadata would exceed its storage budget. The policy implies `internet:false` and rejects explicit `internet:true`. Only HTTP on 80 and HTTPS on 443 are mediated; raw TCP, UDP, alternate ports, redirects, private/reserved IPs and mixed public/private DNS answers are denied. A hostname must match a domain allow rule before any DNS lookup; CIDR-only grants apply to literal IP requests. CIDR denies also apply to allowed hostnames' resolved addresses. A trusted relay validates every resolved address and pins the connection to a validated address with normal TLS hostname verification. HTTPS clients must trust the provider interception CA; removing trust causes failure rather than an internet bypass. Private Services remain a separate explicitly registered, account-scoped route.
+
+| Endpoint | Request and response |
+| --- | --- |
+| `GET /secrets` | `{secrets:[...]}` containing metadata only; available during billing outages. |
+| `POST /secrets` | `{name,value,hostname,header,prefix?}`; returns 201 metadata including `id`. |
+| `PUT /secrets/{secretId}` | `{value}` rotates the credential without changing its scope; returns metadata. |
+| `DELETE /secrets/{secretId}` | Revokes subsequent use; returns `{deleted:true}`. Available with issuance disabled. |
+
+Values are write-only, encrypted in account storage, and limited to 4,096 printable ASCII characters without spaces. `hostname` is one exact public DNS hostname. `header` is `authorization`, `x-api-key` or `api-key`; `prefix` is at most 32 printable ASCII characters, such as `Bearer `. Metadata includes `id,name,hostname,header,prefix,createdAt,updatedAt` and never the credential. Up to 16 owned IDs can be bound to a machine, with no duplicate host/header scope. Injection occurs only for HTTPS requests to the credential's exact host, after policy validation. Values do not enter guest files, environment, launch metadata or snapshots. Rotation/deletion and runtime replacement are checked again before returning mediated responses; requests already accepted upstream may complete.
+
+Use a trusted upstream and scoped, revocable tokens. Literal and common encoded credential reflection is blocked, but a malicious upstream can transform credentials into other response content. Mediation cannot make credentials unextractable against such an upstream. See `docs/network-policy.md` for the relay setup and required provider qualification.
+
 ## Saved workspaces and portable export
 
-Discover `capabilities.persistence.snapshots` before issuing saves or restores. Saved-workspace issuance is enabled in the qualified production deployment; other deployments may disable it. Ordinary stop remains destructive; save explicitly before stopping.
+Discover `capabilities.persistence.snapshots` before issuing saves or restores. Saved-workspace issuance is enabled in the qualified production deployment; other deployments may disable it. For automatic capture on an explicit stop, separately require `persistence.filesystemAfterStop` and use `POST /containers/stop`. DELETE remains destructive.
 
 `POST /workspaces` accepts `{id, createdAt, name, stop?}` and requires an `Idempotency-Key`. The source identity must match a running generation owned by the authenticated account. Save captures the writable root filesystem, commits its private provider handle, and optionally stops that exact generation. Persist the request body and key before sending: repeat the identical request after a lost response. Recovery receipts last 24 hours. A capture whose provider result cannot be recovered fails closed rather than silently taking another snapshot.
 

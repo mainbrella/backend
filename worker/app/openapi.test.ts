@@ -5,6 +5,8 @@ import { handleRequest } from "./router";
 import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
+  '/secrets': ['get', 'post'], '/secrets/{secretId}': ['put', 'delete'],
+  '/containers/stop': ['post'], '/containers/resume': ['post'], '/containers/fork': ['post'],
   '/domains/config': ['get'], '/domains': ['get'], '/domains/search': ['post'], '/domains/quote': ['post'],
   '/domains/checkout': ['post'], '/domains/order': ['get'], '/domains/detail': ['get'], '/domains/settings': ['patch'],
   '/domains/verification': ['post'], '/domains/records': ['post', 'delete'], '/domains/auth-code': ['post'],
@@ -79,6 +81,26 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('P0 lifecycle and security schemas describe authenticated exact-generation requests and write-only values', async () => {
+  const { paths, components } = await document();
+  for (const action of ['stop', 'resume', 'fork']) {
+    const operation = paths[`/containers/${action}`].post;
+    assert.deepEqual(operation.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+    assert.ok(operation.parameters.some((p: any) => p.name === 'Idempotency-Key' && p.required));
+    assert.deepEqual(operation.requestBody.content['application/json'].schema.required, ['id', 'createdAt']);
+    assert.ok(operation.responses[409]); assert.ok(operation.responses[410]);
+  }
+  assert.equal(paths['/secrets'].post.requestBody.content['application/json'].schema.properties.value.maxLength, 4096);
+  assert.equal(components.schemas.SecretMetadata.properties.value, undefined);
+  assert.equal(components.schemas.SecretMetadata.properties.ciphertext, undefined);
+  assert.ok(paths['/secrets/{secretId}'].delete.security.length);
+  const create = paths['/containers'].post.requestBody.content['application/json'].schema;
+  assert.equal(create.properties.networkPolicy.properties.allow.maxItems, 64);
+  assert.equal(create.properties.secretBindings.maxItems, 16);
+  assert.ok(components.schemas.Capabilities.properties.persistence.properties.filesystemFork);
+  assert.ok(components.schemas.Capabilities.properties.secrets.properties.vault);
+});
 
 test('service-owned endpoints document independent deployment and retain their public contracts', async () => {
   const { paths } = await document();

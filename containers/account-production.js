@@ -24,7 +24,7 @@ export class AccountProduction {
   stopped(state, id, reason) {
     const desired = state.production[id], selection = desired.selection, size = machineSize(selection.size);
     return { id, name: selection.name ?? id, size: size.id, instance: size.instance, computeUnits: size.computeUnits,
-      lifecycle: 'production', internet: selection.internet ?? true, status: 'stopped', stopReason: reason,
+      lifecycle: 'production', internet: selection.internet ?? true, ...(selection.networkPolicy ? { networkPolicy: selection.networkPolicy, secretBindings: selection.secretBindings ?? [] } : {}), status: 'stopped', stopReason: reason,
       createdAt: desired.createdAt ?? new Date(this.account.now()).toISOString(), expiresAt: new Date(this.account.now()).toISOString(),
       ...(selection.imageName ? { imageName: selection.imageName } : {}) };
   }
@@ -34,6 +34,13 @@ export class AccountProduction {
     if (state.entitlement.plan !== 'usage') return this.stopped(state, id, 'subscription_required');
     if (desired.retryAt > a.now()) return this.stopped(state, id, 'runtime_unavailable');
     a.billing.checkPending(state);
+    let selection = desired.selection;
+    if (selection.workspaceId) {
+      try { selection = await a.workspaces.restoreSelection(state, selection); }
+      catch (error) { return this.stopped(state, id, error.message); }
+    }
+    const securityError = a.security ? await a.security.validateSelection(state, selection) : selection.networkPolicy ? 'network_policy_unavailable' : null;
+    if (securityError) return this.stopped(state, id, securityError);
     const size = machineSize(desired.selection.size);
     const endAt = a.reserveLease(state, id, size, Math.min(a.now() + PRODUCTION_LEASE_MS, state.entitlement.validUntil));
     if (endAt - a.now() < 1000) {
@@ -47,7 +54,7 @@ export class AccountProduction {
     await a.ctx.storage.put('containerAccount', state);
     try {
       const result = await a.machine(state, id, 'POST', state.entitlement, state.reservations[id],
-        { ...desired.selection, recover: lastRun?.lifecycle === 'production' && lastRun.reservationId >= desired.initialReservationId, computeExpiresAt: endAt });
+        { ...selection, recover: lastRun?.lifecycle === 'production' && lastRun.reservationId >= desired.initialReservationId, computeExpiresAt: endAt });
       const container = result.containers?.[0];
       if (!container) return this.stopped(state, id, 'runtime_unavailable');
       desired.createdAt = container.createdAt;

@@ -14,7 +14,7 @@ export const capabilitiesSchema = z.object({
     maxManagedTimeoutMs: limit, retentionMs: limit, maxRetainedExecutions: limit, maxStdinChunkBytes: limit, maxStdinBytes: limit, maxPendingStdinBytes: limit }),
   files: flags('read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
     .extend({ maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
-  persistence: flags('filesystemAfterStop', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
+  persistence: flags('filesystemAfterStop', 'filesystemFork', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
   observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   projects: flags('supported', 'customDomains', 'localDevelopment').extend({ apexIps: z.array(z.string()) }),
@@ -22,6 +22,7 @@ export const capabilitiesSchema = z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit }) }),
   resources: z.array(machineSizeSchema),
   networking: flags('outboundInternet', 'internetControl', 'privateServices', 'egressPolicies', 'regionSelection'),
+  secrets: flags('vault'),
   access: z.object({ maxTerminalConnections: limit, maxSSHAccessTokens: limit, sshTokenLifetimeMs: limit }),
 }).openapi('Capabilities');
 

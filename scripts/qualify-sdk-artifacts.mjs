@@ -70,8 +70,8 @@ try {
   await mkdir(dirname(output), { recursive: true });
   await mkdir(output, { recursive: false });
   createdOutput = true;
-  const js = await stage('javascript', ['package.json', 'README.md', 'index.js', 'index.d.ts', 'cli.mjs']);
-  const py = await stage('python', ['pyproject.toml', 'README.md', 'mainbrella/__init__.py']);
+  const js = await stage('javascript', ['package.json', 'README.md', 'index.js', 'index.d.ts', 'network-policy.js', 'cli.mjs']);
+  const py = await stage('python', ['pyproject.toml', 'README.md', 'mainbrella/__init__.py', 'mainbrella/_network_policy.py']);
   const metadata = JSON.parse(await readFile(join(js, 'package.json'), 'utf8'));
   const pyMetadata = await readFile(join(py, 'pyproject.toml'), 'utf8');
   assert.equal(metadata.version, pyMetadata.match(/^version = "([^"]+)"/m)?.[1], 'SDK versions differ');
@@ -79,7 +79,7 @@ try {
   assert.ok(!metadata.dependencies || Object.keys(metadata.dependencies).length === 0);
 
   const pack = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', output], { cwd: js, capture: true }))[0];
-  assert.deepEqual(pack.files.map(file => file.path).sort(), ['LICENSE', 'README.md', 'cli.mjs', 'index.d.ts', 'index.js', 'package.json']);
+  assert.deepEqual(pack.files.map(file => file.path).sort(), ['LICENSE', 'README.md', 'cli.mjs', 'index.d.ts', 'index.js', 'network-policy.js', 'package.json']);
   const consumer = join(work, 'consumer');
   await mkdir(consumer);
   await writeFile(join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
@@ -107,6 +107,7 @@ try {
   const tests = join(work, 'python-tests');
   await mkdir(tests);
   await copyFile(join(root, 'sdk/python/test_client.py'), join(tests, 'test_client.py'));
+  await copyFile(join(root, 'sdk/python/test_network_policy.py'), join(tests, 'test_network_policy.py'));
   for (const artifact of (await readdir(output)).filter(file => /\.(whl|tar\.gz)$/.test(file))) {
     const envDir = join(work, artifact.endsWith('.whl') ? 'wheel-env' : 'sdist-env');
     run(pythonCommand, ['-m', 'venv', envDir]);

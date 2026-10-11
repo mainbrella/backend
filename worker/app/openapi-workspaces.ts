@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { sizeSchema } from './openapi-containers';
+import { sizeSchema, networkPolicySchema } from './openapi-containers';
 import { MAX_WORKSPACE_EXPORT_BYTES } from '../../containers/workspace-export.js';
 import { containerSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
 const identity=z.object({id:z.string(),createdAt:z.string().datetime()});
 export const workspaceSchema=z.object({id:z.string().uuid(),name:z.string().min(1).max(80),createdAt:z.string().datetime(),expiresAt:z.number().int(),source:identity,
-  size:sizeSchema,internet:z.boolean(),imageDigest:z.string(),imageId:z.string().optional(),imageName:z.string().optional(),catalogId:z.string().optional(),bytes:z.number().int().nonnegative().nullable(),
+  size:sizeSchema,internet:z.boolean(),networkPolicy:networkPolicySchema.optional(),secretBindings:z.array(z.string()).optional(),imageDigest:z.string(),imageId:z.string().optional(),imageName:z.string().optional(),catalogId:z.string().optional(),bytes:z.number().int().nonnegative().nullable(),
   archived:z.boolean(),status:z.enum(['saving','ready','failed','expired','deleted']),stopRequested:z.boolean(),stopCompleted:z.boolean()}).openapi('Workspace');
 const headers=z.object({Origin:z.string().optional()});
 const responseErrors=errors(400,401,402,403,404,405,409,410,413,429,503);

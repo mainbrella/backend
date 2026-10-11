@@ -13,12 +13,14 @@ for artifact in pathlib.Path(output).iterdir():
             files = {name: archive.read(name) for name in archive.namelist()}
         metadata_name = next(name for name in files if name.endswith(".dist-info/METADATA"))
         assert "mainbrella/__init__.py" in files
+        assert "mainbrella/_network_policy.py" in files
         assert not any("test_" in name or "__pycache__" in name for name in files)
     elif artifact.name.endswith(".tar.gz"):
         with tarfile.open(artifact) as archive:
             files = {member.name: archive.extractfile(member).read() for member in archive if member.isfile()}
         metadata_name = next(name for name in files if name.count("/") == 1 and name.endswith("/PKG-INFO"))
         assert any(name.endswith("/mainbrella/__init__.py") for name in files)
+        assert any(name.endswith("/mainbrella/_network_policy.py") for name in files)
         assert any(name.endswith("/pyproject.toml") for name in files)
     else:
         continue
