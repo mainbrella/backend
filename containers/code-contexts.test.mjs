@@ -188,6 +188,82 @@ test('failed generation cleanup retains occupied capacity and recovery evidence'
   assert.equal(f.records.has('code-context:' + context.id), true);
 });
 
+test('failed context deletion remains addressable, blocks execution and retries confirmed cleanup', async t => {
+  const f = fixture(t);
+  const start = f.controller.startTerminalProcess.bind(f.controller);
+  const destroy = f.controller.destroy.bind(f.controller);
+  f.controller.startTerminalProcess = async (...args) => ({ ...await start(...args), pid: 123 });
+  f.controller.signalOperationGroup = async () => false;
+  let attempts = 0;
+  f.controller.destroy = async () => {
+    if (++attempts === 1) throw new Error('provider_unavailable');
+    await destroy();
+  };
+  const context = await create(f);
+  await assert.rejects(f.manager.fetch(request(`/${context.id}`, 'DELETE')), /provider_unavailable/);
+  assert.equal(f.manager.contexts.has(context.id), true);
+  assert.equal(f.active.size, 1);
+  assert.equal(f.records.has('code-context:' + context.id), true);
+  const blocked = await execute(f, context.id, 'print("must not execute")');
+  assert.equal(blocked.status, 409);
+  assert.deepEqual(await blocked.json(), { error: 'code_context_closed' });
+  assert.deepEqual(await (await f.manager.fetch(request())).json(), { contexts: [] });
+  const retried = await f.manager.fetch(request(`/${context.id}`, 'DELETE'));
+  assert.equal(retried.status, 200);
+  assert.deepEqual(await retried.json(), { closed: true });
+  assert.equal(attempts, 2);
+  assert.equal(f.controller.container.running, false);
+  assert.equal(f.manager.contexts.has(context.id), false);
+  assert.equal(f.active.size, 0);
+  assert.equal(f.records.has('code-context:' + context.id), false);
+  assert.equal((await f.manager.fetch(request(`/${context.id}`, 'DELETE'))).status, 404);
+});
+
+test('concurrent deletes await one cleanup attempt and keep the context until it finishes', async t => {
+  const f = fixture(t), context = await create(f);
+  const session = f.manager.contexts.get(context.id);
+  const dispose = session.process.dispose.bind(session.process);
+  let release, entered;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const reached = new Promise(resolve => { entered = resolve; });
+  let disposals = 0;
+  session.process.dispose = async () => { disposals++; entered(); await barrier; return dispose(); };
+  const first = f.manager.fetch(request(`/${context.id}`, 'DELETE'));
+  await reached;
+  let secondSettled = false;
+  const second = f.manager.fetch(request(`/${context.id}`, 'DELETE')).finally(() => { secondSettled = true; });
+  await Promise.resolve();
+  assert.equal(secondSettled, false);
+  assert.equal(f.manager.contexts.has(context.id), true);
+  assert.equal(f.active.size, 1);
+  assert.equal(f.records.has('code-context:' + context.id), true);
+  assert.equal(disposals, 1);
+  release();
+  const responses = await Promise.all([first, second]);
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+  assert.equal(disposals, 1);
+  assert.equal(f.manager.contexts.has(context.id), false);
+  assert.equal(f.active.size, 0);
+});
+
+test('storage cleanup failure retains a retryable context without freeing capacity', async t => {
+  const f = fixture(t), context = await create(f);
+  const remove = f.ctx.storage.delete.bind(f.ctx.storage);
+  let attempts = 0;
+  f.ctx.storage.delete = async key => {
+    if (key === 'code-context:' + context.id && ++attempts === 1) throw new Error('storage_unavailable');
+    return remove(key);
+  };
+  await assert.rejects(f.manager.fetch(request(`/${context.id}`, 'DELETE')), /storage_unavailable/);
+  assert.equal(f.manager.contexts.has(context.id), true);
+  assert.equal(f.records.has('code-context:' + context.id), true);
+  assert.equal(f.active.size, 1);
+  assert.equal((await f.manager.fetch(request(`/${context.id}`, 'DELETE'))).status, 200);
+  assert.equal(f.manager.contexts.has(context.id), false);
+  assert.equal(f.records.has('code-context:' + context.id), false);
+  assert.equal(f.active.size, 0);
+});
+
 test('late failed process cleanup cannot stop a replacement generation', async t => {
   const f = fixture(t);
   const start = f.controller.startTerminalProcess.bind(f.controller);

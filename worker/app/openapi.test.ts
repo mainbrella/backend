@@ -5,6 +5,7 @@ import { handleRequest } from "./router";
 import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
+  '/pools': ['get', 'post'], '/pools/{poolId}': ['get', 'patch', 'delete'], '/pools/{poolId}/acquire': ['post'],
   '/secrets': ['get', 'post'], '/secrets/{secretId}': ['put', 'delete'],
   '/containers/stop': ['post'], '/containers/resume': ['post'], '/containers/fork': ['post'],
   '/domains/config': ['get'], '/domains': ['get'], '/domains/search': ['post'], '/domains/quote': ['post'],
@@ -87,6 +88,32 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('managed pool schemas describe bounded billed inventory and idempotent acquisition', async () => {
+  const { paths, components } = await document();
+  for (const path of ['/pools', '/pools/{poolId}/acquire']) {
+    assert.deepEqual(paths[path].post.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+    assert.ok(paths[path].post.parameters.some((p: any) => p.name === 'Idempotency-Key' && p.required));
+  }
+  const create = paths['/pools'].post.requestBody.content['application/json'].schema;
+  assert.deepEqual(create.required, ['name', 'targetSize', 'ttlSeconds']);
+  assert.equal(create.properties.ttlSeconds.maximum, 86400);
+  assert.equal(create.properties.targetSize.maximum, 20);
+  assert.equal(create.additionalProperties, false);
+  assert.equal(components.schemas.ManagedPool.properties.expiresAt.format, 'date-time');
+  assert.equal(paths['/pools/{poolId}/acquire'].post.requestBody.required, false);
+  assert.ok(paths['/pools/{poolId}/acquire'].post.responses[410]);
+  assert.match(paths['/pools/{poolId}'].delete.description, /Acquired guests are unaffected/);
+});
+
+test('interpreter cleanup documents retryable closing contexts', async () => {
+  const { paths } = await document();
+  const cleanup = paths['/containers/code-contexts/{contextId}'].delete;
+  assert.match(cleanup.description, /Failed cleanup retains the context ID/);
+  assert.ok(cleanup.responses[503]);
+  assert.ok(paths['/containers/code-contexts/{contextId}/execute'].post.responses[409]);
+  assert.match(paths['/containers/code-contexts'].get.description, /closing contexts are omitted/);
+});
 
 test('P0 lifecycle and security schemas describe authenticated exact-generation requests and write-only values', async () => {
   const { paths, components } = await document();
@@ -496,7 +523,17 @@ test("schema describes optional container bodies, multipart image source, and We
   assert.equal(paths["/images"].post.requestBody.required, true);
   const multipart = paths["/images"].post.requestBody.content["multipart/form-data"].schema;
   assert.equal(multipart.properties.context.format, "binary");
+  assert.equal(multipart.properties.cacheFrom.format, 'uuid');
+  assert.equal(multipart.properties.baseImage.type, 'string');
   assert.deepEqual(multipart.required, ["name", "dockerfile"]);
+  const imageList = paths['/images'].get.responses[200].content['application/json'].schema;
+  assert.equal(imageList.properties.privateRegistriesEnabled.type, 'boolean');
+  const claim = paths['/internal/image-builds/{id}/source'].post;
+  assert.deepEqual(claim.security, [{ imageBuild: [] }]);
+  assert.match(claim.description, /One-use claim/);
+  const source = claim.responses[200].content['application/json'].schema.properties;
+  assert.ok(source.baseImage);
+  assert.ok(source.cacheImage);
   assert.ok(paths["/containers/terminal"].get.responses[101]);
   assert.ok(paths["/ssh/connect"].get.responses[101]);
   assert.deepEqual(paths["/subscription/checkout"].post.security, [{ cookieAuth: [] }]);

@@ -73,14 +73,16 @@ export class CodeContexts {
     }
   }
   async close(session, code = 'code_context_closed') {
-    if (session.closed) return session.cleanup;
+    if (session.cleanup) return session.cleanup;
     session.closed = true;
-    this.contexts.delete(session.id);
-    clearTimeout(session.timer);
-    session.abort.abort();
-    session.pending?.reject(failure(code));
-    session.ready?.reject(failure(code));
-    session.cleanup = (async () => {
+    // Keep the closing session addressable until cleanup is confirmed. Install
+    // its shared promise before aborting pipes/processes, whose callbacks may
+    // also request close. A failed attempt remains retryable by the same ID.
+    const cleanup = Promise.resolve().then(async () => {
+      clearTimeout(session.timer);
+      session.abort.abort();
+      session.pending?.reject(failure(code));
+      session.ready?.reject(failure(code));
       const process = session.process ?? await session.starting?.catch(() => null);
       process?.kill(9);
       const confirmed = await process?.dispose().catch(() => false);
@@ -89,9 +91,14 @@ export class CodeContexts {
       // cleanup; if that also fails, retain both capacity and recovery evidence.
       if (confirmed === false) await this.stopGeneration(session.createdAt);
       await this.ctx.storage.delete(PREFIX + session.id);
-      this.active.delete(session);
       await Promise.allSettled([session.writer?.abort(), session.reader?.cancel(), session.stderrReader?.cancel()]);
-    })();
+      this.contexts.delete(session.id);
+      this.active.delete(session);
+    });
+    session.cleanup = cleanup.catch(error => {
+      session.cleanup = undefined;
+      throw error;
+    });
     this.ctx.waitUntil(session.cleanup.catch(() => {}));
     return session.cleanup;
   }
@@ -182,6 +189,7 @@ export class CodeContexts {
     } finally { clearTimeout(startupTimer); }
   }
   async execute(session, body, expiresAt, signal) {
+    if (session.closed) return this.controller.respond({ error: 'code_context_closed' }, 409);
     if (session.pending) return this.controller.respond({ error: 'code_context_busy' }, 409);
     // Reserve before awaiting authorization so simultaneous requests cannot run
     // or overwrite each other's correlation state.

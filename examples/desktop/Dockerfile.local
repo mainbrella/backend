@@ -1,0 +1,4 @@
+# Local Linux qualification only; publishing a runtime image is a separate step.
+FROM python:3.13-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11-utils xdotool imagemagick openbox xterm fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+WORKDIR /source

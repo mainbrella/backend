@@ -14,6 +14,8 @@ from ._network_policy import normalize_network_policy
 from ._file_transfers import FileTransfers, Download
 from ._pool import SandboxPool
 from ._images import Images
+from ._managed_pools import ManagedPools
+from ._desktop import DesktopTools, DesktopSession
 
 _USER_AGENT = "mainbrella-python/0.1.0"
 
@@ -79,6 +81,7 @@ class Mainbrella:
         self.workspaces = _Workspaces(self)
         self.secrets = _Secrets(self)
         self.images = Images(self)
+        self.pools = ManagedPools(self)
 
     def request(self, path, method="GET", body=None, headers=None, binary=False, timeout=None, stream=False, raw_body=False):
         if not path.startswith("/") or path.startswith("//") or urlsplit(path).scheme:
@@ -568,6 +571,7 @@ class Sandbox:
         self.files = _Files(self)
         self.commands = _Commands(self)
         self.code = _CodeContexts(self)
+        self.desktop = DesktopTools(self)
         self.previews = _Previews(self)
         self.webhook = _Webhook(self)
 

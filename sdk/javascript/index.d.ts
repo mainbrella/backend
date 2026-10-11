@@ -4,10 +4,14 @@ export interface NetworkPolicy { allow: string[]; deny?: string[] }
 export interface SecretMetadata { id: string; name: string; hostname: string; header: 'authorization' | 'x-api-key' | 'api-key'; prefix: string; createdAt: string; updatedAt: string }
 export interface LifecycleOptions { idempotencyKey?: string; waitTimeoutMs?: number; pollIntervalMs?: number }
 export interface CreateOptions extends LifecycleOptions { name?: string; lifecycle?: 'ad_hoc' | 'production'; startupCommand?: string; networkPolicy?: NetworkPolicy; secretBindings?: string[]; catalogId?: string; imageId?: string; workspaceId?: string; size?: MachineSize; internet?: boolean }
-export interface Image { id: string; name: string; status: 'queued' | 'building' | 'publishing' | 'ready' | 'failed'; digest?: string | null; createdAt: string; updatedAt: string }
+export interface Image { id: string; name: string; status: 'queued' | 'building' | 'publishing' | 'ready' | 'failed'; digest?: string | null; baseImage?: string | null; cacheFrom?: string | null; createdAt: string; updatedAt: string }
 export interface ImageTag { tag: string; imageId: string; updatedAt: string }
 export interface PoolOptions { targetSize?: number; create?: Omit<CreateOptions, 'idempotencyKey' | 'lifecycle' | 'startupCommand'> & { lifecycle?: 'ad_hoc' } }
 export interface PoolState { closed: boolean; targetSize: number; available: ContainerIdentity[]; pending: { idempotencyKey: string; retryBefore: number } | null }
+export interface PoolSelection { size: MachineSize; internet: boolean; catalogId?: string; imageId?: string; networkPolicy?: NetworkPolicy; secretBindings?: string[] }
+export interface ManagedPool { id: string; name: string; targetSize: number; ready: number; starting: number; status: 'active' | 'paused' | 'expired' | 'deleting' | 'degraded'; createdAt: string; updatedAt: string; expiresAt: string; lastError?: string; selection: PoolSelection }
+export interface ManagedPoolOptions { name: string; targetSize: number; ttlSeconds: number; idempotencyKey?: string; size?: MachineSize; catalogId?: string; imageId?: string; internet?: boolean; networkPolicy?: NetworkPolicy; secretBindings?: string[] }
+export interface ImageBuildOptions { name: string; dockerfile: string; context?: Uint8Array; cacheFrom?: string; baseImage?: { image: string; username?: string; password?: string } }
 export class SandboxPool { constructor(client: Mainbrella, options?: PoolOptions); readonly state: PoolState; refill(): Promise<PoolState>; acquire(): Promise<Sandbox>; close(): Promise<PoolState> }
 export interface ContainerIdentity { id: string; createdAt: string }
 export interface Workspace {id:string;name:string;createdAt:string;expiresAt:number;source:ContainerIdentity;size:MachineSize;internet:boolean;networkPolicy?:NetworkPolicy;secretBindings?:string[];imageDigest:string;imageId?:string;imageName?:string;catalogId?:string;bytes:number|null;archived:boolean;status:'saving'|'ready'|'failed'|'expired'|'deleted';stopRequested:boolean;stopCompleted:boolean}
@@ -27,6 +31,8 @@ export interface AccountState { plan: 'builder' | 'pro' | 'scale' | 'usage' | nu
   usage: { month: string; starts: number; computeUnitHours: number; reservedComputeUnitHours: number; availableComputeUnitHours: number; concurrentComputeUnits: number } }
 export interface Capabilities {
   apiVersion: string;
+  pools: { managed: boolean; sdkPrewarming: boolean };
+  codeInterpreter: { supported: boolean; languages: 'python'[]; stateful: boolean; memoryPersistence: boolean; maxCodeBytes: number; maxTimeoutMs: number; maxContextMs: number; maxResultBytes: number };
   execution: { foreground: boolean; streaming: boolean; background: boolean; cancellation: boolean; reconnect: boolean; pty: boolean;
     programmaticPty: boolean; ptyResize: boolean; stdin: boolean; signals: boolean; argv: boolean; managedProcessListing: boolean; processListing: boolean;
     maxStdinChunkBytes: number; maxStdinBytes: number; maxPendingStdinBytes: number;
@@ -38,19 +44,22 @@ export interface Capabilities {
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };
   resources: Size[];
-  images: { catalog: boolean; customBuilds: boolean; availableCatalogPath: string; limits: Record<string, number> };
+  images: { tags: boolean; catalog: boolean; customBuilds: boolean; crossBuildCache: boolean; privateRegistryImports: boolean; availableCatalogPath: string; limits: Record<string, number> };
   secrets: { vault: boolean };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
-export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; cursor?: number; previewId?: string; constructor(code: string, status?: number, details?: Record<string, unknown>) }
+export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; constructor(code: string, status?: number, details?: Record<string, unknown>) }
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
-  images: { list(): Promise<{ images: Image[]; buildsEnabled: boolean; limits: Record<string, number>; usage: { month: string; builds: number } }>;
+  images: { list(): Promise<{ images: Image[]; buildsEnabled: boolean; privateRegistriesEnabled: boolean; limits: Record<string, number>; usage: { month: string; builds: number } }>;
     get(id: string): Promise<{ image: Image }>; logs(id: string): Promise<{ logs: string; status: string }>; delete(id: string): Promise<{ deleted: true }>;
-    create(options: { name: string; dockerfile: string; context?: Uint8Array }): Promise<{ image: Image }>;
+    create(options: ImageBuildOptions): Promise<{ image: Image }>;
     tags: { list(): Promise<{ tags: ImageTag[] }>; get(tag: string): Promise<{ tag: string; image: Image }>; set(tag: string, imageId: string): Promise<ImageTag>; delete(tag: string): Promise<{ deleted: true }> } };
   pool(options?: PoolOptions): SandboxPool;
+  pools: { list(): Promise<{ pools: ManagedPool[] }>; get(id: string): Promise<{ pool: ManagedPool }>;
+    create(options: ManagedPoolOptions): Promise<{ pool: ManagedPool }>; update(id: string, options: { name?: string; targetSize?: number }): Promise<{ pool: ManagedPool }>;
+    delete(id: string): Promise<{ deleted: true }>; acquire(id: string, options?: { idempotencyKey?: string }): Promise<Sandbox> };
   secrets: { list(): Promise<{ secrets: SecretMetadata[] }>; create(options: { name: string; value: string; hostname: string; header: SecretMetadata['header']; prefix?: string }): Promise<SecretMetadata>; rotate(id: string, value: string): Promise<SecretMetadata>; delete(id: string): Promise<{ deleted: true }> };
   workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number;maxCaptureBytesPerMonth:number;maxRetainedCaptureBytes:number}|null;usage:{saved:number;reservedBytes:number;savesThisMonth:number;captureBytesThisMonth:number;retainedCaptureBytes:number}}>;
     get(id:string):Promise<Workspace>;update(id:string,options:{name?:string;archived?:boolean}):Promise<Workspace>;delete(id:string):Promise<{deleted:true}>;
@@ -81,6 +90,7 @@ export class Sandbox implements ContainerIdentity {
     start(command: string | string[], options?: ExecutionOptions): Promise<Execution>;
     list(): Promise<{ executions: Omit<ExecutionRecord, 'stdout' | 'stderr'>[] }>; attach(id: string): Execution };
   code: { create(options?: { language?: 'python' }): Promise<CodeContext>; list(): Promise<{ contexts: CodeContextRecord[] }>; attach(id: string): CodeContext };
+  desktop: { probe(): Promise<{ supported: boolean; tools: Record<'Xvfb' | 'xdpyinfo' | 'xdotool' | 'import', boolean> }>; start(options?: { width?: number; height?: number }): Promise<DesktopSession> };
   kill(): Promise<AccountState>;
   delete(): Promise<AccountState>;
   stop(options?: { idempotencyKey?: string }): Promise<AccountState>;
@@ -113,6 +123,13 @@ export class CodeContext {
   id: string; language: 'python'; expiresAt?: number;
   run(code: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<CodeResult>;
   close(): Promise<{ closed: true }>;
+}
+export class DesktopSession {
+  private constructor();
+  readonly contextId: string; readonly expiresAt?: number; readonly display: string; readonly width: number; readonly height: number;
+  move(x: number, y: number): Promise<{ ok: true }>; click(button?: number): Promise<{ ok: true }>;
+  press(keys: string): Promise<{ ok: true }>; type(text: string): Promise<{ ok: true }>;
+  launch(argv: string[]): Promise<{ pid: number }>; screenshot(): Promise<Uint8Array>; close(): Promise<{ closed: true }>;
 }
 export class Execution {
   constructor(sandbox: Sandbox, id: string); id: string; cursor: number;

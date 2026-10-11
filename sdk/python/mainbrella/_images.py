@@ -1,5 +1,6 @@
 import re
 import uuid
+import json
 
 
 class Images:
@@ -26,13 +27,25 @@ class Images:
     def delete(self, image_id):
         return self._client.request(self._path(image_id), 'DELETE')
 
-    def create(self, name, dockerfile, context=None):
+    def create(self, name, dockerfile, context=None, *, cache_from=None, base_image=None):
         if (not isinstance(name, str) or not name.strip() or len(name.strip()) > 80 or not isinstance(dockerfile, str)
                 or context is not None and (not isinstance(context, bytes) or len(context) > 512 * 1024)):
             raise self._error('invalid_image_source')
         boundary = 'mainbrella-' + uuid.uuid4().hex
         fields = []
-        for key, value in (('name', name), ('dockerfile', dockerfile)):
+        values = [('name', name), ('dockerfile', dockerfile)]
+        if cache_from is not None:
+            self._path(cache_from)
+            values.append(('cacheFrom', cache_from))
+        if base_image is not None:
+            if (not isinstance(base_image, dict) or not isinstance(base_image.get('image'), str)
+                    or set(base_image) - {'image', 'username', 'password'}
+                    or ('username' in base_image) != ('password' in base_image)
+                    or 'username' in base_image and (not isinstance(base_image['username'], str)
+                                                     or not isinstance(base_image['password'], str))):
+                raise self._error('invalid_image_source')
+            values.append(('baseImage', json.dumps(base_image)))
+        for key, value in values:
             fields.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
                           + value.encode() + b'\r\n')
         if context is not None:

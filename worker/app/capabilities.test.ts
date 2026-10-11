@@ -15,6 +15,11 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
   assert.equal(value.execution.maxOutputBytes, MAX_OUTPUT_BYTES);
   assert.equal(value.files.maxFileBytes, MAX_FILE_BYTES);
   assert.equal(value.images.customBuilds, false);
+  assert.equal(value.images.crossBuildCache, false);
+  assert.equal(value.images.privateRegistryImports, false);
+  assert.equal(value.pools.managed, false);
+  assert.equal(value.pools.maxPoolSize, 20);
+  assert.equal(value.pools.maxTtlSeconds, 86400);
   assert.equal(value.persistence.filesystemAfterStop, false);
   assert.equal(value.networking.regionSelection, false);
   assert.equal(value.networking.internetControl, false);
@@ -22,17 +27,32 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
 });
 
 test('discovery enforces method/query/CORS and exposes configuration without revealing secrets', async () => {
-  const env = { IMAGE_BUILD_SECRET: 'private-build-secret', IMAGE_BUILD_GITHUB_TOKEN: 'private-github-token' } as Env;
+  const env = { IMAGE_BUILD_SECRET: 'private-build-secret', IMAGE_BUILD_GITHUB_TOKEN: 'private-github-token', IMAGE_BUILD_GITHUB_REPOSITORY: 'mainbrella/builds' } as Env;
   const call = (method = 'GET', suffix = '', origin?: string) => handleRequest(new Request(`https://api.mainbrella.com/capabilities${suffix}`,
     { method, headers: origin ? { Origin: origin } : {} }), env);
   const response = await call('GET', '', 'https://mainbrella.com');
   assert.equal(response.headers.get('access-control-allow-origin'), 'https://mainbrella.com');
   const text = await response.text();
   assert.equal(JSON.parse(text).images.customBuilds, true);
+  assert.equal(JSON.parse(text).images.crossBuildCache, true);
+  assert.equal(JSON.parse(text).images.privateRegistryImports, false);
   assert.ok(!text.includes('private-'));
   assert.equal((await call('POST')).status, 405);
   assert.equal((await call('HEAD')).status, 405);
   assert.equal((await call('GET', '?account=victim')).status, 400);
   assert.equal((await call('GET', '', 'https://attacker.example')).status, 403);
   assert.equal((await call('OPTIONS', '', 'https://mainbrella.com')).status, 204);
+});
+
+test('managed pools and private registry discovery require complete deployment configuration', async () => {
+  const env = { MANAGED_POOLS_ENABLED: 'true', USER_CONTAINER: {}, CONTAINER_ACCOUNT: {}, IMAGE_BUILD_SECRET: 'secret',
+    IMAGE_BUILD_GITHUB_TOKEN: 'token', IMAGE_BUILD_GITHUB_REPOSITORY: 'mainbrella/private-builds', IMAGE_REGISTRY_ENCRYPTION_KEY: 'a'.repeat(64) } as unknown as Env;
+  const read = async () => capabilitiesSchema.parse(await (await handleRequest(new Request('https://api.mainbrella.com/capabilities'), env)).json());
+  assert.equal((await read()).pools.managed, true);
+  assert.equal((await read()).images.privateRegistryImports, true);
+  delete (env as Partial<Env>).USER_CONTAINER; assert.equal((await read()).pools.managed, false);
+  env.IMAGE_BUILD_GITHUB_REPOSITORY = undefined;
+  assert.equal((await read()).images.customBuilds, false);
+  assert.equal((await read()).images.crossBuildCache, false);
+  assert.equal((await read()).images.privateRegistryImports, false);
 });

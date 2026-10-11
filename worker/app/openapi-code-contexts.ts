@@ -14,7 +14,7 @@ export function registerCodeContextRoutes(api: OpenAPIApi, handler: LegacyHandle
   const params = z.object({ contextId: z.uuid() });
   const base = { tags: ['Containers'], security: containerSecurity };
   register(api, 'get', '/containers/code-contexts', { ...base, operationId: 'listCodeContexts', summary: 'List live interpreter contexts for one generation',
-    description: 'Owned read operation available during billing outages. Contexts disappear on expiration, stop, or runtime recovery.', request: { query, headers },
+    description: 'Owned read operation available during billing outages. Only executable contexts are listed; closing contexts are omitted even while cleanup remains pending. Contexts disappear on expiration, stop, or runtime recovery.', request: { query, headers },
     responses: { 200: jsonResponse(z.object({ contexts: z.array(codeContextSchema) })), ...errors(400, 401, 403, 503) } }, handler);
   register(api, 'post', '/containers/code-contexts', { ...base, operationId: 'createCodeContext', summary: 'Create a stateful Python interpreter',
     description: `Requires an owned paid running generation with python3 and GNU timeout installed. Python globals and imported modules persist within this context. Contexts expire after at most ${MAX_CODE_CONTEXT_MS} ms and consume one of the shared four concurrent operation slots until closed. Idle contexts do not renew container activity. Stop, timeout, disconnect during execution, or runtime recovery destroys the context. Context memory is never snapshotted or restored. Creation is not automatically retried. Cookie mutations require trusted Origin.`,
@@ -25,6 +25,6 @@ export function registerCodeContextRoutes(api: OpenAPIApi, handler: LegacyHandle
     request: { query, params, headers, ...requestBody(z.object({ code: z.string().min(1).max(MAX_COMMAND_BYTES), timeoutMs: z.number().int().min(1).max(MAX_TIMEOUT_MS).optional() }).strict()) },
     responses: { 200: jsonResponse(codeResultSchema), ...errors(400, 401, 402, 403, 404, 409, 413, 503, 504) } }, handler);
   register(api, 'delete', '/containers/code-contexts/:contextId', { ...base, operationId: 'closeCodeContext', summary: 'Close an interpreter and release its operation slot',
-    description: 'Owned cleanup remains available during billing outages. Kills the interpreter process group; does not delete sandbox files. Cookie mutations require trusted Origin.',
+    description: 'Owned cleanup remains available during billing outages. Kills the interpreter process group; does not delete sandbox files. Concurrent deletes await the same cleanup. Failed cleanup retains the context ID and occupied operation slot for another DELETE; execution on a closing context returns 409 code_context_closed. A successful response confirms cleanup. Cookie mutations require trusted Origin.',
     request: { query, params, headers }, responses: { 200: jsonResponse(z.object({ closed: z.literal(true) })), ...errors(400, 401, 403, 404, 409, 503) } }, handler);
 }

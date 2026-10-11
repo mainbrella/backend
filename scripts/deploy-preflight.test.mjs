@@ -86,6 +86,28 @@ test('legacy or malformed capabilities and unavailable API block container-first
   await assert.rejects(preflight(options), error => /Cannot reach/.test(error.message) && !error.message.includes('sensitive'));
 });
 
+test('the current API can be redeployed, while unknown versions and missing contracts fail closed', async () => {
+  for (const version of ['2026-10-05', '2026-10-11', '2026-10-12']) {
+    for (const remove of [null, 'authentication', 'containers', 'execution', 'files']) {
+      const { options } = fixture();
+      const original = options.request;
+      options.request = async (url, init) => {
+        const response = await original(url, init);
+        if (!url.endsWith('/capabilities')) return response;
+        const capabilities = await response.json();
+        capabilities.apiVersion = version;
+        if (remove) delete capabilities[remove];
+        return Response.json(capabilities);
+      };
+      if (version === '2026-10-12' || remove) {
+        await assert.rejects(preflight(options), /compatible predecessor/);
+      } else {
+        assert.deepEqual(await preflight(options), { predecessorResources: [{ instance: 'lite' }] });
+      }
+    }
+  }
+});
+
 test('lock route must reject GET after authenticating; redirects, missing routes and wrong secrets fail', async () => {
   for (const [status, error] of [[401, 'not_authenticated'], [404, 'not_found'], [200, 'method_not_allowed'], [405, 'other']]) {
     const { options } = fixture();

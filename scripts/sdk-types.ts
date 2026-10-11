@@ -78,3 +78,32 @@ async function poolAndImageWorkflow(client: Mainbrella) {
   finally { try { await sandbox.kill(); } finally { await pool.close(); } }
 }
 void poolAndImageWorkflow;
+
+async function managedPoolWorkflow(client: Mainbrella) {
+  if (!(await client.capabilities()).pools.managed) return;
+  const { pool } = await client.pools.create({ name: 'Agent workers', targetSize: 2, ttlSeconds: 600, catalogId: 'node', idempotencyKey: 'pool-create' });
+  const expiresAt: string = pool.expiresAt;
+  await client.pools.list();
+  await client.pools.get(pool.id);
+  const sandbox = await client.pools.acquire(pool.id, { idempotencyKey: 'pool-claim' });
+  try { await sandbox.commands.run('true'); }
+  finally { await sandbox.kill(); await client.pools.update(pool.id, { targetSize: 0 }); await client.pools.delete(pool.id); }
+  await client.images.create({ name: 'Private tools', dockerfile: 'FROM mainbrella:base', cacheFrom: 'owned-image-id',
+    baseImage: { image: `ghcr.io/owner/tools@sha256:${'a'.repeat(64)}`, username: 'reader', password: 'from-secret-store' } });
+  return expiresAt;
+}
+void managedPoolWorkflow;
+
+async function desktopWorkflow(client: Mainbrella, id: string, createdAt: string) {
+  const sandbox = client.connect({ id, createdAt });
+  if (!(await sandbox.desktop.probe()).supported) return;
+  const desktop = await sandbox.desktop.start({ width: 1280, height: 720 });
+  try {
+    await desktop.launch(['xterm']);
+    await desktop.move(100, 100); await desktop.click();
+    await desktop.type('printf hello'); await desktop.press('Return');
+    const png: Uint8Array = await desktop.screenshot();
+    return png;
+  } finally { await desktop.close(); }
+}
+void desktopWorkflow;

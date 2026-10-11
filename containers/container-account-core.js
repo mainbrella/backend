@@ -1,5 +1,6 @@
 import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
 import { AccountLifecycle } from './account-lifecycle.js';
+import { AccountPools } from './account-pools.js';
 import { validGeneration } from './workspace-contract.js';
 import { AccountProduction } from './account-production.js';
 import { PRODUCTION_LEASE_MS, PRODUCTION_POLL_MS, validLifecycle, validStartupCommand } from './production-policy.js';
@@ -28,6 +29,8 @@ export class ContainerAccountController {
     this.tail = Promise.resolve();
     this.workspaces = new AccountWorkspaces(this);
     this.lifecycle = new AccountLifecycle(this);
+    this.pools = new AccountPools(this);
+    this.managedPoolsEnabled = false;
     this.billing = new AccountBilling(this, invoiceUsage, recharge);
   }
   async serialized(fn) {
@@ -179,6 +182,8 @@ export class ContainerAccountController {
     if (state.nextCreationExpiry) alarmAt = Math.min(alarmAt ?? Infinity, state.nextCreationExpiry);
     const workspaceAlarm = await this.workspaces.nextAlarm();
     if (Number.isFinite(workspaceAlarm)) alarmAt = Math.min(alarmAt ?? Infinity, workspaceAlarm);
+    const poolAlarm = await this.pools.nextAlarm();
+    if (Number.isFinite(poolAlarm)) alarmAt = Math.min(alarmAt ?? Infinity, poolAlarm);
     if (alarmAt) await this.ctx.storage.setAlarm(alarmAt);
     else await this.ctx.storage.deleteAlarm();
   }
@@ -407,6 +412,7 @@ export class ContainerAccountController {
   }
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === '/pools' || url.pathname.startsWith('/pools/')) return this.pools.fetch(request);
     if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint', '/billing/inference', '/billing/storage'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
@@ -486,6 +492,9 @@ export class ContainerAccountController {
           return this.respond({ billing: this.billing.status(state) });
         }
         if (request.method === 'POST') {
+          const poolId = request.headers.get('x-mainbrella-pool');
+          const poolReservation = poolId ? await this.pools.admission(poolId, idempotencyKey) : null;
+          if (poolId && !poolReservation) return this.respond({ error: 'pool_no_longer_active' }, 409);
           if (selection?.lifecycle === 'production' && entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
           if (selection?.lifecycle === 'production' && selection?.workspaceId && !lifecycleAction) return this.respond({ error: 'invalid_request' }, 400);
           if (entitlement.plan === 'usage') {
@@ -598,9 +607,11 @@ export class ContainerAccountController {
           if (creation) {
             state.nextCreationExpiry = Math.min(state.nextCreationExpiry ?? Infinity, creation.expiresAt);
             // Multi-key puts are atomic: the key and charged reservation survive together.
-            await this.ctx.storage.put({ [KEY]: state, [CREATION_PREFIX + idempotencyKey]: creation });
+            if (poolReservation) Object.assign(poolReservation.entry, { slot, reservationId });
+            await this.ctx.storage.put({ [KEY]: state, [CREATION_PREFIX + idempotencyKey]: creation,
+              ...(poolReservation ? { managedPools: poolReservation.index } : {}) });
           } else await this.ctx.storage.put(KEY, state);
-          await this.ctx.storage.setAlarm(Math.min(entitlement.validUntil, this.now() + 90_000, state.nextCreationExpiry ?? Infinity));
+          await this.ctx.storage.setAlarm(Math.min(entitlement.validUntil, this.now() + 90_000, state.nextCreationExpiry ?? Infinity, await this.pools.nextAlarm()));
           reservation = { state, slot, entitlement, reservationId, creation, selection: { ...selection, size: size.id, computeExpiresAt: endAt } };
           return null;
         }
@@ -650,14 +661,14 @@ export class ContainerAccountController {
       return this.respond({ error: 'containers_unavailable' }, 503);
     }
   }
-  alarm() {
-    return this.serialized(async () => {
+  async alarm() {
+    await this.serialized(async () => {
       const state = await this.ctx.storage.get(KEY);
       if (!state) return;
       await this.workspaces.prune();
       await this.pruneCreations(state);
       let fresh = state.entitlement;
-      if (Object.keys(state.production ?? {}).length && this.refreshEntitlement && (!validEntitlement(fresh, this.now()) || fresh.validUntil - this.now() < 60_000)) {
+      if ((Object.keys(state.production ?? {}).length || await this.pools.active()) && this.refreshEntitlement && (!validEntitlement(fresh, this.now()) || fresh.validUntil - this.now() < 60_000)) {
         try { fresh = await this.refreshEntitlement(state.userId); } catch { /* Existing paid deadlines remain authoritative during an outage. */ }
       }
       const entitlement = validEntitlement(fresh, this.now()) ? fresh : { active: false, plan: null, validUntil: null, checkedAt: state.entitlement.checkedAt };
@@ -665,5 +676,6 @@ export class ContainerAccountController {
         await this.saveState(state, true);
       }
     });
+    await this.pools.maintain();
   }
 }

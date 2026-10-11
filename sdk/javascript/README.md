@@ -2,7 +2,7 @@
 
 Published as `@mainbrella/sdk` 0.1.0 on npm. Requires Node 22+; no runtime dependencies.
 
-The P1 additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+The source additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
 
 ```sh
 npm install @mainbrella/sdk@0.1.0
@@ -315,8 +315,8 @@ requires `observability.otlp`. Missing metric samples are not zero measurements.
 ## Client-managed prewarming (unreleased)
 
 Pools in this checkout keep a local inventory of ordinary, billed ad-hoc
-sandboxes. They require a running client process and explicit refill; there is
-no server pool, background scheduler, keepalive, or reuse of acquired machines.
+sandboxes. This helper requires a running client process and explicit refill;
+use `client.pools` below for durable server inventory and automatic replenishment.
 Normal account start, concurrency, compute budgets, idle timeout and maximum
 session duration apply while a sandbox waits in the pool.
 
@@ -348,6 +348,41 @@ A pending key is retried for at most one hour, bounded by half the API's adverti
 retention. After `pool_creation_expired`, reconcile it manually instead of issuing
 a replacement create. Prewarming is not RAM-preserving pause/resume.
 
+## Server-managed pools (unreleased)
+
+When `capabilities.pools.managed` is true, `client.pools` maintains inventory in
+the account coordinator, including after your client exits. Persist the request
+keys before making either a create or acquire request:
+
+```js
+const { pool } = await client.pools.create({ name: 'Agent workers', targetSize: 2,
+  ttlSeconds: 600, catalogId: 'python', idempotencyKey: 'workers-batch-42' });
+console.log(await client.pools.get(pool.id)); // Wait for ready > 0.
+const sandbox = await client.pools.acquire(pool.id, { idempotencyKey: 'task-42' });
+try { console.log(await sandbox.commands.run('python --version')); }
+finally { await sandbox.kill(); }
+await client.pools.delete(pool.id);
+```
+
+`pool_empty` means inventory is still warming or account limits prevent refill.
+An uncertain response exposes `error.idempotencyKey`; retry with the same key
+and options, within 24 hours. Acquiring transfers ownership exactly once and
+returns a generation-bound `Sandbox`. A retry returns that same generation or
+`acquisition_no_longer_running`; it never silently assigns another sandbox.
+
+`list()`, `get(id)`, `update(id, {name, targetSize})`, and `delete(id)` manage the
+pool. Target size may be 0–20, bounded by account capacity; each account can have
+eight pools. Set the target to zero to drain and pause. Required `ttlSeconds` is
+60–86400 and cannot be extended. Expiry/deletion stops only unclaimed inventory;
+acquired sandboxes remain your responsibility. Retry failed deletion until it
+confirms cleanup. Launch image, size, and network policy are immutable.
+
+Inventory consumes normal starts and compute, retains its original idle/hard
+deadlines, and is replenished automatically while the pool is active and funded.
+An expired idle sandbox may therefore incur another start without a client
+request. Deleting the client object does not delete the pool. These helpers do
+not reset or reuse previously acquired sandboxes.
+
 ## Image builds, versions and tags (unreleased)
 
 ```js
@@ -369,6 +404,17 @@ try { console.log(sandbox.imageDigest); } finally { await sandbox.kill(); }
 Image IDs/digests are immutable; resolve a tag once and retain the resulting ID
 for all retries of a creation. Tags are account-scoped, capped at 30, and only
 point to ready images. Moving a tag leaves existing containers unchanged.
+
+Build options also accept `cacheFrom`, an owned ready image ID whose inline
+BuildKit cache can be reused. Existing images without cache metadata remain
+valid but may yield no cache hits. `baseImage: {image, username?, password?}`
+selects a digest-pinned `ghcr.io` or `docker.io` base; the Dockerfile still starts
+with `FROM mainbrella:base`. Both credentials must be supplied together. Check
+`privateRegistriesEnabled` from `images.list()` before authenticated imports.
+Keep credentials in your application's secret store; do not put them in a
+Dockerfile or logs. The base must satisfy Mainbrella's shell/GNU-tooling contract.
+Builds use an operator-configured private build repository. Cache/private-base
+support requires its backend migration, configuration and live qualification.
 
 ## Streaming transfers and directory copies
 
@@ -412,3 +458,37 @@ and destination trees stable during a copy. Polling `watch` uses normal metadata
 requests, defaults to one second, and starts after an initial baseline; transient
 changes and same-size rewrites within one second may be missed. It is independent
 of the server's native `files.watch` capability, which remains unavailable.
+
+## Linux desktop automation (unreleased)
+
+Desktop helpers require a compatible image with Python 3, Xvfb, xdpyinfo,
+xdotool and ImageMagick `import`. They do not install packages automatically.
+`sandbox.desktop.probe()` checks the image using a temporary interpreter context.
+
+```js
+const desktop = await sandbox.desktop.start({ width: 1280, height: 720 });
+try {
+  await desktop.launch(['openbox']);
+  await desktop.launch(['xterm']);
+  await desktop.move(120, 100);
+  await desktop.click();
+  await desktop.type('printf hello');
+  await desktop.press('Return');
+  const png = await desktop.screenshot(); // Uint8Array, at most 8 MiB.
+} finally { await desktop.close(); }
+```
+
+Each desktop occupies a supervised Python context for at most 15 minutes,
+bounded by the sandbox's remaining lease. Width is 320–1920; height is 240–1080.
+Applications inherit the session's `DISPLAY`; launch accepts argv without shell
+interpolation. A launch response confirms admission, not GUI readiness.
+Screenshots use binary file transfer, validate their size/PNG dimensions and
+remove their temporary file after download. The SDK serializes session actions.
+
+Input and startup are never automatically replayed after a lost response.
+If startup or close cannot confirm cleanup, the error retains `contextId` and
+`cleanupUnconfirmed`; reconcile through `sandbox.code.attach(id).close()`.
+Stop, expiry and runtime restart end the context and its process group; a
+deliberately daemonized application can escape that group and remains bounded
+by the sandbox lease. There is no reconnectable desktop handle, VNC viewer,
+recording, Windows support or published desktop catalog yet.

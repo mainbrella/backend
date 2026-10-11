@@ -27,6 +27,7 @@
     "verify:agent": "node scripts/verify-agent.mjs",
     "verify:previews": "node scripts/verify-previews.mjs",
     "qualify:metrics": "tsx scripts/qualify-workload-metrics.ts",
+    "qualify:images": "node scripts/qualify-image-build.mjs",
     "qualify:receiver": "node scripts/qualify-webhook-receiver.mjs",
     "qualify:outbox": "node scripts/qualify-webhook-outbox.mjs",
     "verify:job3": "node scripts/verify-job3.mjs",

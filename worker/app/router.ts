@@ -18,6 +18,7 @@ import { serviceForPath } from "../shared/service-routing";
 import { handleContainersRequest } from "./containers";
 import { handleContainerLifecycleRequest } from './container-lifecycle';
 import { handleSecretsRequest } from './secrets';
+import { handlePoolsRequest } from './pools';
 import { handleSSHRequest } from "./ssh";
 import { handleImagesRequest, handleImageBuildRequest } from "./images";
 import { handleTerminalRequest } from "./terminal";
@@ -45,6 +46,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/pools' || url.pathname.startsWith('/pools/')) return handlePoolsRequest(request, env);
   if (url.pathname === '/secrets' || url.pathname.startsWith('/secrets/')) return handleSecretsRequest(request, env);
   if (url.pathname === '/domains' || url.pathname.startsWith('/domains/')) return handleDomainsRequest(request, env);
   const service = serviceForPath(url.pathname);

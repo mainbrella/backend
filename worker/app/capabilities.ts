@@ -17,6 +17,9 @@ import { privateServicesConfigured } from './private-services';
 import { filesystemLifecycleConfigured } from './container-lifecycle';
 import { egressConfigured, vaultConfigured } from '../../containers/account-security.js';
 import { projectHostingCapabilities } from '../lib/project-hosting';
+import { managedPoolsConfigured } from './pools';
+import { imageBuildsConfigured, imageRegistriesConfigured } from '../lib/image-build-options';
+import { MAX_MANAGED_POOLS, MAX_POOL_SIZE, MAX_POOL_TTL_SECONDS } from '../../containers/pool-contract.js';
 
 // This contract describes this API deployment, not account access or live health.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
@@ -33,7 +36,7 @@ export function capabilities(env: Env) {
       maxOutputBytes: MAX_OUTPUT_BYTES, maxConcurrentOperations: MAX_EXECUTIONS,
       maxManagedTimeoutMs: MAX_MANAGED_TIMEOUT_MS, retentionMs: EXECUTION_RETENTION_MS, maxRetainedExecutions: MAX_RETAINED_EXECUTIONS },
     codeInterpreter: { supported: Boolean(env.USER_CONTAINER), languages: ['python'], stateful: true, memoryPersistence: false, maxCodeBytes: MAX_COMMAND_BYTES, maxTimeoutMs: MAX_TIMEOUT_MS, maxContextMs: MAX_CODE_CONTEXT_MS, maxResultBytes: MAX_CODE_RESULT_BYTES },
-    pools: { managed: false, sdkPrewarming: true },
+    pools: { managed: managedPoolsConfigured(env), sdkPrewarming: true, maxPools: MAX_MANAGED_POOLS, maxPoolSize: MAX_POOL_SIZE, maxTtlSeconds: MAX_POOL_TTL_SECONDS },
     files: { streamingTransfers: Boolean(env.USER_CONTAINER), maxTransferBytes: MAX_TRANSFER_BYTES, transferTimeoutMs: TRANSFER_TIMEOUT_MS, read: true, write: true, binary: true, atomicReplacement: true, list: true, stat: true,
       mkdir: true, delete: true, move: true, chmod: true, watch: false, maxDirectoryEntries: MAX_DIRECTORY_ENTRIES,
       maxDirectoryOffset: MAX_DIRECTORY_OFFSET, maxMetadataBytes: MAX_FILESYSTEM_OUTPUT_BYTES, maxFileBytes: MAX_FILE_BYTES,
@@ -44,7 +47,7 @@ export function capabilities(env: Env) {
     previews: { supported: previewsConfigured(env), signedUrls: false },
     projects: projectHostingCapabilities(env),
     images: { tags: true, catalog: true, availableCatalogPath: '/containers',
-      customBuilds: Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN), limits: IMAGE_LIMITS },
+      customBuilds: imageBuildsConfigured(env), crossBuildCache: imageBuildsConfigured(env), privateRegistryImports: imageBuildsConfigured(env) && imageRegistriesConfigured(env), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
     networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env)), regionSelection: false },
     secrets: { vault: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env) && vaultConfigured(env)) },

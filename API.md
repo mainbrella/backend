@@ -62,7 +62,7 @@ The [published skill](https://mainbrella.com/SKILL.md) guides project detection,
 integration, and troubleshooting. Provision `MAINBRELLA_API_KEY` through your
 existing secret manager or environment loader; never put it into chat or commit it.
 The dependency-free SDKs are published as `@mainbrella/sdk` 0.1.0 on npm
-and `mainbrella` 0.1.0 on PyPI. The P1 source additions (code contexts, streaming transfers, image tags, SDK prewarming and MCP) require a new release and matching API/runtime deployment. See the
+and `mainbrella` 0.1.0 on PyPI. The source additions (code contexts, streaming transfers, image management, managed pools, MCP and desktop helpers) require a new release and matching API/runtime support. See the
 [JavaScript](https://mainbrella.com/sdk/javascript.md) and
 [Python](https://mainbrella.com/sdk/python.md) references for installation and APIs.
 Native HTTP remains sufficient for lifecycle, execution and file transfer;
@@ -1218,5 +1218,83 @@ removes its tags, and deleting a tag does not delete its image.
 Resolve a tag once and pass its image ID to `POST /containers`; keep that same
 ID and idempotency key when retrying an uncertain creation. Moving a tag never
 changes an existing container. Apply `039_image_tags.sql` before deployment.
-These routes and SDK helpers do not enable gated builds, private registries or
-cross-build caching. See [custom image rollout](docs/custom-images.md).
+These routes and SDK helpers do not enable gated builds. Cache reuse and private
+base imports additionally require the image-build configuration below. See
+[custom image rollout](docs/custom-images.md).
+
+## Server-managed prewarming pools (unreleased)
+
+Check `pools.managed` from `/capabilities`. Server pools persist account-owned
+inventory across client/coordinator restarts and replenish it through alarms.
+They use the normal account start, concurrency, compute, idle and hard-deadline
+limits. Waiting machines are billed; replacement after idle expiry consumes
+another start. There is no reset/reuse of previously acquired machines.
+
+| Method | Route | Request / response |
+| --- | --- | --- |
+| GET | `/pools` | `{pools: [...]}` for the authenticated account. |
+| POST | `/pools` | `{name, targetSize, ttlSeconds, catalogId?\|imageId?, size?, internet?, networkPolicy?, secretBindings?}` → 201 `{pool}`. Required `Idempotency-Key`. |
+| GET | `/pools/{poolId}` | `{pool}` with ready/starting inventory counts. |
+| PATCH | `/pools/{poolId}` | `{name?, targetSize?}` → `{pool}`. Selection and expiry are immutable. |
+| DELETE | `/pools/{poolId}` | Drain unclaimed inventory; `{deleted: true}` after cleanup. |
+| POST | `/pools/{poolId}/acquire` | Empty JSON body and required `Idempotency-Key` → `{poolId, container}`. |
+
+Pool IDs use `pool_<uuid>`. Pool records include `id`, `name`, `targetSize`,
+`ready`, `starting`, `status`, immutable `selection`, ISO `createdAt`, `updatedAt`
+and `expiresAt`, and optional `lastError`. Status is `active`, `paused`,
+`degraded`, `expired`, or `deleting`. Required TTL is 60–86400 seconds. Each
+account may retain eight pools with target sizes 0–20, bounded by plan capacity.
+A zero target drains and pauses. Delete expired pools to free the pool quota.
+
+Creation and acquisition receipts last 24 hours. Persist keys before requesting
+and reuse the same key/body after uncertainty. Acquisition removes one ready
+generation from inventory atomically; a retry returns the same running generation
+or `acquisition_no_longer_running` (409). It never silently allocates a replacement.
+`pool_empty` (409) can be retried with the same acquisition key after replenishment.
+Expired pools return 410 for acquisition/update. Exact-generation fencing keeps
+drain/deletion from touching acquired or subsequently replaced machines.
+
+Expiry/deletion stops only unclaimed inventory. Acquired machines retain their
+original remaining deadlines and must be deleted by the caller. A cleanup
+failure returns `pool_cleanup_pending` (503); retry DELETE until confirmed. GET
+and DELETE remain available with the feature disabled. Ordinary account auth and
+trusted-Origin checks for cookie mutations apply; user identity is never a body
+parameter. JS/Python use `client.pools`; `client.pool()` remains the separate
+process-local, explicitly refilled helper.
+
+## Image build cache and private bases (unreleased)
+
+`POST /images` accepts optional multipart fields `cacheFrom` (owned ready image
+UUID) and `baseImage` (JSON `{image, username?, password?}`). `image` is a
+digest-pinned `ghcr.io/<namespace>/<repo>@sha256:...` or
+`docker.io/<namespace>/<repo>@sha256:...` reference. Both credentials must be
+present together or both omitted. The Dockerfile still uses
+`FROM mainbrella:base`, which the isolated build maps to the selected base.
+Runtime compatibility and image-size checks remain mandatory.
+
+Cache references resolve to an immutable digest at admission and remain
+account-scoped. Cache metadata is exported by new builds; older images may
+produce no cache hits. Metadata returns `baseImage` (reference only) and
+`cacheFrom`; registry credentials never appear in image metadata or build source
+artifacts. Authenticated imports require `privateRegistriesEnabled` in
+`GET /images`; encrypted one-use credentials are consumed by trusted preparation.
+
+Builds require a configured private build repository and verified private
+visibility before dispatch. This protects build source and image-layer artifacts
+from the public backend repository. Cache/private-base support requires migration
+`040_image_build_inputs.sql`, operator configuration and live qualification;
+neither tags nor SDK installation enables it.
+
+## Desktop automation helpers (unreleased)
+
+The source JS/Python SDKs provide `sandbox.desktop` on images with Python, Xvfb,
+xdpyinfo, xdotool and ImageMagick `import`. Probe the selected image with
+`desktop.probe()`, then start a session with `desktop.start()`. Helpers reuse
+generation-scoped code contexts and binary file transfer. No additional API
+endpoint, browser viewer or exposed display port is created.
+
+A desktop supports bounded mouse movement/clicks, keyboard shortcuts, text,
+argv-based application launches and PNG screenshots. Sessions consume an
+interpreter slot and inherit its expiry and process-group cleanup. Call `close()`
+when finished; stop/restart destroys the desktop. There is no RAM restoration,
+VNC viewer, recording or Windows support. See the SDK references for examples.

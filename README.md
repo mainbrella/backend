@@ -425,11 +425,16 @@ See [GitHub's rate limits](https://docs.github.com/en/rest/using-the-rest-api/ra
 
 ## Custom image build and deployment
 
-The **Build custom image** workflow must be on `main` before enabling builds.
+The **Build custom image** workflow and reviewed backend scripts must be on
+`main` in an operator-controlled private build repository before enabling builds.
+Set `IMAGE_BUILD_GITHUB_REPOSITORY=owner/repo` in the API configuration. Public
+repositories are refused because Actions artifacts contain source and image layers.
 Set `IMAGE_BUILD_SECRET` (at least 32 characters) in both the API Worker and
 GitHub Actions, and set `IMAGE_BUILD_GITHUB_TOKEN` in the API Worker to a token
-with Actions write access to this repository. `CLOUDFLARE_API_TOKEN` in Actions
+with metadata read and Actions write access to that private repository. `CLOUDFLARE_API_TOKEN` in Actions
 must permit both registry access and deployment of the container Worker.
+See [custom image rollout](docs/custom-images.md) for cache/private-base setup,
+required migrations, one-use registry credentials and bounded live qualification.
 
 The original live-manifest rollout required an API-first bootstrap. For the
 current release, apply all remote D1 migrations, configure the custom-image

@@ -25,3 +25,23 @@ test('image SDK submits bounded multipart source and manages account image versi
   assert.throws(() => client.images.tags.get('../other'), { code: 'invalid_image_tag' });
   assert.throws(() => client.images.tags.set('stable', 'invalid'), { code: 'invalid_image_identity' });
 });
+
+test('build cache selection and private registry credentials are sent only in the authenticated multipart body', async () => {
+  const cacheFrom = 'd688d42a-25ef-4c13-9b28-21a0fde6e163';
+  const baseImage = { image: `ghcr.io/owner/tools@sha256:${'a'.repeat(64)}`, username: 'reader', password: 'private-test-token' };
+  let calls = 0;
+  const client = new Mainbrella({ apiKey: `mb_${'a'.repeat(64)}`, fetch: async (url, options) => {
+    calls++;
+    assert.equal(url.pathname, '/images'); assert.equal(url.search, '');
+    const form = await new Request(url, options).formData();
+    assert.equal(form.get('cacheFrom'), cacheFrom);
+    assert.deepEqual(JSON.parse(form.get('baseImage')), baseImage);
+    assert.ok(!JSON.stringify(options.headers).includes(baseImage.password));
+    throw new Error(baseImage.password);
+  } });
+  await assert.rejects(client.images.create({ name: 'Tools', dockerfile: 'FROM mainbrella:base', cacheFrom, baseImage }), { code: 'transport_unavailable', message: 'transport_unavailable' });
+  for (const invalid of [null, [], { image: baseImage.image, username: 'reader' }, { image: baseImage.image, password: 'secret' }, { ...baseImage, url: 'https://other' }]) {
+    assert.throws(() => client.images.create({ name: 'Tools', dockerfile: 'FROM mainbrella:base', baseImage: invalid }), { code: 'invalid_image_source' });
+  }
+  assert.equal(calls, 1);
+});

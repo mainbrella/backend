@@ -25,7 +25,7 @@ env:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main' && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -70,11 +70,16 @@ jobs:
           mkdir result
           {
             docker load -i prepared/base.tar
+            cache_args=()
+            if [ -f prepared/cache.tar ]; then
+              python3 scripts/prepare-image-cache.py prepared/cache.tar prepared/cache
+              cache_args=(--cache-from type=local,src=prepared/cache)
+            fi
             python3 scripts/prepare-build-context.py prepared/source.json context
-            timeout --kill-after=10s 300s docker build --platform linux/amd64 --pull=false --provenance=false --progress=plain -t mainbrella-custom:build context
+            timeout --kill-after=10s 300s docker build --platform linux/amd64 --pull=false --provenance=false --progress=plain --build-arg BUILDKIT_INLINE_CACHE=1 "${cache_args[@]}" -t mainbrella-custom:build context
             size=$(docker image inspect --format '{{.Size}}' mainbrella-custom:build)
             test "$size" -le 536870912 || { echo 'Image exceeds the 512 MiB limit.'; exit 1; }
-            timeout --kill-after=5s 20s docker run --rm --network none --entrypoint /bin/sh mainbrella-custom:build -ec 'command -v sleep; timeout --version; stat --version; find --version; sed --version; bash --version; tmux -V; tmux new-session -d -s smoke; tmux has-session -t smoke'
+            timeout --kill-after=5s 20s docker run --rm --network none --entrypoint /bin/sh mainbrella-custom:build -ec 'test "$(id -u)" = 0; command -v sleep; command -v setsid; timeout --version; stat --version; find --version; sed --version; tar --version; gzip --version; base64 --version; /bin/bash --version; tmux -V; mkdir -p /workspace; touch /workspace/.mainbrella-smoke; rm /workspace/.mainbrella-smoke; tmux new-session -d -s smoke; tmux has-session -t smoke'
             docker save -o result/image.tar mainbrella-custom:build
           } >result/build.log 2>&1
       - name: Keep bounded build output
@@ -94,7 +99,7 @@ jobs:
           retention-days: 1
 
   publish:
-    if: always() && github.ref == 'refs/heads/main' && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
+    if: always() && github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30

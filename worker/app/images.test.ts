@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { handleRequest } from './router';
 import { hashToken } from './auth-core';
 import { PLAN_PRICES } from '../lib/stripe';
+import { openImageBase, sealImageBase, parseImageBase } from '../lib/image-build-options';
 import { ContainerAccountController, machineName } from '../../containers/container-account-core.js';
 // These dependency-free production modules are shared with the container Worker/deploy script.
 // @ts-expect-error JavaScript runtime module has no declarations.
@@ -15,10 +16,10 @@ import { assembleImageMap } from '../../scripts/custom-images.mjs';
 const secret = 's'.repeat(32);
 const account = '2b7a9be82bb64187230703b024e25157';
 
-async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) {
+async function fixture(t: test.TestContext, dispatch: number | 'network' = 204, privateRepository = true) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity', '019_prepaid_billing', '039_image_tags']) {
+  for (const name of ['001_initial', '002_auth_sessions', '003_pro_billing', '004_subscription_details', '005_ssh_access', '009_trial_coupons', '006_billing_webhooks', '006_custom_images', '007_ssh_container_id', '007_image_deployment_lock', '008_catalog_image_capacity', '019_prepaid_billing', '039_image_tags', '040_image_build_inputs']) {
     db.exec(readFileSync(new URL(`../../migrations/${name}.sql`, import.meta.url), 'utf8'));
   }
   db.prepare("INSERT INTO users (id, email) VALUES ('owner', 'owner@test.com'), ('other', 'other@test.com')").run();
@@ -39,6 +40,10 @@ async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) 
   const dispatches: { url: string; body: { ref: string; inputs: Record<string, string> } }[] = [];
   t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
     const target = new URL(String(url));
+    if (target.hostname === 'api.github.com' && target.pathname === '/repos/mainbrella/private-image-builder') {
+      assert.equal(options.redirect, 'manual');
+      return Response.json({ private: privateRepository });
+    }
     if (target.hostname === 'api.stripe.com') {
       const now = Math.floor(Date.now() / 1000);
       const customer = target.searchParams.get('customer') ?? 'cus_owner';
@@ -96,7 +101,7 @@ async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) 
     } }; },
   };
   const env = {
-    IMAGE_BUILD_SECRET: secret, IMAGE_BUILD_GITHUB_TOKEN: 'test-token', STRIPE_SECRET_KEY: 'sk_test_images',
+    IMAGE_BUILD_SECRET: secret, IMAGE_BUILD_GITHUB_TOKEN: 'test-token', IMAGE_BUILD_GITHUB_REPOSITORY: 'mainbrella/private-image-builder', IMAGE_REGISTRY_ENCRYPTION_KEY: 'a'.repeat(64), STRIPE_SECRET_KEY: 'sk_test_images',
     DB: { prepare(sql: string) { return new Statement(sql); }, async batch(statements: Statement[]) {
       db.exec('BEGIN');
       try { const results = []; for (const stmt of statements) results.push(await stmt.run()); db.exec('COMMIT'); return results; }
@@ -115,7 +120,8 @@ async function fixture(t: test.TestContext, dispatch: number | 'network' = 204) 
     const form = new FormData(); form.set('name', 'My tools'); form.set('dockerfile', 'FROM mainbrella:base\nRUN echo tools\n');
     return user('/images', 'POST', form);
   };
-  return { db, env, create, user, internal, container, starts, dispatches };
+  return { db, env, create, user, internal, container, starts, dispatches,
+    setRepositoryPrivate(value: boolean) { privateRepository = value; } };
 }
 
 test('custom image traverses queued → building → publishing → deployed → ready → selected', async t => {
@@ -128,6 +134,7 @@ test('custom image traverses queued → building → publishing → deployed →
   const ref = `registry.cloudflare.com/${account}/mainbrella-custom-${id}@sha256:${'a'.repeat(64)}`;
   assert.equal(image.status, 'queued');
   assert.match(f.dispatches[0].url, /custom-image\.yml\/dispatches$/);
+  assert.match(f.dispatches[0].url, /repos\/mainbrella\/private-image-builder\//);
   assert.deepEqual(f.dispatches[0].body, { ref: 'main', inputs: { build_id: id } });
   assert.equal((await f.internal(`/${id}/status`, 'POST', { status: 'ready' })).status, 409);
   const source = await f.internal(`/${id}/source`);
@@ -191,6 +198,128 @@ test('dispatch target exists and user-controlled build has no publishing secrets
   assert.match(build, /persist-credentials: false/);
   assert.doesNotMatch(build, /secrets\.|CLOUDFLARE_API_TOKEN|IMAGE_BUILD_SECRET|GH_TOKEN/);
   assert.match(workflow, /needs: \[prepare, build\]/);
+  assert.match(workflow, /github\.event\.repository\.private == true/);
+});
+
+test('public or unconfigured build repositories cannot receive customer source or reserve build quota', async t => {
+  const f = await fixture(t, 204, false);
+  assert.equal((await f.create()).status, 503);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM container_images').get()!.n, 0);
+  assert.equal(f.dispatches.length, 0);
+  f.env.IMAGE_BUILD_GITHUB_REPOSITORY = undefined;
+  assert.equal((await f.create()).status, 503);
+  assert.equal((await (await f.user('/images')).json() as { buildsEnabled: boolean }).buildsEnabled, false);
+  for (const repository of ['https://github.com/mainbrella/private-image-builder', '../private', 'owner/repo/extra', 'owner/repo?private=true']) {
+    f.env.IMAGE_BUILD_GITHUB_REPOSITORY = repository;
+    assert.equal((await f.create()).status, 503);
+  }
+});
+
+test('repository visibility is checked again on every build and metadata errors fail closed', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.create()).status, 202);
+  f.db.prepare("UPDATE container_images SET status = 'failed'").run();
+  f.setRepositoryPrivate(false);
+  assert.equal((await f.create()).status, 503);
+  for (const status of [301, 403, 404, 500]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response(null, { status }));
+    assert.equal((await f.create()).status, 503);
+  }
+  for (const body of ['null', '{"private":true', JSON.stringify({ private: true, extra: 'x'.repeat(65 * 1024) })]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response(body));
+    assert.equal((await f.create()).status, 503);
+  }
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('metadata unavailable'); });
+  assert.equal((await f.create()).status, 503);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM container_images').get()!.n, 1);
+});
+
+const privateBase = { image: `ghcr.io/customer/tools@sha256:${'b'.repeat(64)}`, username: 'pull-user', password: 'registry-password-private' };
+function buildForm(options: { baseImage?: unknown; cacheFrom?: string } = {}) {
+  const form = new FormData(); form.set('name', 'Private tools'); form.set('dockerfile', 'FROM mainbrella:base\nRUN echo tools\n');
+  if (options.baseImage !== undefined) form.set('baseImage', JSON.stringify(options.baseImage));
+  if (options.cacheFrom !== undefined) form.set('cacheFrom', options.cacheFrom);
+  return form;
+}
+
+test('private base credentials are sealed at rest, never public, and consumed by exactly one source claim', async t => {
+  const f = await fixture(t);
+  const response = await f.user('/images', 'POST', buildForm({ baseImage: privateBase }));
+  assert.equal(response.status, 202);
+  const result = await response.json() as { image: { id: string; baseImage: string } };
+  assert.equal(result.image.baseImage, privateBase.image);
+  assert.doesNotMatch(JSON.stringify(result), /registry-password-private|pull-user/);
+  const stored = f.db.prepare('SELECT * FROM container_images').get()!;
+  assert.doesNotMatch(JSON.stringify(stored), /registry-password-private|pull-user/);
+  assert.ok(stored.registry_credentials);
+  for (const path of ['/images', `/images/${result.image.id}`, `/images/${result.image.id}/logs`]) {
+    const publicResponse = await f.user(path);
+    assert.doesNotMatch(await publicResponse.text(), /registry-password-private|pull-user|ciphertext/);
+  }
+  const claims = await Promise.all([f.internal(`/${result.image.id}/source`), f.internal(`/${result.image.id}/source`)]);
+  assert.deepEqual(claims.map(response => response.status).sort(), [200, 409]);
+  const source = claims.find(response => response.status === 200)!;
+  assert.equal(source.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await source.json() as { baseImage: unknown }).baseImage, privateBase);
+  assert.equal(f.db.prepare('SELECT registry_credentials FROM container_images').get()!.registry_credentials, null);
+});
+
+test('registry credentials are bound to both account and build, and unavailable without the separate encryption key', async t => {
+  const f = await fixture(t);
+  const sealed = await sealImageBase(f.env, 'owner', 'first-build', privateBase);
+  assert.deepEqual(await openImageBase(f.env, 'owner', 'first-build', sealed), privateBase);
+  await assert.rejects(openImageBase(f.env, 'other', 'first-build', sealed));
+  await assert.rejects(openImageBase(f.env, 'owner', 'second-build', sealed));
+  f.env.IMAGE_REGISTRY_ENCRYPTION_KEY = undefined;
+  assert.equal((await f.user('/images', 'POST', buildForm({ baseImage: privateBase }))).status, 503);
+  assert.equal((await (await f.user('/images')).json() as { privateRegistriesEnabled: boolean }).privateRegistriesEnabled, false);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM container_images').get()!.n, 0);
+});
+
+test('private image references reject tags, alternate hosts, URL credentials, invalid paths and incomplete credentials', () => {
+  for (const base of [
+    { ...privateBase, image: 'ghcr.io/customer/tools:latest' }, { ...privateBase, image: privateBase.image.replace('ghcr.io', 'localhost:5000') },
+    { ...privateBase, image: privateBase.image.replace('ghcr.io', 'ghcr.io.evil.test') },
+    { ...privateBase, image: privateBase.image.replace('customer', '../customer') },
+    { ...privateBase, image: `https://${privateBase.image}` }, { ...privateBase, password: undefined },
+    { ...privateBase, username: 'line\nbreak' }, { ...privateBase, password: '' }, { ...privateBase, extra: true },
+  ]) assert.equal(parseImageBase(base), null);
+  assert.deepEqual(parseImageBase({ image: privateBase.image }), { image: privateBase.image });
+});
+
+test('dispatch failures and expired queues erase stored registry credentials', async t => {
+  await t.test('dispatch rejection', async t => {
+    const f = await fixture(t, 403);
+    assert.equal((await f.user('/images', 'POST', buildForm({ baseImage: privateBase }))).status, 503);
+    assert.equal(f.db.prepare('SELECT registry_credentials FROM container_images').get()!.registry_credentials, null);
+  });
+  await t.test('expiry', async t => {
+    const f = await fixture(t);
+    await f.user('/images', 'POST', buildForm({ baseImage: privateBase }));
+    f.db.prepare("UPDATE container_images SET deadline = '2000-01-01T00:00:00.000Z'").run();
+    await f.user('/images');
+    const stored = f.db.prepare('SELECT status, registry_credentials FROM container_images').get()!;
+    assert.equal(stored.status, 'failed'); assert.equal(stored.registry_credentials, null);
+  });
+});
+
+test('cache inputs resolve only owned ready images and pin their immutable digest', async t => {
+  const f = await fixture(t);
+  const { image } = await (await f.create()).json() as { image: { id: string } };
+  assert.equal((await f.user('/images', 'POST', buildForm({ cacheFrom: image.id }))).status, 409);
+  await f.internal(`/${image.id}/source`);
+  const reference = `registry.cloudflare.com/${account}/mainbrella-custom-${image.id}@sha256:${'c'.repeat(64)}`;
+  await f.internal(`/${image.id}/status`, 'POST', { status: 'publishing', image: reference });
+  await f.internal(`/${image.id}/status`, 'POST', { status: 'ready' });
+  assert.equal((await f.user('/images', 'POST', buildForm({ cacheFrom: image.id }), 'other')).status, 404);
+  assert.equal((await f.user('/images', 'POST', buildForm({ cacheFrom: crypto.randomUUID() }))).status, 404);
+  assert.equal((await f.user('/images', 'POST', buildForm({ cacheFrom: reference }))).status, 400);
+  const cached = await f.user('/images', 'POST', buildForm({ cacheFrom: image.id }));
+  assert.equal(cached.status, 202);
+  const created = await cached.json() as { image: { id: string; cacheFrom: string } };
+  assert.equal(created.image.cacheFrom, image.id);
+  const source = await (await f.internal(`/${created.image.id}/source`)).json() as { cacheImage: string };
+  assert.equal(source.cacheImage, reference);
 });
 
 test('a ready image absent from the deployed map cannot start a container', async t => {

@@ -66,9 +66,10 @@ export async function preflight({ api, containers, migrations, env, run = wrangl
   const response = await get('/capabilities');
   let capabilities;
   try { capabilities = response.ok ? await response.json() : null; } catch {}
-  // This is the known entitlement-aware predecessor. apiVersion alone is insufficient:
-  // both the original managed API and the size-aware API use the same version string.
-  if (capabilities?.apiVersion !== '2026-10-05'
+  // Accept known entitlement-aware deployments, including this source version so
+  // a successful rollout does not block the next deployment. The version alone
+  // is insufficient: older managed and size-aware APIs shared a version string.
+  if (!['2026-10-05', '2026-10-11'].includes(capabilities?.apiVersion)
     || capabilities.authentication?.apiKeys !== true
     || capabilities.containers?.generationRequired !== true
     || capabilities.containers?.idempotentCreate !== true

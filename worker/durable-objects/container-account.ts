@@ -18,6 +18,7 @@ export class ContainerAccount extends DurableObject<Env> {
       return env.USER_CONTAINER.get(env.USER_CONTAINER.idFromName(machineName(userId, id)));
     };
     this.controller = new ContainerAccountController(ctx, machineFor, undefined, event => invoiceResourceUsage(env, event), userId => resolveEntitlement(env, userId), entry => prepaidRecharge(env, entry), event => appendAccountingEvent(env, event));
+    this.controller.managedPoolsEnabled = env.MANAGED_POOLS_ENABLED === 'true';
     this.controller.security = new AccountSecurity(this.controller, env);
     this.privateServices = new PrivateServicesController(ctx, machineFor);
   }

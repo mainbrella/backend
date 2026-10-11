@@ -15,6 +15,7 @@ import { registerAuthRoutes } from "./openapi-auth";
 import { registerContainerRoutes } from "./openapi-containers";
 import { registerContainerLifecycleRoutes } from './openapi-container-lifecycle';
 import { registerSecretRoutes } from './openapi-secrets';
+import { registerPoolRoutes } from './openapi-pools';
 import { registerCommandRoutes } from "./openapi-commands";
 import { registerFileRoutes } from "./openapi-files";
 import { registerFilesystemRoutes } from './openapi-filesystem';
@@ -94,6 +95,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerContainerRoutes(api, handler);
   registerContainerLifecycleRoutes(api, handler);
   registerSecretRoutes(api, handler);
+  registerPoolRoutes(api, handler);
   registerCommandRoutes(api, handler);
   registerFileRoutes(api, handler);
   registerFilesystemRoutes(api, handler);

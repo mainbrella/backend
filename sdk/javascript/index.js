@@ -2,7 +2,10 @@ import { normalizeNetworkPolicy } from './network-policy.js';
 import { fileTransfers } from './file-transfers.js';
 import { SandboxPool } from './pool.js';
 import { imageClient } from './images.js';
+import { managedPools } from './managed-pools.js';
+import { desktopTools } from './desktop.js';
 export { SandboxPool } from './pool.js';
+export { DesktopSession } from './desktop.js';
 
 const keyPattern = /^mb_[a-f0-9]{64}$/i;
 const terminal = new Set(['succeeded', 'failed', 'canceled', 'timed_out', 'output_limit', 'interrupted']);
@@ -50,6 +53,7 @@ export class Mainbrella {
     this.baseUrl = apiOrigin(baseUrl);
     this.timeoutMs = timeoutMs;
     this.images = imageClient(this);
+    this.pools = managedPools(this);
     const workspacePath = id => {
       if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id??''))throw new MainbrellaError('invalid_workspace_identity');
       return `/workspaces/${id}`;
@@ -237,6 +241,7 @@ export class Sandbox {
       list: () => this.client.request(this.path('/containers/code-contexts')),
       attach: id => new CodeContext(this, id),
     };
+    this.desktop = desktopTools(this, MainbrellaError);
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
   async saveWorkspace(name,{stop=false,idempotencyKey=crypto.randomUUID()}={}) {

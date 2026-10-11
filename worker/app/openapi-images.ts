@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { containerSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
-const image = z.object({ id: z.string(), name: z.string(), status: z.enum(["queued", "building", "publishing", "ready", "failed"]), digest: z.string().nullable().optional(), createdAt: z.string(), updatedAt: z.string() }).openapi("Image");
+const image = z.object({ id: z.string(), name: z.string(), status: z.enum(["queued", "building", "publishing", "ready", "failed"]), digest: z.string().nullable().optional(), baseImage: z.string().nullable().optional(), cacheFrom: z.string().uuid().nullable().optional(), createdAt: z.string(), updatedAt: z.string() }).openapi("Image");
+const imageBase = z.object({ image: z.string().max(512).describe('Digest-pinned ghcr.io or docker.io image with a namespace and repository'), username: z.string().min(1).max(256).optional(), password: z.string().min(1).max(4096).optional() });
 const tagParams = z.object({ tag: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/) });
 const imageTag = z.object({ tag: z.string(), imageId: z.string().uuid(), updatedAt: z.string() });
 const params = z.object({ id: z.string().uuid() });
@@ -28,16 +29,17 @@ export function registerImageRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }, handler);
   register(api, "get", "/images", {
     operationId: "listImages", tags: ["Images"], summary: "List account images and monthly build usage", security: containerSecurity,
-    responses: { 200: jsonResponse(z.object({ images: image.array(), buildsEnabled: z.boolean(),
+    responses: { 200: jsonResponse(z.object({ images: image.array(), buildsEnabled: z.boolean(), privateRegistriesEnabled: z.boolean(),
       limits: z.object({ maxBuildsPerMonth: z.number(), maxSavedImages: z.number(), maxContextBytes: z.number(), maxDockerfileBytes: z.number(), maxBuildSeconds: z.number(), maxTags: z.number() }),
       usage: z.object({ month: z.string(), builds: z.number() }) })), ...errors(401, 403, 503) },
   }, handler);
   register(api, "post", "/images", {
     operationId: "createImage", tags: ["Images"], summary: "Queue a custom image build", security: containerSecurity,
-    description: "Cookie requests require a trusted Origin. Dockerfile must start with FROM mainbrella:base; one build stage. Optional gzip context is limited to 512 KiB, Dockerfile to 16 KiB.",
+    description: "Cookie requests require a trusted Origin. Dockerfile must start with FROM mainbrella:base; one build stage. Optional gzip context is limited to 512 KiB, Dockerfile to 16 KiB. cacheFrom selects an owned ready image for inline layer caching. baseImage is a JSON string containing {image, username?, password?}; image must be digest-pinned on ghcr.io or docker.io with namespace/repository. Both credentials must be supplied together, encrypted at rest and consumed once by the trusted preparation job; they never reach the build job. Requires privateRegistriesEnabled. The selected base is loaded as mainbrella:base and must satisfy the Linux amd64 runtime compatibility checks. Images are limited to 512 MiB. A cache hit is not guaranteed.",
     request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({
       name: z.string().min(1).max(80), dockerfile: z.string(), context: z.string().openapi({ format: "binary" }).optional(),
-    }) } } } }, responses: { 202: jsonResponse(z.object({ image })), ...errors(400, 401, 403, 409, 413, 429, 503) },
+      cacheFrom: z.string().uuid().optional(), baseImage: z.string().describe('JSON-encoded object with image, username and password; credentials optional as a pair').optional(),
+    }) } } } }, responses: { 202: jsonResponse(z.object({ image })), ...errors(400, 401, 403, 404, 409, 413, 429, 503) },
   }, handler);
   register(api, "get", "/images/:id", {
     operationId: "getImage", tags: ["Images"], summary: "Get an owned image", security: containerSecurity,
@@ -66,7 +68,8 @@ export function registerImageRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }
   register(api, "post", "/internal/image-builds/:id/source", {
     operationId: "claimImageBuildSource", tags: ["Internal"], summary: "Claim queued build source for a trusted runner", security: internalSecurity,
-    request: { params }, responses: { 200: jsonResponse(z.object({ dockerfile: z.string(), contextBase64: z.string().nullable() })), ...errors(401, 404, 409, 503) },
+    description: "One-use claim. Atomically clears stored registry credentials. The response may contain sensitive credentials and must never be logged or uploaded as an artifact. A lost response requires a new build.",
+    request: { params }, responses: { 200: jsonResponse(z.object({ dockerfile: z.string(), contextBase64: z.string().nullable(), baseImage: imageBase.nullable(), cacheImage: z.string().nullable() })), ...errors(401, 404, 409, 503) },
   }, handler);
   register(api, "post", "/internal/image-builds/:id/status", {
     operationId: "updateImageBuildStatus", tags: ["Internal"], summary: "Report trusted image publication or build failure", security: internalSecurity,

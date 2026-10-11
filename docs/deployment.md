@@ -131,10 +131,11 @@ starts containers, or writes status observations. Unreachable, malformed or
 unsupported responses block the release. All Workers are pinned to the same
 Cloudflare account in their configs.
 
-The accepted predecessor is the known `2026-10-05` agent API with API keys,
+The accepted predecessors are the known `2026-10-05` and `2026-10-11` agent APIs with API keys,
 generation-specific idempotent creation, managed execution and binary files.
-This implementation already sends paid-entitlement headers. The version string
-alone is insufficient because the pre-size and five-size APIs share it.
+These implementations already send paid-entitlement headers. Accepting the
+current version keeps a successful rollout compatible with later redeployments.
+The version string alone is insufficient because the pre-size and five-size APIs share it.
 Capabilities describe API code, not private-runtime health. A passing preflight
 does not qualify deployed runtime behavior, billing or login.
 

@@ -1,19 +1,21 @@
 import { authCorsHeaders, authJson, hashToken } from './auth-core';
 import { containerUser } from './container-auth';
+import { imageBuildsConfigured, imageRegistriesConfigured, openImageBase, parseImageBase, sealImageBase, type ImageBase } from '../lib/image-build-options';
 
 export const IMAGE_LIMITS = Object.freeze({ maxBuildsPerMonth: 10, maxSavedImages: 3,
   maxContextBytes: 512 * 1024, maxDockerfileBytes: 16 * 1024, maxBuildSeconds: 300, maxTags: 30 });
-const MAX_REQUEST_BYTES = IMAGE_LIMITS.maxContextBytes + IMAGE_LIMITS.maxDockerfileBytes + 8192;
+const MAX_REQUEST_BYTES = IMAGE_LIMITS.maxContextBytes + IMAGE_LIMITS.maxDockerfileBytes + 16 * 1024;
 const ACTIVE = "('queued', 'building', 'publishing')";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const ACCOUNT_ID = '2b7a9be82bb64187230703b024e25157';
 export type ImageRow = { id: string; user_id: string; name: string; status: string;
   dockerfile: string; context_base64: string | null; image_key: string; image_ref: string | null;
-  logs: string; created_at: string; updated_at: string; deadline: string };
+  logs: string; created_at: string; updated_at: string; deadline: string;
+  base_image: string | null; registry_credentials: string | null; cache_image_id: string | null; cache_image_ref: string | null };
 
 export function publicImage(row: ImageRow) {
   return { id: row.id, name: row.name, status: row.status, digest: row.image_ref?.match(/@(?<digest>sha256:[a-f0-9]{64})$/)?.groups?.digest ?? null,
-    createdAt: row.created_at, updatedAt: row.updated_at };
+    baseImage: row.base_image ?? null, cacheFrom: row.cache_image_id ?? null, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 const IMAGE_TAG = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -75,7 +77,7 @@ export function validDockerfile(source: string) {
 export async function expireImageBuilds(env: Env) {
   const now = new Date().toISOString();
   await env.DB.prepare(`UPDATE container_images SET status = 'failed', logs = 'Build timed out. Submit a new build to try again.',
-    context_base64 = NULL, updated_at = ? WHERE status IN ${ACTIVE} AND deadline <= ?`).bind(now, now).run();
+    context_base64 = NULL, registry_credentials = NULL, updated_at = ? WHERE status IN ${ACTIVE} AND deadline <= ?`).bind(now, now).run();
 }
 
 export async function ownedImage(env: Env, userId: string, id: string) {
@@ -84,7 +86,7 @@ export async function ownedImage(env: Env, userId: string, id: string) {
     .bind(id, userId).first<ImageRow>();
 }
 
-async function boundedBody(request: Request, maxBytes: number): Promise<ArrayBuffer | null> {
+async function boundedBody(request: Pick<Request, 'headers' | 'body'>, maxBytes: number): Promise<ArrayBuffer | null> {
   if (Number(request.headers.get('content-length')) > maxBytes) return null;
   const reader = request.body?.getReader();
   if (!reader) return new ArrayBuffer(0);
@@ -104,15 +106,16 @@ async function boundedBody(request: Request, maxBytes: number): Promise<ArrayBuf
 }
 
 async function dispatchImageWorkflow(env: Env, inputs: Record<string, string>) {
-  return fetch('https://api.github.com/repos/mainbrella/backend/actions/workflows/custom-image.yml/dispatches', {
+  if (!imageBuildsConfigured(env)) throw new Error('image_builds_unavailable');
+  return fetch(`https://api.github.com/repos/${env.IMAGE_BUILD_GITHUB_REPOSITORY}/actions/workflows/custom-image.yml/dispatches`, {
     method: 'POST', headers: { Authorization: `Bearer ${env.IMAGE_BUILD_GITHUB_TOKEN}`, 'Content-Type': 'application/json',
       Accept: 'application/vnd.github+json', 'User-Agent': 'Mainbrella', 'X-GitHub-Api-Version': '2022-11-28' },
-    body: JSON.stringify({ ref: 'main', inputs }), signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify({ ref: 'main', inputs }), signal: AbortSignal.timeout(10_000), redirect: 'manual',
   });
 }
 
 async function createImage(request: Request, env: Env, userId: string, cors: Record<string, string>) {
-  if (!env.IMAGE_BUILD_GITHUB_TOKEN || !env.IMAGE_BUILD_SECRET) return authJson({ error: 'image_builds_unavailable' }, 503, cors);
+  if (!imageBuildsConfigured(env)) return authJson({ error: 'image_builds_unavailable' }, 503, cors);
   const body = await boundedBody(request, MAX_REQUEST_BYTES);
   if (!body) return authJson({ error: 'image_source_too_large' }, 413, cors);
   let form: FormData;
@@ -121,11 +124,21 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
   const name = form.get('name');
   const dockerfile = form.get('dockerfile');
   const context = form.get('context');
+  const cacheFrom = form.get('cacheFrom');
+  const rawBase = form.get('baseImage');
+  const fields = ['name', 'dockerfile', 'context', 'cacheFrom', 'baseImage'];
   if (typeof name !== 'string' || !name.trim() || name.trim().length > 80
     || typeof dockerfile !== 'string' || !validDockerfile(dockerfile)
-    || [...form.keys()].some(key => !['name', 'dockerfile', 'context'].includes(key))
-    || ['name', 'dockerfile', 'context'].some(key => form.getAll(key).length > 1)) {
+    || [...form.keys()].some(key => !fields.includes(key))
+    || fields.some(key => form.getAll(key).length > 1)
+    || cacheFrom !== null && (typeof cacheFrom !== 'string' || !UUID.test(cacheFrom))) {
     return authJson({ error: 'invalid_image_source' }, 400, cors);
+  }
+  let base: ImageBase | null = null;
+  if (rawBase !== null) {
+    try { if (typeof rawBase === 'string') base = parseImageBase(JSON.parse(rawBase)); } catch {}
+    if (!base) return authJson({ error: 'invalid_image_base' }, 400, cors);
+    if (!imageRegistriesConfigured(env)) return authJson({ error: 'image_registries_unavailable' }, 503, cors);
   }
   let contextBase64: string | null = null;
   if (context !== null) {
@@ -139,14 +152,30 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
     contextBase64 = btoa(binary);
   }
   await expireImageBuilds(env);
+  const cachedImage = cacheFrom ? await ownedImage(env, userId, cacheFrom as string) : null;
+  if (cacheFrom && !cachedImage) return authJson({ error: 'not_found' }, 404, cors);
+  if (cachedImage && (cachedImage.status !== 'ready' || !cachedImage.image_ref)) return authJson({ error: 'image_not_ready' }, 409, cors);
+  // Public Actions artifacts expose source and image layers to repository
+  // readers. Refuse admission unless the operator's build repository is private.
+  const repositoryResponse = await fetch(`https://api.github.com/repos/${env.IMAGE_BUILD_GITHUB_REPOSITORY}`, {
+    headers: { Authorization: `Bearer ${env.IMAGE_BUILD_GITHUB_TOKEN}`, Accept: 'application/vnd.github+json',
+      'User-Agent': 'Mainbrella', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(10_000), redirect: 'manual',
+  });
+  const repositoryBytes = repositoryResponse.ok ? await boundedBody(repositoryResponse, 64 * 1024) : null;
+  if (!repositoryBytes || (JSON.parse(new TextDecoder().decode(repositoryBytes)) as { private?: boolean })?.private !== true) {
+    return authJson({ error: 'image_builds_unavailable' }, 503, cors);
+  }
   const id = crypto.randomUUID();
+  const sealedBase = base ? await sealImageBase(env, userId, id, base) : null;
   const now = new Date();
   const imageKey = `custom_${id.replaceAll('-', '')}`;
   try {
     await env.DB.prepare(`INSERT INTO container_images
-      (id, user_id, name, status, dockerfile, context_base64, image_key, created_at, updated_at, deadline, month)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, name.trim(), dockerfile,
-      contextBase64, imageKey, now.toISOString(), now.toISOString(), new Date(now.getTime() + 30 * 60_000).toISOString(), now.toISOString().slice(0, 7)).run();
+      (id, user_id, name, status, dockerfile, context_base64, image_key, created_at, updated_at, deadline, month,
+        base_image, registry_credentials, cache_image_id, cache_image_ref)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, name.trim(), dockerfile,
+      contextBase64, imageKey, now.toISOString(), now.toISOString(), new Date(now.getTime() + 30 * 60_000).toISOString(), now.toISOString().slice(0, 7),
+      base?.image ?? null, sealedBase, cachedImage?.id ?? null, cachedImage?.image_ref ?? null).run();
   } catch (error) {
     const message = String(error);
     for (const code of ['image_build_in_progress', 'image_build_quota_exceeded', 'image_storage_limit', 'image_service_capacity']) {
@@ -162,7 +191,7 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
     rejected = [400, 401, 403, 404, 422].includes(response.status);
     if (!response.ok) throw new Error('dispatch_failed');
   } catch {
-    const failed = env.DB.prepare("UPDATE container_images SET status = 'failed', logs = 'Could not schedule the build. Submit a new build to try again.', context_base64 = NULL WHERE id = ? AND status = 'queued'").bind(id);
+    const failed = env.DB.prepare("UPDATE container_images SET status = 'failed', logs = 'Could not schedule the build. Submit a new build to try again.', context_base64 = NULL, registry_credentials = NULL WHERE id = ? AND status = 'queued'").bind(id);
     if (rejected) {
       await env.DB.batch([
         env.DB.prepare(`UPDATE container_image_usage SET builds = MAX(0, builds - 1) WHERE user_id = ? AND month = ?
@@ -172,7 +201,8 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
     } else { await failed.run(); }
     return authJson({ error: 'image_builds_unavailable' }, 503, cors);
   }
-  return authJson({ image: { id, name: name.trim(), status: 'queued', createdAt: now.toISOString(), updatedAt: now.toISOString() } }, 202, cors);
+  return authJson({ image: { id, name: name.trim(), status: 'queued', digest: null, baseImage: base?.image ?? null,
+    cacheFrom: cachedImage?.id ?? null, createdAt: now.toISOString(), updatedAt: now.toISOString() } }, 202, cors);
 }
 
 export async function handleImagesRequest(request: Request, env: Env) {
@@ -201,13 +231,14 @@ export async function handleImagesRequest(request: Request, env: Env) {
       const month = new Date().toISOString().slice(0, 7);
       const usage = await env.DB.prepare('SELECT builds FROM container_image_usage WHERE user_id = ? AND month = ?').bind(user.id, month).first<{ builds: number }>();
       return authJson({ images: rows.results.map(publicImage), limits: IMAGE_LIMITS, usage: { month, builds: usage?.builds || 0 },
-        buildsEnabled: Boolean(env.IMAGE_BUILD_GITHUB_TOKEN && env.IMAGE_BUILD_SECRET) }, 200, cors);
+        buildsEnabled: imageBuildsConfigured(env),
+        privateRegistriesEnabled: imageBuildsConfigured(env) && imageRegistriesConfigured(env) }, 200, cors);
     }
     const image = await ownedImage(env, user.id, match![1]);
     if (!image) return authJson({ error: 'not_found' }, 404, cors);
     if (request.method === 'DELETE') {
       if (['queued', 'building', 'publishing'].includes(image.status)) return authJson({ error: 'image_build_in_progress' }, 409, cors);
-      await env.DB.prepare("UPDATE container_images SET status = 'deleted', context_base64 = NULL, dockerfile = '', logs = '', updated_at = ? WHERE id = ? AND user_id = ?")
+      await env.DB.prepare("UPDATE container_images SET status = 'deleted', context_base64 = NULL, registry_credentials = NULL, dockerfile = '', logs = '', updated_at = ? WHERE id = ? AND user_id = ?")
         .bind(new Date().toISOString(), image.id, user.id).run();
       // A scheduled reconciliation also repairs dispatch/deployment failures.
       // D1 is authoritative; a later deployment excludes the tombstoned image.
@@ -267,11 +298,16 @@ export async function handleImageBuildRequest(request: Request, env: Env) {
     const id = match[1];
     const now = new Date().toISOString();
     if (match[2] === 'source' && request.method === 'POST') {
-      const result = await env.DB.prepare("UPDATE container_images SET status = 'building', updated_at = ? WHERE id = ? AND status = 'queued' AND deadline > ?")
+      const image = await env.DB.prepare('SELECT * FROM container_images WHERE id = ?').bind(id).first<ImageRow>();
+      if (!image || image.status !== 'queued') return authJson({ error: 'build_not_available' }, 409, {});
+      const result = await env.DB.prepare("UPDATE container_images SET status = 'building', updated_at = ?, registry_credentials = NULL WHERE id = ? AND status = 'queued' AND deadline > ?")
         .bind(now, id, now).run();
       if (!result.meta.changes) return authJson({ error: 'build_not_available' }, 409, {});
-      const image = await env.DB.prepare('SELECT * FROM container_images WHERE id = ?').bind(id).first<ImageRow>();
-      return authJson({ dockerfile: image!.dockerfile, contextBase64: image!.context_base64 }, 200, {});
+      const baseImage = image.registry_credentials ? await openImageBase(env, image.user_id, id, image.registry_credentials) : null;
+      // A lost response cannot replay credentials. The caller must submit a new
+      // build; the claimed generation eventually fails through its deadline.
+      return authJson({ dockerfile: image.dockerfile, contextBase64: image.context_base64,
+        baseImage, cacheImage: image.cache_image_ref }, 200, {});
     }
     if (match[2] !== 'status' || request.method !== 'POST') return authJson({ error: 'method_not_allowed' }, 405, {});
     const bytes = await boundedBody(request, 80 * 1024);
@@ -291,7 +327,7 @@ export async function handleImageBuildRequest(request: Request, env: Env) {
     const previous = body.status === 'publishing' ? ['building'] : body.status === 'ready' ? ['publishing'] : ['queued', 'building', 'publishing'];
     if (!previous.includes(image.status)) return authJson({ error: 'invalid_build_transition' }, 409, {});
     const logs = (body.logs ?? image.logs).slice(-64 * 1024);
-    const saved = await env.DB.prepare(`UPDATE container_images SET status = ?, image_ref = ?, logs = ?, updated_at = ?, context_base64 = NULL
+    const saved = await env.DB.prepare(`UPDATE container_images SET status = ?, image_ref = ?, logs = ?, updated_at = ?, context_base64 = NULL, registry_credentials = NULL
       WHERE id = ? AND status = ? AND deadline > ?
       ${body.status === 'publishing' ? "AND NOT EXISTS (SELECT 1 FROM container_images WHERE status = 'publishing')" : ''}`).bind(body.status, body.status === 'publishing' ? body.image : image.image_ref,
       logs, now, id, image.status, now).run();

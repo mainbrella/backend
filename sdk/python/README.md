@@ -2,7 +2,7 @@
 
 Published on PyPI as `mainbrella` 0.1.0. Python 3.10+; standard-library runtime.
 
-The P1 additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+The source additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
 
 ```sh
 pip install mainbrella==0.1.0
@@ -212,7 +212,7 @@ upstream and scoped tokens; an upstream can disclose transformed credentials.
 ## Client-managed prewarming (unreleased)
 
 This checkout provides explicit prewarming of ordinary, billed ad-hoc sandboxes.
-There is no server pool, background refill, keepalive or reuse of acquired
+This helper has no background refill, keepalive or reuse of acquired
 machines. Normal start, concurrency, compute, idle and session limits apply.
 
 ```python
@@ -244,6 +244,41 @@ normal SDK operations. Pending creation retries stop after at most one hour,
 bounded by half the API's advertised retention; `pool_creation_expired` requires
 manual reconciliation. There is no memory-preserving pause/resume.
 
+## Server-managed pools (unreleased)
+
+When `client.capabilities()['pools']['managed']` is true, `client.pools` keeps
+inventory in the account coordinator and replenishes it after client exit.
+Persist operation keys before the request so uncertain results can be retried:
+
+```python
+pool = client.pools.create('Agent workers', target_size=2, ttl_seconds=600,
+                          catalog_id='python', idempotency_key='workers-batch-42')['pool']
+print(client.pools.get(pool['id']))  # Wait for ready > 0.
+sandbox = client.pools.acquire(pool['id'], idempotency_key='task-42')
+try:
+    print(sandbox.commands.run('python --version'))
+finally:
+    sandbox.kill()
+client.pools.delete(pool['id'])
+```
+
+`pool_empty` means inventory is warming or account limits prevent replenishment.
+Retry uncertain responses with `error.idempotency_key` and the original options
+within 24 hours. An acquisition retry returns the same generation or
+`acquisition_no_longer_running`, never another sandbox.
+
+`list()`, `get(id)`, `update(id, name=..., target_size=...)`, and `delete(id)`
+manage the pool. Eight pools per account, target size 0–20 within account capacity,
+and required `ttl_seconds` 60–86400. Expiry cannot be extended. Set target size to
+zero to pause and drain. Deletion and expiry stop unclaimed inventory; acquired
+sandboxes remain your responsibility. Retry failed deletion until confirmed.
+Image, size and network policy are immutable.
+
+Idle inventory consumes ordinary start/compute budgets and keeps its original
+idle/hard deadlines. Automatic replacement of expired inventory may incur another
+start without a client request. The pool survives client exit until deleted or
+expired. Previously acquired machines are never reset or reused.
+
 ## Image builds, versions and tags (unreleased)
 
 ```python
@@ -264,6 +299,16 @@ Builds still require live `images.customBuilds`; tags require the new migration
 and backend deployment. Tags are account-scoped, capped at 30, and point only to
 ready images. Resolve once and retain the immutable image ID with the creation
 key for retries; moving a tag does not change existing containers.
+
+Image builds also accept `cache_from=<owned-ready-image-id>` and
+`base_image={"image": "ghcr.io/owner/tools@sha256:...", "username": "reader", "password": token}`.
+Omit both credential fields for a public base. Only digest-pinned `ghcr.io` and
+`docker.io` references are accepted; the Dockerfile still starts with
+`FROM mainbrella:base`. Check `privateRegistriesEnabled` from `images.list()`
+before authenticated imports. Keep tokens in your secret store, outside the
+Dockerfile and logs. Builds require a configured private build repository.
+Existing images without inline cache metadata may yield no cache hits. These
+options require migration, configuration and live qualification.
 
 ## Streaming transfers and directory copies
 
@@ -301,3 +346,34 @@ the directory as a whole is not. Permissions are not synchronized. Keep both tre
 stable during copying. Polling `watch` starts after an initial metadata baseline;
 its default interval is one second. Transient changes and same-size rewrites within
 one second may be missed. The native server watcher capability remains unavailable.
+
+## Linux desktop automation (unreleased)
+
+Use a compatible image with Python 3, Xvfb, xdpyinfo, xdotool and ImageMagick
+`import`. `sandbox.desktop.probe()` checks the image using a temporary Python
+context. The SDK does not install packages automatically.
+
+```python
+with sandbox.desktop.start(width=1280, height=720) as desktop:
+    desktop.launch(['openbox'])
+    desktop.launch(['xterm'])
+    desktop.move(120, 100)
+    desktop.click()
+    desktop.type('printf hello')
+    desktop.press('Return')
+    png = desktop.screenshot()  # bytes, at most 8 MiB
+```
+
+A desktop occupies a supervised Python context for at most 15 minutes and no
+longer than the sandbox's remaining lease. Width is 320–1920 and height 240–1080.
+Applications inherit `DISPLAY`; launch accepts argv without shell interpolation.
+Admission does not imply GUI readiness. Screenshots use binary file transfer,
+check size/PNG dimensions, and remove temporary files even on download failure.
+Actions serialize within the session and are never automatically replayed.
+
+`close()` or the context manager deletes the supervised context. If cleanup is
+uncertain, an error retains `context_id` and `cleanup_unconfirmed`; reconcile
+through `sandbox.code.attach(id).close()`. Stop, expiry and runtime restart end
+the context/process group; deliberately daemonized applications can escape that
+group and remain bounded by the sandbox lease. No reconnectable desktop handle,
+VNC viewer, recording, Windows or published desktop catalog is included.

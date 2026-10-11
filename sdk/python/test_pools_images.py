@@ -101,6 +101,31 @@ class PoolTests(unittest.TestCase):
 
 
 class ImageTests(unittest.TestCase):
+    def test_private_base_and_cache_are_only_in_request_body(self):
+        image_id = 'd688d42a-25ef-4c13-9b28-21a0fde6e163'
+        base_image = {'image': 'ghcr.io/owner/tools@sha256:' + 'a' * 64, 'username': 'reader', 'password': 'private-test-token'}
+        calls = []
+        def transport(url, method, headers, body, timeout):
+            calls.append(url)
+            self.assertEqual(url, 'https://api.mainbrella.com/images')
+            self.assertNotIn(base_image['password'], json.dumps(headers))
+            message = BytesParser(policy=default).parsebytes(
+                ('Content-Type: ' + headers['Content-Type'] + '\r\nMIME-Version: 1.0\r\n\r\n').encode() + body)
+            parts = {part.get_param('name', header='content-disposition'): part.get_payload(decode=True)
+                     for part in message.iter_parts()}
+            self.assertEqual(parts['cacheFrom'].decode(), image_id)
+            self.assertEqual(json.loads(parts['baseImage']), base_image)
+            raise RuntimeError(base_image['password'])
+        client = Mainbrella('mb_' + 'a' * 64, transport=transport)
+        with self.assertRaises(MainbrellaError) as error:
+            client.images.create('Tools', 'FROM mainbrella:base', cache_from=image_id, base_image=base_image)
+        self.assertEqual(str(error.exception), 'transport_unavailable')
+        for invalid in ([], {'image': base_image['image'], 'username': 'reader'}, {'image': base_image['image'], 'password': 'secret'},
+                        dict(base_image, url='https://other')):
+            with self.assertRaises(MainbrellaError):
+                client.images.create('Tools', 'FROM mainbrella:base', base_image=invalid)
+        self.assertEqual(len(calls), 1)
+
     def test_multipart_build_and_owned_image_tag_helpers(self):
         image_id = 'd688d42a-25ef-4c13-9b28-21a0fde6e163'
         calls = []
