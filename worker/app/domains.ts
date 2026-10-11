@@ -12,7 +12,7 @@ export interface DomainOrder {
   id: string; user_id: string; project_id: string | null; domain_name: string; kind: 'registration' | 'renewal'; years: number;
   cost_cents: number; amount_cents: number; renewal_cents: number; premium: number; auto_renew: number;
   contact_json: string | null; terms_accepted_at: number | null; customer_id: string | null; checkout_id: string | null;
-  payment_intent_id: string | null; status: string; error: string | null; provider_order: string | null;
+  payment_intent_id: string | null; refund_id: string | null; status: string; error: string | null; provider_order: string | null;
   lease_until: number; created_at: number; expires_at: number; dns_revision: string | null;
 }
 interface Registration {
@@ -110,8 +110,12 @@ async function checkout(env: BillingEnv, user: AuthUser, request: Request, input
 async function refund(env: BillingEnv, order: DomainOrder, reason: string) {
   if (!order.payment_intent_id) throw new DomainError('payment_mismatch');
   await env.DB.prepare("UPDATE domain_orders SET status='refunding', error=? WHERE id=?").bind(reason, order.id).run();
-  await stripeRequest(env, '/refunds', new URLSearchParams({ payment_intent: order.payment_intent_id, amount: String(order.amount_cents) }), `domain-refund-${order.id}`);
-  await env.DB.prepare("UPDATE domain_orders SET status='refunded' WHERE id=?").bind(order.id).run();
+  const result = order.refund_id ? await stripeRequest<{ id: string; status: string }>(env, `/refunds/${order.refund_id}`)
+    : await stripeRequest<{ id: string; status: string }>(env, '/refunds', new URLSearchParams({ payment_intent: order.payment_intent_id, amount: String(order.amount_cents) }), `domain-refund-${order.id}`);
+  if (!/^re_[A-Za-z0-9_]+$/.test(result.id)) throw new DomainError('billing_unavailable');
+  await env.DB.prepare('UPDATE domain_orders SET refund_id=? WHERE id=?').bind(result.id, order.id).run();
+  if (result.status === 'succeeded') await env.DB.prepare("UPDATE domain_orders SET status='refunded',contact_json=NULL WHERE id=?").bind(order.id).run();
+  else if (['failed','canceled'].includes(result.status)) await env.DB.prepare("UPDATE domain_orders SET status='review',error='refund_failed' WHERE id=?").bind(order.id).run();
 }
 async function connect(env: Env, order: DomainOrder) {
   if (!order.project_id) return;
@@ -291,7 +295,7 @@ export async function handleDomainsRequest(request: Request, env: BillingEnv): P
       const { projectId } = await parseBody(request, z.object({ projectId: z.string().uuid().nullable() }).strict());
       if (projectId && !await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first()) throw new DomainError('not_found', 404);
       if (projectId && (env.LOCAL_DEV === 'true' || !customDomainsConfigured(env))) throw new DomainError('domain_connection_unavailable');
-      const pending = await env.DB.prepare("SELECT id FROM domain_orders WHERE domain_name=? AND status IN ('checkout','charging','paid','fulfilling','registered','connecting','review')").bind(name).first();
+      const pending = await env.DB.prepare("SELECT id FROM domain_orders WHERE domain_name=? AND status IN ('checkout','charging','paid','fulfilling','registered','connecting','refunding','review')").bind(name).first();
       if (pending) throw new DomainError('domain_order_pending', 409);
       if (owned.project_id) await disconnectPurchasedDomain(env, owned.project_id, user.id, name);
       const original = await env.DB.prepare("SELECT id FROM domain_orders WHERE domain_name=? AND user_id=? AND kind='registration' AND status='complete' ORDER BY created_at DESC LIMIT 1").bind(name, user.id).first<{ id: string }>();
@@ -352,7 +356,7 @@ export async function reconcileDomainOrders(env: BillingEnv) {
   for (const order of orders.results) await reconcileDomainOrder(env, order.id);
   const registrations = await env.DB.prepare(`SELECT * FROM domain_registrations r WHERE auto_renew=1 AND payment_method_id IS NOT NULL
     AND expire_date <= ? AND expire_date > ? AND error IS NULL
-    AND NOT EXISTS (SELECT 1 FROM domain_orders o WHERE o.domain_name=r.domain_name AND o.status IN ('checkout','charging','paid','fulfilling','registered','connecting','review')) LIMIT 10`)
+    AND NOT EXISTS (SELECT 1 FROM domain_orders o WHERE o.domain_name=r.domain_name AND o.status IN ('checkout','charging','paid','fulfilling','registered','connecting','refunding','review')) LIMIT 10`)
     .bind(new Date(Date.now() + 30 * 86400000).toISOString(), new Date().toISOString()).all<Registration>();
   for (const registration of registrations.results) {
     try {
