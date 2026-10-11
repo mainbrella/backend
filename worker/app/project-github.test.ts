@@ -176,7 +176,7 @@ function turn(turnId: string): BuildTurnRow { return { id: turnId, app_id: APP, 
   base_revision: 0, log: '', status: 'running', stage: 'Building', summary: null, error: null, model: 'model', input_tokens: 0, output_tokens: 0,
   created_at: now, finished_at: null, restore_version_id: null }; }
 function link(f: Fixture, body: unknown = { repo: REPO, branch: BRANCH }, origin: string | null = 'https://mainbrella.com') { return handleProjectGithubRequest(request('PUT', SESSION_ONE, body, PROJECT, origin), f.env); }
-function setLinked(f: Fixture, head = PARENT, paths: string[] = ['index.html']) {
+function setLinked(f: Fixture, head: string | null = PARENT, paths: string[] = ['index.html']) {
   f.sqlite.prepare('UPDATE projects SET github_repo=?,github_branch=?,github_commit_id=?,github_paths_json=? WHERE id=?')
     .run(REPO, BRANCH, head, JSON.stringify(paths), PROJECT);
 }
@@ -259,7 +259,7 @@ test('explicit storage deletion keeps the project and Builder, removes D1/R2 con
 });
 
 test('unpushed source and removed files prevent storage deletion', async t => {
-  const cases = [
+  const cases: { local: BuildFiles; remote: BuildFiles }[] = [
     { local: { 'index.html': 'draft' }, remote: { 'index.html': 'saved' } },
     { local: {}, remote: { 'index.html': 'saved' } },
   ];
@@ -296,6 +296,13 @@ test('referenced images are verified before deletion and remain available in rea
   f.setCommitTree(PARENT, tree, files);
   f.addBlob(shaBlob(bytes), bytes);
   f.sqlite.prepare('UPDATE projects SET github_paths_json=? WHERE id=?').run(JSON.stringify([...Object.keys(files), path]), PROJECT);
+  // A pushed image with different bytes must still keep the hosted copy.
+  f.setCommitTree(PARENT, tree.map(entry => entry.path === path ? { ...entry, sha: shaBlob(new Uint8Array([0xff, 0xd8, 0xff, 0])) } : entry), files);
+  response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'github_source_not_pushed' });
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_images').n, 1);
+  f.setCommitTree(PARENT, tree, files);
   response = await handleRequest(storageRequest(), f.env);
   assert.equal(response.status, 200);
   assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_images').n, 0);
@@ -312,6 +319,27 @@ test('referenced images are verified before deletion and remain available in rea
   assert.ok(!write.tree.some(entry => entry.path === path && entry.sha === null));
   assert.ok((JSON.parse(row(f, 'SELECT github_paths_json FROM projects WHERE id=?', PROJECT).github_paths_json as string) as string[]).includes(path));
   assert.deepEqual(f.puts, []);
+});
+
+test('removing an image reference requires its removal to be pushed before storage deletion', async t => {
+  const imageId = '22222222-2222-4222-8222-222222222222';
+  const path = `public/generated/${imageId}.jpg`;
+  const files = { 'index.html': '<main>No image</main>' };
+  const f = await fixture(t, { app: true, source: files, head: PARENT });
+  savedGithubSource(f, files);
+  const sourceTree = Object.entries(files).map(([path, content]) => ({ path, size: Buffer.byteLength(content), sha: shaBlob(Buffer.from(content)) }));
+  const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  f.setCommitTree(PARENT, [...sourceTree, { path, size: bytes.length, sha: shaBlob(bytes) }], files);
+  f.sqlite.prepare('UPDATE projects SET github_paths_json=? WHERE id=?').run(JSON.stringify([...Object.keys(files), path]), PROJECT);
+  let response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'github_source_not_pushed' });
+  assert.deepEqual(await workingSource(f), files);
+  assert.equal(row(f, 'SELECT COUNT(*) AS n FROM build_git_deletions').n, 0);
+  f.setCommitTree(PARENT, sourceTree, files);
+  response = await handleRequest(storageRequest(), f.env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as any).storage, 'github');
 });
 
 test('a lost deletion inventory acknowledgement is reconciled from an empty physical prefix', async t => {

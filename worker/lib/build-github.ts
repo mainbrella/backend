@@ -211,8 +211,10 @@ export async function deleteGithubHostedStorage(env: Env, project: GithubProject
     const snapshot = await githubSnapshot(env, { userId: project.user_id, appId: app.id }, files);
     const tree = new Map((await githubTree(project.github_repo!, sha, token)).filter(entry => entry.type === 'blob').map(entry => [entry.path, entry]));
     const paths: string[] = JSON.parse(project.github_paths_json);
+    // Generated images live in the snapshot, outside the text source map.
+    // Compare removals against the same snapshot used to verify blob contents.
     if (Object.entries(snapshot).some(([path, bytes]) => path !== '.gitignore' && tree.get(path)?.sha !== gitBlobSha(bytes))
-      || paths.some(path => validBuildPath(path) && !(path in files) && tree.has(path))) throw new BuildError('github_source_not_pushed', 409);
+      || paths.some(path => validBuildPath(path) && !(path in snapshot) && tree.has(path))) throw new BuildError('github_source_not_pushed', 409);
     // Check Builder's import limits too, so deleting the local copy cannot
     // strand a workspace whose remote repository has since grown too large.
     await githubSource(project.github_repo!, sha, token);
