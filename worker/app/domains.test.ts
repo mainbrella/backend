@@ -23,7 +23,11 @@ async function fixture(t: TestContext) {
     if (url.hostname.includes('name.com')) {
       if (url.pathname.endsWith(':search') || url.pathname.endsWith(':checkAvailability')) return Response.json({ results: [{ domainName: 'example.com', purchasable: state.available, purchaseType: 'registration', premium: state.premium, purchasePrice: state.price, renewalPrice: state.renewal }] });
       if (url.pathname.includes('/domaininfo/requirements/')) return Response.json({ tldInfo: { allowedRegistrationYears: [1,2,3,4,5,6,7,8,9,10] }, tldRequirements: { fields: state.specialRequirements ? { extra: {} } : {} } });
-      if (url.pathname.includes('/domaininfo/claims/')) return Response.json({ domain: 'example.com', claims: [], claimId: state.claims ? 'claim' : null });
+      if (url.pathname.includes('/domaininfo/claims/')) {
+        if (init?.method !== 'POST') return Response.json({ message: 'method not allowed' }, { status: 405 });
+        assert.deepEqual(body, { purchaseType: 'registration' });
+        return Response.json({ domain: 'example.com', claims: [], claimId: state.claims ? 'claim' : null });
+      }
       if (url.pathname.endsWith(':getPricing')) return Response.json({ premium: state.premium, purchasePrice: state.price * Number(url.searchParams.get('years') ?? 1), renewalPrice: state.renewal * Number(url.searchParams.get('years') ?? 1) });
       if (url.pathname === '/core/v1/domains' && init?.method === 'POST' || url.pathname.endsWith(':renew')) {
         state.creates.push({ key: new Headers(init?.headers).get('X-Idempotency-Key')!, body });
@@ -98,9 +102,22 @@ test('search prices include configured markup; premium multi-year quotes use aut
   assert.equal((await response.json() as any).results[0].amountCents,1200);
   const quote = await f.quoted(3); assert.equal(quote.amountCents,3600); assert.equal(quote.renewalCents,1440); assert.equal(quote.premium,true);
 });
+test('quotes and checkout recheck domain claims with the registration request', async t => {
+  const f = await fixture(t);
+  const order = await f.quoted();
+  const checkout = await f.request('/checkout',{orderId:order.id,contact,autoRenew:true,termsAccepted:true});
+  assert.equal(checkout.status,200);
+  const claimsCalls = f.state.calls.filter(call => call.url.pathname === '/core/v1/domaininfo/claims/example.com');
+  assert.equal(claimsCalls.length,2);
+  for (const call of claimsCalls) {
+    assert.equal(call.init?.method,'POST');
+    assert.deepEqual(call.body,{ purchaseType:'registration' });
+  }
+});
 test('rejects unsupported registration requirements and trademark claims before payment', async t => {
   const f = await fixture(t); f.state.claims = true;
   assert.equal((await f.request('/quote',{domainName:'example.com',years:1})).status,400);
+  assert.equal(f.state.sessions.size,0);
   f.state.claims = false; f.state.specialRequirements = true;
   assert.equal((await f.request('/quote',{domainName:'example.com',years:1})).status,400); assert.equal(f.state.sessions.size,0);
 });

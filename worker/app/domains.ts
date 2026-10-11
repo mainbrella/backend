@@ -49,7 +49,7 @@ async function registrationChecks(env: Env, name: string, years: number) {
   if (!match?.purchasable || match.purchaseType !== 'registration') throw new DomainError('domain_unavailable', 409, true);
   const requirements = await namecom<{ tldInfo: { allowedRegistrationYears: number[] }; tldRequirements?: { fields?: Record<string, unknown> } }>(env, `/domaininfo/requirements/${name.split('.')[1]}`);
   if (!requirements.tldInfo?.allowedRegistrationYears?.includes(years) || Object.keys(requirements.tldRequirements?.fields ?? {}).length) throw new DomainError('domain_unsupported', 400, true);
-  const claims = await namecom<{ claims: unknown[]; claimId?: string | null }>(env, `/domaininfo/claims/${name}`);
+  const claims = await namecom<{ claims: unknown[]; claimId?: string | null }>(env, `/domaininfo/claims/${name}`, 'POST', { purchaseType: 'registration' });
   if (!Array.isArray(claims.claims) || claims.claims.length || claims.claimId) throw new DomainError('domain_claims_unsupported', 400, true);
 }
 async function pricing(env: Env, name: string, years: number, kind: string) {
