@@ -5,6 +5,9 @@ import { paidContainerFixture, USER_ONE, USER_TWO, SESSION_ONE } from './paid-co
 import { buildBillingFixture } from './build-billing-test-helpers';
 import { dailyStorageCost, finalizeStorageDay, runStorageBilling, settleStorageReceipts, reconcileStorageInvoice, allocateStorageCategory, storageBillingSummary } from '../lib/r2-billing';
 import { putStoredObject, getStoredObject, deleteStoredObjects, inventoryObject, PLATFORM_STORAGE, reserveStorage, STORAGE_DAY_MS } from '../lib/r2-storage';
+import { notifyStorageRetention, markStorageWarning } from '../lib/r2-retention';
+import { storageReadAccess } from '../lib/r2-access';
+import { checkStorageHealth } from '../lib/r2-health';
 import { cleanupStorageOrphans, expireUnfundedStorage } from '../lib/r2-maintenance';
 import { storeBuildSource, storeBuildObject } from '../lib/build-storage';
 import { handleRequest } from './router';
@@ -30,6 +33,7 @@ async function fixture(t: TestContext, mode: 'meter' | 'charge' = 'meter') {
   const app = (appId = owner.appId, userId = USER_ONE, source = '{}') => f.sqlite.prepare(`INSERT INTO build_apps(id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`)
     .run(appId, userId, appId, 'Test', 'Example app', source, new Date(now).toISOString(), new Date(now).toISOString());
   f.sqlite.prepare("INSERT INTO r2_meter_state(id,value) VALUES('inventory_complete',?)").run(String(now));
+  if (mode === 'charge') f.sqlite.prepare("INSERT INTO r2_meter_state(id,value) VALUES('billing_activated_at',?)").run(String(Date.UTC(2026,9,1)));
   const key = (suffix: string) => `build-git/${USER_ONE}/${owner.appId}/objects/${suffix}`;
   return { ...f, ...billing, owner, key, app, now: () => now, advance(ms: number) { now += ms; }, setNow(at: number) { now = at; } };
 }
@@ -134,7 +138,9 @@ test('orphan cleanup keeps historical manifests and their files while collecting
 test('expired paid retention fences builds, clears references and queues durable physical cleanup', async t => {
   const f = await fixture(t, 'charge'); f.app();
   await inventoryObject(f.env, f.owner, f.key('retained'), 1000000, 'source');
-  f.sqlite.prepare('UPDATE r2_accounts SET funded_through=?,writes_blocked=1 WHERE user_id=?').run(f.now() - 1, USER_ONE);
+  const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
+  state.wallet.usedUnitMs = 500 * 1800000; f.stored.set('containerAccount', state);
+  f.sqlite.prepare('UPDATE r2_accounts SET funded_through=?,writes_blocked=1,delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, USER_ONE);
   await expireUnfundedStorage(f.env);
   assert.equal(f.sqlite.prepare('SELECT user_id FROM build_git_deletions').get()!.user_id, USER_ONE);
   assert.equal(f.sqlite.prepare('SELECT source_json FROM build_apps').get()!.source_json, '{}');
@@ -184,4 +190,193 @@ test('native account deletion atomically queues Git cleanup before cascading pro
   await cleanupDeletedBuildGit(f.env);
   assert.equal(f.storage.objects.size, 0);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
+});
+
+async function unfund(f: Awaited<ReturnType<typeof fixture>>) {
+  const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
+  state.wallet.usedUnitMs = 500 * 1800000;
+  f.stored.set('containerAccount', state);
+  await reserveStorage(f.env, USER_ONE);
+}
+
+test('30-day funding is reserved; failed renewal warns once, sends reminders and renewal cancels deletion', async t => {
+  const f = await fixture(t, 'charge'); f.app();
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000000000, 'source');
+  const funded = await reserveStorage(f.env, USER_ONE);
+  assert.equal(funded!.fundedThrough, f.now() + 30 * STORAGE_DAY_MS);
+  const state = f.stored.get('containerAccount') as { wallet: { storageHold: { remainingNanoUsd: number } } };
+  assert.ok(state.wallet.storageHold.remainingNanoUsd >= 18000000);
+  const emails: { subject: string; text: string }[] = [];
+  f.env.WELCOME_EMAIL = { async send(message: any) { emails.push(message); return {}; } } as unknown as SendEmail;
+  f.advance(STORAGE_DAY_MS);
+  await unfund(f);
+  await notifyStorageRetention(f.env);
+  const row = () => f.sqlite.prepare('SELECT * FROM r2_accounts WHERE user_id=?').get(USER_ONE)!;
+  assert.equal(row().delete_after, Math.ceil(f.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS + 30 * STORAGE_DAY_MS);
+  assert.ok(emails[0].text.includes(new Date(Number(row().delete_after)).toISOString()));
+  assert.match(emails[0].text, /https:\/\/mainbrella.com\/balance\//);
+  await notifyStorageRetention(f.env); assert.equal(emails.length, 1);
+  f.setNow(Number(row().delete_after) - 7 * STORAGE_DAY_MS); await notifyStorageRetention(f.env);
+  assert.equal(emails.length, 2); assert.equal(row().reminder_seven_at, f.now());
+  f.advance(6 * STORAGE_DAY_MS); await notifyStorageRetention(f.env);
+  assert.equal(emails.length, 3); assert.equal(row().reminder_one_at, f.now());
+  const restored = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
+  restored.wallet.usedUnitMs = 0; f.stored.set('containerAccount', restored);
+  await reserveStorage(f.env, USER_ONE);
+  assert.equal(row().writes_blocked, 0); assert.equal(row().delete_after, null); assert.equal(row().warned_at, null);
+  f.advance(40 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
+});
+
+test('failed warning delivery and billing outages preserve files; recovered delivery gives 30 full days', async t => {
+  const f = await fixture(t, 'charge'); f.app();
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000, 'source');
+  await unfund(f);
+  f.env.WELCOME_EMAIL = { async send() { throw new Error('email_unavailable'); } } as unknown as SendEmail;
+  await notifyStorageRetention(f.env);
+  f.advance(45 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
+  f.env.WELCOME_EMAIL = { async send() { return {}; } } as unknown as SendEmail;
+  await notifyStorageRetention(f.env);
+  const row = f.sqlite.prepare('SELECT * FROM r2_accounts WHERE user_id=?').get(USER_ONE)!;
+  assert.equal(row.delete_after, Math.ceil(f.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS + 30 * STORAGE_DAY_MS);
+  f.advance(31 * STORAGE_DAY_MS);
+  const get = f.env.CONTAINER_ACCOUNT.get;
+  f.env.CONTAINER_ACCOUNT.get = (() => ({ async fetch() { throw new Error('billing_unavailable'); } })) as any;
+  await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
+  f.env.CONTAINER_ACCOUNT.get = get;
+  await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 1);
+});
+
+test('fresh funding before expiration cancels deletion, even if the D1 account still looks expired', async t => {
+  const f = await fixture(t, 'charge'); f.app();
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000, 'source');
+  await unfund(f);
+  f.sqlite.prepare('UPDATE r2_accounts SET delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, USER_ONE);
+  const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
+  state.wallet.usedUnitMs = 0; f.stored.set('containerAccount', state);
+  await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
+  assert.equal(f.sqlite.prepare('SELECT writes_blocked FROM r2_accounts WHERE user_id=?').get(USER_ONE)!.writes_blocked, 0);
+});
+
+test('expired accounts complete once and sweeps advance beyond the first 20 accounts', async t => {
+  const f = await fixture(t, 'charge');
+  for (let i = 0; i < 25; i++) {
+    const id = `expired-${String(i).padStart(2, '0')}`;
+    f.sqlite.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run(id, `${id}@example.com`, id, new Date(f.now()).toISOString());
+    f.app(`app-${i}`, id);
+    await inventoryObject(f.env, { userId: id, appId: `app-${i}` }, `build-git/${id}/app-${i}/objects/one`, 1, 'source');
+    f.sqlite.prepare('UPDATE r2_accounts SET writes_blocked=1,delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, id);
+  }
+  f.env.CONTAINER_ACCOUNT.get = (() => ({ async fetch(request: Request) {
+    const body = await request.json() as any;
+    return Response.json({ fundedThrough: null, writesBlocked: true, deletionToken: body.action === 'expire' ? body.token : null });
+  } })) as any;
+  await expireUnfundedStorage(f.env); await expireUnfundedStorage(f.env); await expireUnfundedStorage(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_accounts WHERE expired_at IS NOT NULL').get()!.n, 25);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 25);
+});
+
+test('activation charges only full UTC days after enabling billing, never old metering history', async t => {
+  const f = await fixture(t, 'charge');
+  f.sqlite.exec("DELETE FROM r2_meter_state WHERE id='billing_activated_at'");
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000000000, 'source');
+  f.advance(3 * STORAGE_DAY_MS); await runStorageBilling(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_receipts').get()!.n, 0);
+  f.advance(2 * STORAGE_DAY_MS); await runStorageBilling(f.env);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_receipts').get()!.n, 1);
+});
+
+test('platform quota and emergency pause bound physical growth without blocking deletion', async t => {
+  const f = await fixture(t); f.env.R2_PLATFORM_MAX_BYTES = '10';
+  await putStoredObject(f.env, f.owner, f.key('one'), new Uint8Array(6), 'source');
+  await assert.rejects(putStoredObject(f.env, { userId: USER_TWO, appId: 'other' }, `build-git/${USER_TWO}/other/objects/two`, new Uint8Array(5), 'source'), /storage_platform_limit_exceeded/);
+  f.env.R2_WRITES_PAUSED = 'true';
+  await assert.rejects(putStoredObject(f.env, f.owner, f.key('new'), new Uint8Array(1), 'source'), /storage_growth_paused/);
+  await putStoredObject(f.env, f.owner, f.key('one'), new Uint8Array(6), 'source');
+  await deleteStoredObjects(f.env, f.owner, [f.key('one')]);
+  assert.equal(f.storage.objects.size, 0);
+});
+
+test('export limits recover cancelled, completed and failed streams, and allow only six starts per minute', async t => {
+  const f = await fixture(t);
+  const stream = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); } }));
+  const first = await storageReadAccess(f.env, USER_ONE, true, async () => stream());
+  const second = await storageReadAccess(f.env, USER_ONE, true, async () => stream());
+  await assert.rejects(storageReadAccess(f.env, USER_ONE, true, async () => stream()), /storage_export_busy/);
+  await first.body!.cancel(); await second.body!.cancel();
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_export_leases').get()!.n, 0);
+  await assert.rejects(storageReadAccess(f.env, USER_ONE, true, async () => { throw new Error('export_failed'); }), /export_failed/);
+  const complete = await storageReadAccess(f.env, USER_ONE, true, async () => new Response('done'));
+  await complete.text();
+  const sixth = await storageReadAccess(f.env, USER_ONE, true, async () => new Response('done')); await sixth.text();
+  await assert.rejects(storageReadAccess(f.env, USER_ONE, true, async () => new Response('done')), /storage_rate_limited/);
+  f.advance(60000);
+  const resumed = await storageReadAccess(f.env, USER_ONE, true, async () => new Response('done')); await resumed.text();
+});
+
+test('storage health reports backlogs and sends bounded operator alerts', async t => {
+  const f = await fixture(t); f.env.R2_PLATFORM_MAX_BYTES = '10';
+  await inventoryObject(f.env, f.owner, f.key('retained'), 9, 'source');
+  const emails: unknown[] = [];
+  f.env.WELCOME_EMAIL = { async send(message: unknown) { emails.push(message); return {}; } } as unknown as SendEmail;
+  await checkStorageHealth(f.env); await checkStorageHealth(f.env);
+  assert.equal(emails.length, 1);
+  f.advance(STORAGE_DAY_MS); await checkStorageHealth(f.env);
+  assert.equal(emails.length, 2);
+});
+
+test('event streams have their own account slots and share the platform stream ceiling with exports', async t => {
+  const f = await fixture(t);
+  const stream = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); } }));
+  const events = await storageReadAccess(f.env, USER_ONE, false, async () => stream(), true);
+  const otherEvents = await storageReadAccess(f.env, USER_ONE, false, async () => stream(), true);
+  await assert.rejects(storageReadAccess(f.env, USER_ONE, false, async () => stream(), true), /storage_stream_busy/);
+  const exported = await storageReadAccess(f.env, USER_ONE, true, async () => stream());
+  for (let i = 0; i < 97; i++) f.sqlite.prepare('INSERT INTO r2_export_leases VALUES(?,?,?)').run(`other-${i}`, `other-${i}`, f.now() + 60000);
+  await assert.rejects(storageReadAccess(f.env, USER_TWO, true, async () => stream()), /storage_export_busy/);
+  await events.body!.cancel(); await otherEvents.body!.cancel(); await exported.body!.cancel();
+});
+
+test('expired lease bounds abandoned exports and operation budgets fail before a provider read', async t => {
+  const f = await fixture(t);
+  f.sqlite.prepare('INSERT INTO r2_export_leases VALUES(?,?,?)').run('abandoned', USER_ONE, f.now() - 1);
+  const response = await storageReadAccess(f.env, USER_ONE, true, async () => new Response('done')); await response.text();
+  const window = Math.floor(f.now() / 60000);
+  f.sqlite.prepare('INSERT INTO r2_rate_windows VALUES(?,?,?)').run('operations:global', window, 10000);
+  await assert.rejects(getStoredObject(f.env, f.owner, f.key('missing')), /storage_rate_limited/);
+  assert.equal(f.storage.reads.length, 0);
+});
+
+test('lost expiry acknowledgement reconciles the wallet claim without repeating deletion', async t => {
+  const f = await fixture(t, 'charge'); f.app();
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000, 'source');
+  await unfund(f);
+  f.sqlite.prepare('UPDATE r2_accounts SET delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, USER_ONE);
+  const batch = f.env.DB.batch.bind(f.env.DB); let lost = false;
+  f.env.DB.batch = (async statements => {
+    const result = await batch(statements);
+    if (!lost) { lost = true; throw new Error('lost_expiration_ack'); }
+    return result;
+  }) as D1Database['batch'];
+  await expireUnfundedStorage(f.env);
+  const row = () => f.sqlite.prepare('SELECT * FROM r2_accounts WHERE user_id=?').get(USER_ONE)!;
+  assert.ok(row().expiration_token); assert.equal(row().expired_at, f.now());
+  await expireUnfundedStorage(f.env);
+  assert.equal(row().expiration_token, null);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 1);
+});
+
+test('notice grace after paid retention records platform cost without creating customer debt', async t => {
+  const f = await fixture(t, 'charge');
+  await inventoryObject(f.env, f.owner, f.key('retained'), 1000000000, 'source');
+  f.sqlite.prepare('UPDATE r2_accounts SET writes_blocked=1,funded_through=? WHERE user_id=?').run(f.now() - STORAGE_DAY_MS, USER_ONE);
+  f.advance(STORAGE_DAY_MS);
+  await finalizeStorageDay(f.env, '2026-10-01');
+  assert.equal(f.sqlite.prepare('SELECT billable FROM r2_daily_usage').get()!.billable, 0);
+  assert.equal(f.sqlite.prepare('SELECT provider_nano_usd FROM r2_daily_usage').get()!.provider_nano_usd, 500000);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_receipts').get()!.n, 0);
 });

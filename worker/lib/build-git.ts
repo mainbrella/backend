@@ -192,11 +192,14 @@ export async function deleteBuildGit(env: Env, userId: string, appId: string) {
 }
 export async function cleanupDeletedBuildGit(env: Env) {
   if (!env.BUCKET) return;
-  const { results } = await env.DB.prepare('SELECT * FROM build_git_deletions ORDER BY created_at LIMIT 20').all<{ app_id: string; user_id: string }>();
+  const cursor = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='deletion_cursor'").first<{ value: string }>();
+  const { results } = await env.DB.prepare('SELECT * FROM build_git_deletions WHERE app_id>? ORDER BY app_id LIMIT 20').bind(cursor?.value ?? '').all<{ app_id: string; user_id: string }>();
   for (const task of results) {
     try {
       await deleteBuildGit(env, task.user_id, task.app_id);
       await env.DB.prepare('DELETE FROM build_git_deletions WHERE app_id = ?').bind(task.app_id).run();
     } catch { console.error('build_git_deletion_deferred', { appId: task.app_id }); }
   }
+  await env.DB.prepare("INSERT INTO r2_meter_state(id,value) VALUES('deletion_cursor',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    .bind(results.length === 20 ? results.at(-1)!.app_id : '').run();
 }

@@ -1,3 +1,6 @@
+import { storageReadAccess } from '../lib/r2-access';
+import { storageMetered } from '../lib/r2-storage';
+import { storageRetention } from '../lib/r2-retention';
 import { buildModels, resolveBuildModel } from '../lib/build-models';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 import { readCommandBody } from '../../containers/command-contract.js';
@@ -71,7 +74,7 @@ async function detail(env: Env, userId: string, id: string) {
     CASE WHEN json_extract(o.result_json,'$.ok') = 0 THEN o.result_json ELSE NULL END AS result_json
     FROM build_operations o JOIN build_turns t ON t.id = o.turn_id WHERE t.app_id = ? AND t.user_id = ?`)
     .bind(id, userId).all<OperationRow>();
-  return { app: publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost])), operations) };
+  return { app: { ...publicApp(row, results, activity, images, Object.fromEntries(costs.map(row => [row.turn_id, row.cost])), operations), retention: await storageRetention(env, userId) } };
 }
 async function requireBuildAccess(env: Env, userId: string) {
   if (!buildConfigured(env)) throw new BuildError('build_unavailable');
@@ -132,6 +135,23 @@ function turnInsert(env: Env, appId: string, userId: string, turnId: string, key
 }
 
 export async function handleBuildRequest(request: Request, env: Env): Promise<Response> {
+  if (request.method === 'GET' && storageMetered(env) && /\/build\/apps\//.test(new URL(request.url).pathname)) {
+    const cors = authCorsHeaders(request);
+    if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
+    const user = await currentUser(env, request);
+    if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    try {
+      return await storageReadAccess(env, user.id, /\/(repository|export)$/.test(new URL(request.url).pathname), () => buildRequest(request, env), /\/events$/.test(new URL(request.url).pathname));
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      if (['storage_rate_limited', 'storage_export_busy', 'storage_stream_busy'].includes(code)) return authJson({ error: code }, 429, { ...cors, 'Retry-After': '60' });
+      console.error('storage_read_failed');
+      return authJson({ error: 'storage_unavailable' }, 503, cors);
+    }
+  }
+  return buildRequest(request, env);
+}
+async function buildRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -162,6 +182,9 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
       const app = await ownedBuildApp(env, user.id, id);
       if (!app) return authJson({ error: 'app_not_found' }, 404, cors);
       const owner = { userId: user.id, appId: id };
+      const retention = await storageRetention(env, user.id);
+      if (retention.writesBlocked && ['turns', 'restore', 'resume'].includes(match[3]) && request.method === 'POST')
+        return authJson({ error: 'storage_funding_required', retention }, 402, cors);
       const fileInfo = ({ path, size, type }: BuildFileInfo) => ({ path, size, type });
       if (['files', 'file'].includes(match[3])) {
         const versionId = url.searchParams.get('versionId'), path = url.searchParams.get('path');

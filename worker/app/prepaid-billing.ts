@@ -24,7 +24,7 @@ export async function handlePrepaidBillingRequest(request: Request, env: Billing
       if (!Number.isInteger(limit) || limit < 1 || limit > 100 || [...query.keys()].some(key => !['limit', 'resourceCursor', 'fundingCursor'].includes(key))
         || ['resourceCursor', 'fundingCursor'].some(key => query.has(key) && (!query.get(key) || query.get(key)!.length > 200))) return authJson({ error: 'invalid_request' }, 400, cors);
       const history = await accountBillingRequest<PrepaidHistory>(env, user.id, `/billing/history${url.search}`);
-      return authJson({ ...history, ...(storageMetered(env) ? { storage: await storageBillingSummary(env, user.id) } : {}) }, 200, cors);
+      return authJson({ ...history, ...(storageMetered(env) ? { storage: await storageBillingSummary(env, user.id, true) } : {}) }, 200, cors);
     }
     const body = await readJSON(request, 4096);
     if (!body) return authJson({ error: 'invalid_request' }, 400, cors);

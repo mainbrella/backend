@@ -252,7 +252,7 @@ test('funding history reports original credits and current deductions with purch
   f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 100 });
   f.wallet.applyFunding(f.state, { ...f.payment, id: 'cs_free', createdAt: f.now() + 1, disputed: true });
   const first = f.wallet.history(f.state, { limit: 1 });
-  assert.deepEqual(first.totals, { fundedCents: 1000, revokedCents: 600, usedCents: 0, unattributedUsedCents: 0, inferenceUsedCents: 0 });
+  assert.deepEqual(first.totals, { fundedCents: 1000, revokedCents: 600, usedCents: 0, unattributedUsedCents: 0, inferenceUsedCents: 0, storageUsedCents: 0 });
   assert.deepEqual(first.fundings[0], { id: 'cs_free', createdAt: f.now() + 1, amountCents: 500, revokedCents: 500, reason: 'dispute' });
   const second = f.wallet.history(f.state, { limit: 1, fundingCursor: first.nextFundingCursor });
   assert.deepEqual(second.fundings[0], { id: 'pi_paid', createdAt: f.payment.createdAt, amountCents: 500, revokedCents: 100, reason: 'refund' });
@@ -325,4 +325,41 @@ test('automatic recharge resumes under a new month allowance and persists before
   assert.equal(attempts.length, 1);
   assert.equal(f.wallet.status(f.state).autoRecharge.spentCents, 500);
   assert.equal(f.wallet.status(f.state).balanceCents, 500);
+});
+
+test('storage reserves 30 days, protects credit from compute, and expiration fences renewal until completion', () => {
+  const f = fixture();
+  const input = { action: 'reserve', bytes: 1000000000, retentionNanoUsd: 18000000, retentionDays: 30 };
+  const funded = f.wallet.storage(f.state, input);
+  assert.equal(funded.fundedThrough, f.now() + 30 * 86400000);
+  assert.ok(f.wallet.metrics(f.state).storageReserved > 0);
+  f.state.wallet.usedUnitMs = 500 * UNIT_MS_PER_CENT;
+  const token = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  assert.equal(f.wallet.storage(f.state, { ...input, action: 'expire', token }).deletionToken, null);
+  f.advance(31 * 86400000);
+  const claim = f.wallet.storage(f.state, { ...input, action: 'expire', token });
+  assert.equal(claim.deletionToken, token);
+  // A top-up after the serialized claim cannot race a new hold against deletion.
+  f.state.wallet.usedUnitMs = 0;
+  assert.throws(() => f.wallet.storage(f.state, input), /storage_expiration_in_progress/);
+  assert.equal(f.wallet.storage(f.state, { ...input, action: 'expire', token }).deletionToken, token);
+  f.wallet.storage(f.state, { action: 'finish_expiration', token });
+  f.wallet.storage(f.state, { action: 'finish_expiration', token });
+  assert.equal(f.wallet.storage(f.state, input).writesBlocked, false);
+});
+
+test('refunds invalidate cached funding, and a legacy expiration claim survives a new wallet', () => {
+  const f = fixture();
+  const input = { action: 'reserve', bytes: 1000000000, retentionNanoUsd: 18000000, retentionDays: 30 };
+  f.wallet.storage(f.state, input);
+  f.wallet.applyFunding(f.state, { ...f.payment, refundedCents: 500 });
+  assert.equal(f.wallet.storage(f.state, input).writesBlocked, true);
+  const legacy = { userId: 'legacy', leases: {}, production: {} };
+  const token = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  assert.equal(f.wallet.storage(legacy, { ...input, action: 'expire', token }).deletionToken, token);
+  f.wallet.applyFunding(legacy, f.payment);
+  assert.throws(() => f.wallet.storage(legacy, input), /storage_expiration_in_progress/);
+  assert.equal(f.wallet.storage(legacy, { ...input, action: 'expire', token }).deletionToken, token);
+  f.wallet.storage(legacy, { action: 'finish_expiration', token });
+  assert.equal(f.wallet.storage(legacy, input).writesBlocked, false);
 });

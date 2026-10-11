@@ -427,6 +427,20 @@ test('Build commit schemas document the file limit and complete prepaid storage 
   assert.match(turns.description, /25 MiB \(26,214,400 uncompressed bytes\)/);
   assert.match(turns.description, /storage_funding_required/);
   assert.match(turns.description, /build_git_file_limit/);
-  assert.match(turns.description, /seven-day retention/);
+  assert.match(turns.description, /30-day retention/);
   assert.match(paths['/build/apps/{appId}/restore'].post.description, /storage_funding_required/);
+});
+
+
+test('Storage schemas expose 30-day warnings, exact deletion dates, exports and throttling', async () => {
+  const { paths, components } = await document();
+  const summary = components.schemas.StorageBillingSummary;
+  assert.deepEqual(summary.properties.pricing.properties.retentionDays.enum, [30]);
+  assert.ok(components.schemas.StorageRetention.properties.deletionAt);
+  assert.ok(summary.properties.projects.items.properties.exportUrl);
+  assert.match(paths['/billing/storage'].get.description, /undelivered warning blocks deletion/);
+  const repository = paths['/build/apps/{appId}/repository'].get;
+  assert.ok(repository.responses[429]);
+  assert.match(repository.description, /two concurrent exports/);
+  assert.ok(paths['/build/apps/{appId}'].get.responses[200].content['application/json'].schema.properties.app.allOf[1].properties.retention);
 });

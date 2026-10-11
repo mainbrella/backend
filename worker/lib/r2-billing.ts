@@ -1,3 +1,4 @@
+import { storageRetention, markStorageWarning } from './r2-retention';
 import { accountBillingRequest } from './prepaid-billing';
 import { reserveStorage, storageMetered, storagePricing, storageCharging, STORAGE_DAY_MS } from './r2-storage';
 
@@ -29,12 +30,16 @@ export async function finalizeStorageDay(env: Env, day: string) {
       COALESCE(SUM(status<>'completed'),0) AS unknown FROM r2_operations WHERE user_id=? AND app_id=? AND started_at>=? AND started_at<?`)
       .bind(owner.user_id, owner.app_id, start, end).first<{ a: number; b: number; unknown: number }>();
     const cost = dailyStorageCost(peak!.bytes, ops!.a, ops!.b, pricing.markupBps);
-    let billable = storageCharging(env, start) && owner.user_id !== 'mainbrella';
+    const activation = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='billing_activated_at'").first<{ value: string }>();
+    let billable = storageCharging(env, start) && start >= Number(activation?.value ?? Infinity) && owner.user_id !== 'mainbrella';
     if (billable) {
       const account = await accountBillingRequest<{ hasWallet: boolean }>(env, owner.user_id, '/billing/storage', { action: 'status' });
       // Unfunded legacy inventory is a platform expense until a wallet exists;
       // failed renewal still queues deletion rather than retaining it forever.
-      billable = account.hasWallet;
+      const retention = await env.DB.prepare('SELECT funded_through,writes_blocked,expired_at FROM r2_accounts WHERE user_id=?').bind(owner.user_id)
+        .first<{ funded_through: number | null; writes_blocked: number; expired_at: number | null }>();
+      // Notice grace after paid retention is a platform expense, not new debt.
+      billable = account.hasWallet && !(retention?.writes_blocked && (retention.funded_through ?? 0) <= start);
     }
     const id = `r2:daily:${day}:${owner.user_id}:${owner.app_id}`;
     const evidence = JSON.stringify({ day, appId: owner.app_id, peakBytes: peak!.bytes, classA: ops!.a, classB: ops!.b,
@@ -49,7 +54,8 @@ export async function finalizeStorageDay(env: Env, day: string) {
   }
 }
 export async function settleStorageReceipts(env: Env) {
-  const rows = await env.DB.prepare('SELECT * FROM r2_receipts WHERE settled=0 ORDER BY occurred_at,id LIMIT 100')
+  const cursor = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='receipt_cursor'").first<{ value: string }>();
+  const rows = await env.DB.prepare('SELECT * FROM r2_receipts WHERE settled=0 AND id>? ORDER BY id LIMIT 100').bind(cursor?.value ?? '')
     .all<{ id: string; user_id: string; occurred_at: number; cost_nano_usd: number; evidence: string }>();
   for (const row of rows.results) {
     try {
@@ -62,9 +68,13 @@ export async function settleStorageReceipts(env: Env) {
       ]);
     } catch { console.error('storage_settlement_deferred', { receiptId: row.id }); }
   }
+  await env.DB.prepare("INSERT INTO r2_meter_state(id,value) VALUES('receipt_cursor',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    .bind(rows.results.length === 100 ? rows.results.at(-1)!.id : '').run();
 }
 export async function runStorageBilling(env: Env) {
   if (!storageMetered(env)) return;
+  if (storageCharging(env)) await env.DB.prepare("INSERT INTO r2_meter_state(id,value) VALUES('billing_activated_at',?) ON CONFLICT(id) DO NOTHING")
+    .bind(String(Math.ceil(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS)).run();
   const state = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='settled_day'").first<{ value: string }>();
   const earliest = await env.DB.prepare(`SELECT MIN(at) AS at FROM (SELECT MIN(at) AS at FROM r2_object_events UNION ALL SELECT MIN(started_at) AS at FROM r2_operations)`).first<{ at: number | null }>();
   let start = state ? dayStart(state.value) + STORAGE_DAY_MS : Math.floor((earliest?.at ?? Date.now()) / STORAGE_DAY_MS) * STORAGE_DAY_MS;
@@ -76,7 +86,7 @@ export async function runStorageBilling(env: Env) {
   }
   await settleStorageReceipts(env);
   if (storageCharging(env)) {
-    const accounts = await env.DB.prepare(`SELECT user_id FROM r2_accounts WHERE user_id<>'mainbrella' ORDER BY user_id`).all<{ user_id: string }>();
+    const accounts = await env.DB.prepare(`SELECT user_id FROM r2_accounts WHERE user_id<>'mainbrella' AND expired_at IS NULL ORDER BY user_id`).all<{ user_id: string }>();
     for (const row of accounts.results) {
       try { await reserveStorage(env, row.user_id); }
       catch { console.error('storage_renewal_deferred', { userId: row.user_id }); }
@@ -157,8 +167,12 @@ export async function reconcileStorageInvoice(env: Env, invoice: StorageInvoice)
   return result;
 }
 
-export async function storageBillingSummary(env: Env, userId: string) {
+export async function storageBillingSummary(env: Env, userId: string, deliverWarning = false) {
   const pricing = storagePricing(env), month = new Date().toISOString().slice(0, 7);
+  if (pricing.mode === 'charge') {
+    const activation = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='billing_activated_at'").first<{ value: string }>();
+    pricing.chargeFrom = Math.max(pricing.chargeFrom!, Number(activation?.value ?? Math.ceil(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS));
+  }
   const { results: projects } = await env.DB.prepare(`SELECT app_id AS appId,MAX(a.name) AS name,
     SUM(CASE WHEN o.state='live' AND o.deleted_at IS NULL THEN o.size ELSE 0 END) AS storedBytes,
     SUM(CASE WHEN o.state='live' AND o.deleted_at IS NULL AND o.purpose<>'history' THEN o.size ELSE 0 END) AS sourceAssetsBytes,
@@ -176,11 +190,16 @@ export async function storageBillingSummary(env: Env, userId: string) {
       .bind(userId, project.appId, dayStart(`${month}-01`)).first<{ cost: number; adjustment: number }>();
     const todayOps = await env.DB.prepare(`SELECT COALESCE(SUM(category='a'),0) AS a,COALESCE(SUM(category='b'),0) AS b FROM r2_operations
       WHERE user_id=? AND app_id=? AND started_at>=?`).bind(userId, project.appId, Math.floor(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS).first<{ a: number; b: number }>();
-    values.push({ ...project, chargedCents: charged!.cost / 10000000,
+    values.push({ ...project, exportUrl: `/build/apps/${project.appId}/repository`, sourceExportUrl: `/build/apps/${project.appId}/export`, chargedCents: charged!.cost / 10000000,
       estimatedMonthlyCents: project.storedBytes / 1e9 * 1.5 * (1 + pricing.markupBps / 10000),
       cloudflareCents: usage!.provider / 10000000, markupCents: (usage!.estimated - usage!.provider) / 10000000,
       adjustmentCents: charged!.adjustment / 10000000, writes: usage!.a + todayOps!.a, reads: usage!.b + todayOps!.b,
       fundedThrough: account?.funded_through ?? null, writesBlocked: Boolean(account?.writes_blocked) });
   }
-  return { month, pricing, maxBytes: account?.max_bytes ?? pricing.maxBytes, projects: values };
+  let retention = await storageRetention(env, userId);
+  if (deliverWarning && retention.deletionAt !== null && retention.warningDeliveredAt === null) {
+    await markStorageWarning(env, userId, retention.deletionAt);
+    retention = await storageRetention(env, userId);
+  }
+  return { month, pricing, retention, maxBytes: account?.max_bytes ?? pricing.maxBytes, projects: values };
 }

@@ -349,7 +349,7 @@ export class ContainerAccountController {
           return this.respond({ asOf, usedUnitMs, fundings, pendingEvents: Object.keys(state.wallet?.accounting?.pending ?? {}).length });
         }
         if (path === '/billing/storage') {
-          if (body.action === 'reserve') await this.billing.wallet.maybeRecharge(state);
+          if (body.action === 'reserve' || body.action === 'expire') await this.billing.wallet.maybeRecharge(state);
           const result = this.billing.wallet.storage(state, body);
           await this.saveState(state);
           return this.respond(result);

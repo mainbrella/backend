@@ -27,7 +27,10 @@
 	},
 	"vars": {
 		"BUILD_ENABLED": "true",
-		"R2_BILLING_MODE": "meter",
+		"R2_BILLING_MODE": "charge",
+		"R2_CHARGE_FROM": "2026-10-11T00:00:00Z",
+		"R2_PLATFORM_MAX_BYTES": "1000000000000",
+		"R2_WRITES_PAUSED": "false",
 		"R2_MARKUP_BPS": "2000",
 		"R2_ACCOUNT_MAX_BYTES": "10000000000",
 		"BUILD_MODEL": "@cf/zai-org/glm-5.3",

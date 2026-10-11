@@ -42,6 +42,8 @@ interface Env {
   R2_CHARGE_FROM?: string;
   R2_MARKUP_BPS?: string;
   R2_ACCOUNT_MAX_BYTES?: string;
+  R2_PLATFORM_MAX_BYTES?: string;
+  R2_WRITES_PAUSED?: string;
   ANONYMOUS_SIGNUP_LIMIT?: RateLimit;
   ACQUISITION_ENABLED?: string;
   ACQUISITION_SUBMISSION_LIMIT?: RateLimit;

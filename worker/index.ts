@@ -1,3 +1,5 @@
+import { notifyStorageRetention } from './lib/r2-retention';
+import { checkStorageHealth } from './lib/r2-health';
 import { runStorageBilling } from './lib/r2-billing';
 import { inventoryStoragePage, cleanupStorageOrphans, expireUnfundedStorage } from './lib/r2-maintenance';
 import { handleRequest } from "./app/router";
@@ -5,6 +7,7 @@ import { AppState } from "./durable-objects/app-state";
 import { collectStatus } from './app/status';
 import { handleApplicationGateway } from './preview-gateway';
 import { reconcileAcquisitionBilling } from './lib/acquisition-billing';
+import { cleanupDeletedBuildGit } from './lib/build-git';
 import { reconcileBuildTurns } from './app/build';
 
 export { AppState };
@@ -23,9 +26,12 @@ export default {
     ctx.waitUntil((async () => {
       await inventoryStoragePage(env);
       await runStorageBilling(env);
+      await notifyStorageRetention(env);
       await expireUnfundedStorage(env);
+      await cleanupDeletedBuildGit(env);
       await cleanupStorageOrphans(env);
     })().catch(() => { console.error('storage_reconciliation_failed'); }));
+    ctx.waitUntil(checkStorageHealth(env).catch(() => { console.error('storage_health_check_failed'); }));
     ctx.waitUntil(reconcileBuildTurns(env).catch(() => { console.error('build_reconciliation_failed'); }));
     ctx.waitUntil(collectStatus(env).catch(() => { console.error('status_collection_failed'); }));
     if (env.ACQUISITION_ENABLED === 'true') {

@@ -133,27 +133,50 @@ export class PrepaidWallet {
   }
   storage(state, input) {
     const integer = value => Number.isSafeInteger(value) && value >= 0;
-    if (!input || !['reserve', 'settle', 'status'].includes(input.action)) throw new Error('invalid_request');
+    if (!input || !['reserve', 'settle', 'status', 'expire', 'finish_expiration'].includes(input.action)) throw new Error('invalid_request');
     const wallet = state.wallet;
     if (input.action === 'status') return { fundedThrough: wallet?.storageHold?.fundedThrough ?? null, writesBlocked: Boolean(wallet?.storageHold?.writesBlocked), hasWallet: Boolean(wallet) };
+    if (input.action === 'finish_expiration') {
+      if (state.storageDeletionToken && state.storageDeletionToken !== input.token) throw new Error('storage_expiration_conflict');
+      delete state.storageDeletionToken;
+      if (wallet?.storageDeletionToken && wallet.storageDeletionToken !== input.token) throw new Error('storage_expiration_conflict');
+      if (wallet?.storageDeletionToken) { delete wallet.storageHold; delete wallet.storageDeletionToken; }
+      return this.storage(state, { action: 'status' });
+    }
+    if (input.action === 'expire') {
+      if (typeof input.token !== 'string' || !/^[a-f0-9-]{36}$/.test(input.token)) throw new Error('invalid_request');
+      const pendingToken = wallet?.storageDeletionToken || state.storageDeletionToken;
+      if (pendingToken) {
+        if (pendingToken !== input.token) throw new Error('storage_expiration_conflict');
+        return { ...this.storage(state, { action: 'status' }), writesBlocked: true, deletionToken: input.token };
+      }
+      const result = wallet ? this.storage(state, { ...input, action: 'reserve' }) : { fundedThrough: null, writesBlocked: true };
+      if (!result.writesBlocked || (result.fundedThrough ?? 0) > this.account.now()) return { ...result, deletionToken: null };
+      // Serialized with funding and reservations. Once claimed, a top-up cannot
+      // race a new reservation against irreversible reference deletion.
+      if (wallet) wallet.storageDeletionToken = input.token;
+      else state.storageDeletionToken = input.token;
+      return { ...result, deletionToken: input.token };
+    }
+    if (input.action === 'reserve' && (wallet?.storageDeletionToken || state.storageDeletionToken)) throw new Error('storage_expiration_in_progress');
     if (!wallet) throw new Error('insufficient_balance');
     const now = this.account.now();
     if (input.action === 'reserve') {
-      if (!integer(input.bytes) || !integer(input.retentionNanoUsd) || input.retentionDays !== 7) throw new Error('invalid_request');
+      if (!integer(input.bytes) || !integer(input.retentionNanoUsd) || ![7, 30].includes(input.retentionDays)) throw new Error('invalid_request');
       const previous = wallet.storageHold;
       if (!input.bytes) { delete wallet.storageHold; return { fundedThrough: null, writesBlocked: false }; }
-      if (previous && previous.bytes === input.bytes && !previous.writesBlocked && previous.fundedThrough > now + 6 * 86400000
-        && previous.remainingNanoUsd >= input.retentionNanoUsd) return this.storage(state, { action: 'status' });
       const m = this.metrics(state), required = input.retentionNanoUsd * STORAGE_UNITS_PER_NANO_USD;
       const funded = !wallet.fundingRevoked && m.remaining + m.storageReserved >= required
         && (state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - m.monthReserved + m.storageReserved >= required;
       if (!funded) {
         // Keep the original paid deadline and remaining hold. A failed renewal
-        // must never start another unfunded seven-day grace period.
+        // must never start another unfunded retention period.
         if (previous) previous.writesBlocked = true;
         return { fundedThrough: previous?.fundedThrough ?? null, writesBlocked: true };
       }
-      wallet.storageHold = { bytes: input.bytes, remainingNanoUsd: input.retentionNanoUsd, fundedThrough: now + 7 * 86400000, writesBlocked: false };
+      if (previous && previous.bytes === input.bytes && !previous.writesBlocked && previous.fundedThrough > now + (input.retentionDays - 1) * 86400000
+        && previous.remainingNanoUsd >= input.retentionNanoUsd) return this.storage(state, { action: 'status' });
+      wallet.storageHold = { bytes: input.bytes, remainingNanoUsd: input.retentionNanoUsd, fundedThrough: now + input.retentionDays * 86400000, writesBlocked: false };
       return this.storage(state, { action: 'status' });
     }
     if (typeof input.id !== 'string' || !/^r2:[A-Za-z0-9:_-]{1,240}$/.test(input.id) || !Number.isSafeInteger(input.costNanoUsd)

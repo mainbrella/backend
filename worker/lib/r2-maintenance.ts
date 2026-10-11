@@ -1,3 +1,4 @@
+import type { RetentionRow } from './r2-retention';
 import { buildContentHash } from './build-storage';
 import { BUILD_GIT_IGNORE } from './build-git';
 import { readBuildGitBundle, type BuildGitBundle } from './build-git-bundle';
@@ -111,19 +112,22 @@ export async function cleanupStorageOrphans(env: Env) {
 
 export async function expireUnfundedStorage(env: Env) {
   if (!storageCharging(env)) return;
-  const rows = await env.DB.prepare(`SELECT a.user_id FROM r2_accounts a WHERE a.writes_blocked=1 AND (a.funded_through IS NULL OR a.funded_through<=?)
-    AND NOT EXISTS(SELECT 1 FROM r2_receipts r WHERE r.user_id=a.user_id AND r.settled=0) LIMIT 20`).bind(Date.now()).all<{ user_id: string }>();
-  for (const row of rows.results) {
-    // Fence agents before removing the database references. The durable queue
-    // owns physical deletion, including after account records are gone.
-    await env.DB.batch([
-      env.DB.prepare(`INSERT INTO build_git_deletions(app_id,user_id,created_at) SELECT id,user_id,? FROM build_apps WHERE user_id=? ON CONFLICT(app_id) DO NOTHING`).bind(new Date().toISOString(), row.user_id),
-      env.DB.prepare("UPDATE build_turns SET status='failed',error='storage_retention_expired',finished_at=? WHERE user_id=? AND status IN ('queued','running')").bind(new Date().toISOString(), row.user_id),
-      env.DB.prepare("UPDATE build_operations SET source_json=NULL,result_json=NULL WHERE turn_id IN(SELECT id FROM build_turns WHERE user_id=?)").bind(row.user_id),
-      env.DB.prepare('DELETE FROM build_git_versions WHERE app_id IN(SELECT id FROM build_apps WHERE user_id=?)').bind(row.user_id),
-      env.DB.prepare('DELETE FROM build_revisions WHERE app_id IN(SELECT id FROM build_apps WHERE user_id=?)').bind(row.user_id),
-      env.DB.prepare('DELETE FROM build_images WHERE app_id IN(SELECT id FROM build_apps WHERE user_id=?)').bind(row.user_id),
-      env.DB.prepare("UPDATE build_apps SET source_json='{}',git_version_id=NULL,verified_git_version_id=NULL,active_turn_id=NULL WHERE user_id=?").bind(row.user_id),
-    ]);
+  const { expireStorageAccount, finishStorageExpiration } = await import('./r2-retention');
+  const unfinished = await env.DB.prepare('SELECT user_id,expiration_token FROM r2_accounts WHERE expired_at IS NOT NULL AND expiration_token IS NOT NULL LIMIT 20')
+    .all<{ user_id: string; expiration_token: string }>();
+  for (const row of unfinished.results) {
+    try { await finishStorageExpiration(env, row.user_id, row.expiration_token); }
+    catch { console.error('storage_expiration_finish_deferred', { userId: row.user_id }); }
   }
+  const cursor = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='expiry_cursor'").first<{ value: string }>();
+  const rows = await env.DB.prepare(`SELECT a.* FROM r2_accounts a WHERE a.writes_blocked=1 AND a.expired_at IS NULL
+    AND a.delete_after<=? AND a.warned_at IS NOT NULL AND a.user_id>?
+    AND NOT EXISTS(SELECT 1 FROM r2_receipts r WHERE r.user_id=a.user_id AND r.settled=0) ORDER BY a.user_id LIMIT 20`)
+    .bind(Date.now(), cursor?.value ?? '').all<RetentionRow>();
+  for (const row of rows.results) {
+    try { await expireStorageAccount(env, row); }
+    catch { console.error('storage_expiration_deferred', { userId: row.user_id }); }
+  }
+  await env.DB.prepare("INSERT INTO r2_meter_state(id,value) VALUES('expiry_cursor',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    .bind(rows.results.length === 20 ? rows.results.at(-1)!.user_id : '').run();
 }

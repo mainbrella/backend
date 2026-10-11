@@ -1,3 +1,4 @@
+import { storageRetention, markStorageWarning } from '../lib/r2-retention';
 import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
 import { ADMIN_EMAIL } from './admin';
 import { reconcileStorageInvoice, storageBillingSummary, type StorageInvoice } from '../lib/r2-billing';
@@ -18,9 +19,16 @@ export async function handleStorageBillingRequest(request: Request, env: Env) {
     if (admin && user.email?.trim().toLowerCase() !== ADMIN_EMAIL) return authJson({ error: 'forbidden' }, 403, cors);
     if (!storageMetered(env)) {
       if (admin) return authJson({ error: 'storage_unavailable' }, 503, cors);
-      return authJson({ month: new Date().toISOString().slice(0, 7), pricing: storagePricing(env), maxBytes: storagePricing(env).maxBytes, projects: [] }, 200, cors);
+      return authJson({ month: new Date().toISOString().slice(0, 7), pricing: storagePricing(env), maxBytes: storagePricing(env).maxBytes, projects: [], retention: await storageRetention(env, user.id) }, 200, cors);
     }
-    if (!admin) return authJson(await storageBillingSummary(env, user.id), 200, cors);
+    if (!admin) {
+      const summary = await storageBillingSummary(env, user.id);
+      if (summary.retention.deletionAt !== null && summary.retention.warningDeliveredAt === null) {
+        await markStorageWarning(env, user.id, summary.retention.deletionAt);
+        summary.retention = await storageRetention(env, user.id);
+      }
+      return authJson(summary, 200, cors);
+    }
     if (request.method === 'GET') {
       const rows = await env.DB.prepare('SELECT evidence FROM r2_invoices ORDER BY month DESC LIMIT 100').all<{ evidence: string }>();
       return authJson({ invoices: rows.results.map(row => JSON.parse(row.evidence)) }, 200, cors);

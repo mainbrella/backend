@@ -3,9 +3,11 @@ import { cookieSecurity, errors, jsonResponse, register, requestBody, type Legac
 
 export const storagePricingSchema = z.object({
   mode: z.enum(['off', 'meter', 'charge']), markupBps: z.number(), maxBytes: z.number(), chargeFrom: z.number().nullable(),
-  storageUsdPerGbMonth: z.literal(0.015), classAUsdPerMillion: z.literal(4.5), classBUsdPerMillion: z.literal(0.36), retentionDays: z.literal(7),
+  storageUsdPerGbMonth: z.literal(0.015), classAUsdPerMillion: z.literal(4.5), classBUsdPerMillion: z.literal(0.36), retentionDays: z.literal(30),
 });
-export const storageSummarySchema = z.object({ month: z.string(), maxBytes: z.number(), pricing: storagePricingSchema, projects: z.array(z.object({ appId: z.string(), name: z.string().nullable(), storedBytes: z.number(), sourceAssetsBytes: z.number(), historyBytes: z.number(),
+export const storageRetentionSchema = z.object({ writesBlocked: z.boolean(), deletionAt: z.number().nullable(), notice: z.string().nullable(),
+  warningDeliveredAt: z.number().nullable(), expiredAt: z.number().nullable() }).openapi('StorageRetention');
+export const storageSummarySchema = z.object({ month: z.string(), maxBytes: z.number(), retention: storageRetentionSchema, pricing: storagePricingSchema, projects: z.array(z.object({ appId: z.string(), exportUrl: z.string(), sourceExportUrl: z.string(), name: z.string().nullable(), storedBytes: z.number(), sourceAssetsBytes: z.number(), historyBytes: z.number(),
   chargedCents: z.number(), estimatedMonthlyCents: z.number(), cloudflareCents: z.number(), markupCents: z.number(), adjustmentCents: z.number(),
   writes: z.number(), reads: z.number(), fundedThrough: z.number().nullable(), writesBlocked: z.boolean() })) }).openapi('StorageBillingSummary');
 const nano = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -18,7 +20,7 @@ const reconciliation = z.object({ invoice, platformNanoUsd: nano,
 export function registerStorageBillingRoutes(api: OpenAPIApi, handler: LegacyHandler) {
   register(api, 'get', '/billing/storage', { operationId: 'getStorageBilling', tags: ['Billing'], security: cookieSecurity,
     summary: 'Get retained Storage and Git usage by project',
-    description: 'Storage consumes balance while files/history remain retained, including stopped apps. Meter mode records usage without deductions. Daily deductions start prospectively at chargeFrom, use Standard daily peaks over 30 days plus provider operations, and are provisional until category invoice reconciliation. Funded seven-day retention is reserved before growth; failed renewal blocks writes, leaves exports available until fundedThrough, then deletes retained source/history. Estimates exclude account free-tier and billing-unit adjustments; egress and deletes are free.',
+    description: 'Storage consumes balance while files/history remain retained, including stopped apps. Meter mode records usage without deductions. Daily deductions start prospectively at chargeFrom, use Standard daily peaks over 30 days plus provider operations, and are provisional until category invoice reconciliation. Funded 30-day retention is reserved before growth. Failed renewal blocks writes and creates a deletionAt deadline. Users receive an initial warning and seven-day/one-day reminders. Delivery of the first warning via email or this authenticated API guarantees at least 30 days to add funds or export; an undelivered warning blocks deletion. deletionAt, rather than fundedThrough, includes any platform-funded notice grace. Days after paid retention while writes are blocked are a platform expense and do not debit customer credit. exportUrl and sourceExportUrl provide owner-authenticated downloads. Before deletion, the serialized wallet rechecks funding and claims expiration; renewal cancels warnings and deletion. Billing starts with the first full UTC day of activation, without charging earlier metering history. Billing outages defer deletion and generate operator alerts. Estimates exclude account free-tier and billing-unit adjustments; egress and deletes are free.',
     responses: { 200: jsonResponse(storageSummarySchema), ...errors(400, 401, 403, 503) } }, handler);
   register(api, 'get', '/admin/accounting/storage-invoices', { operationId: 'listStorageInvoices', tags: ['Admin'], security: cookieSecurity,
     summary: 'List immutable R2 invoice allocations', description: 'Admin only. Includes provider evidence, separately allocated Mainbrella costs, markup and customer adjustments.',

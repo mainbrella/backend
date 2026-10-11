@@ -4,7 +4,7 @@ export type StorageOwner = { userId: string; appId: string };
 export type StoragePurpose = 'source' | 'assets' | 'history' | 'diagnostics' | 'platform';
 export const PLATFORM_STORAGE: StorageOwner = { userId: 'mainbrella', appId: 'platform' };
 export const STORAGE_DAY_MS = 86400000;
-export const STORAGE_RETENTION_DAYS = 7;
+export const STORAGE_RETENTION_DAYS = 30;
 export function storagePricing(env: Env) {
   const markupBps = Number(env.R2_MARKUP_BPS ?? 2000);
   const maxBytes = Number(env.R2_ACCOUNT_MAX_BYTES ?? 10000000000);
@@ -28,6 +28,7 @@ function ownedKey(owner: StorageOwner, key: string) {
 }
 async function operation<T>(env: Env, owner: StorageOwner, name: 'put' | 'get' | 'head' | 'list' | 'delete', action: () => Promise<T>): Promise<T> {
   if (!storageMetered(env)) return action();
+  if (name !== 'delete') await storageRateLimit(env, 'operations:global', 10000);
   const id = crypto.randomUUID();
   // An attempt identity belongs to a provider request, never to a billing retry.
   // Unknown outcomes remain evidence and are resolved against the invoice.
@@ -45,28 +46,25 @@ async function operation<T>(env: Env, owner: StorageOwner, name: 'put' | 'get' |
 export async function reserveStorage(env: Env, userId: string, projected = { bytes: 0, writes: 1, requireFunding: false }) {
   if ((!projected.requireFunding && !storageCharging(env)) || userId === 'mainbrella') return null;
   const pricing = storagePricing(env);
-  const ready = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='inventory_complete'").first();
-  if (!ready && storageMetered(env)) throw new Error('storage_metering_incomplete');
-  const row = await env.DB.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM r2_objects WHERE user_id=? AND deleted_at IS NULL').bind(userId).first<{ bytes: number }>();
-  const today = Math.floor(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS;
-  const peak = await env.DB.prepare(`WITH sizes AS(SELECT app_id,at,delta,
-    SUM(delta) OVER(PARTITION BY app_id ORDER BY at,sequence ROWS UNBOUNDED PRECEDING) AS bytes FROM r2_object_events WHERE user_id=?)
-    SELECT COALESCE(SUM(peak),0) AS bytes FROM(SELECT app_id,
-      MAX(COALESCE(MAX(CASE WHEN at>=? THEN MAX(bytes,bytes-delta) END),0),SUM(delta)) AS peak FROM sizes GROUP BY app_id)`)
-    .bind(userId, today).first<{ bytes: number }>();
-  const operations = await env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN category='a' THEN 4500 WHEN category='b' THEN 360 ELSE 0 END),0) AS nano FROM r2_operations o
-    WHERE user_id=? AND NOT EXISTS(SELECT 1 FROM r2_daily_usage d WHERE d.user_id=o.user_id AND d.app_id=o.app_id AND d.day=strftime('%Y-%m-%d',o.started_at/1000,'unixepoch'))`).bind(userId).first<{ nano: number }>();
-  const bytes = row!.bytes + projected.bytes;
+  const quote = await storageFundingQuote(env, userId, projected);
   let result: { fundedThrough: number | null; writesBlocked: boolean };
   try { result = await accountBillingRequest<{ fundedThrough: number | null; writesBlocked: boolean }>(env, userId, '/billing/storage', {
-    action: 'reserve', bytes, retentionNanoUsd: storageRetentionNanoUsd(bytes, pricing.markupBps)
-      + Math.ceil((operations!.nano + 4500 * projected.writes + Math.max(peak!.bytes, bytes) / 2000) * (1 + pricing.markupBps / 10000)), retentionDays: STORAGE_RETENTION_DAYS,
+    action: 'reserve', ...quote,
   }); } catch (error) {
     if (!(error instanceof Error) || !['insufficient_balance', 'spend_limit_exceeded'].includes(error.message)) throw error;
     const saved = await env.DB.prepare('SELECT funded_through FROM r2_accounts WHERE user_id=?').bind(userId).first<{ funded_through: number | null }>();
     result = { fundedThrough: saved?.funded_through ?? null, writesBlocked: true };
   }
-  await env.DB.prepare('UPDATE r2_accounts SET funded_through=?,writes_blocked=? WHERE user_id=?').bind(result.fundedThrough, result.writesBlocked ? 1 : 0, userId).run();
+  await env.DB.prepare(`INSERT INTO r2_accounts(user_id,max_bytes) VALUES(?,?) ON CONFLICT(user_id) DO NOTHING`).bind(userId, pricing.maxBytes).run();
+  if (result.writesBlocked) {
+    await env.DB.prepare(`UPDATE r2_accounts SET funded_through=?,writes_blocked=1,
+      blocked_since=COALESCE(blocked_since,?),delete_after=COALESCE(delete_after,MAX(COALESCE(?,0),?)) WHERE user_id=? AND expired_at IS NULL`)
+      .bind(result.fundedThrough, Date.now(), result.fundedThrough, Date.now() + STORAGE_RETENTION_DAYS * STORAGE_DAY_MS, userId).run();
+  } else {
+    await env.DB.prepare(`UPDATE r2_accounts SET funded_through=?,writes_blocked=0,blocked_since=NULL,delete_after=NULL,
+      warned_at=NULL,email_warned_at=NULL,reminder_seven_at=NULL,reminder_one_at=NULL,expired_at=NULL,expiration_token=NULL WHERE user_id=?`)
+      .bind(result.fundedThrough, userId).run();
+  }
   return result;
 }
 export async function inventoryObject(env: Env, owner: StorageOwner, key: string, size: number, purpose: StoragePurpose, at = Date.now(), state: 'live' | 'pending' = 'live') {
@@ -106,6 +104,7 @@ async function putObject(env: Env, owner: StorageOwner, key: string, value: stri
   if (!env.BUCKET) throw new Error('storage_unavailable');
   const size = typeof value === 'string' ? new TextEncoder().encode(value).length : value.byteLength;
   if (storageMetered(env)) {
+    await storageGrowthAllowed(env, key, size);
     await inventoryObject(env, owner, key, size, purpose, Date.now(), 'pending');
     try {
       const hold = await reserveStorage(env, owner.userId);
@@ -154,4 +153,43 @@ export async function reserveStorageCommit(env: Env, owner: StorageOwner, object
   }
   const held = await reserveStorage(env, owner.userId, { bytes, writes, requireFunding: true });
   if (held?.writesBlocked) throw new Error('storage_funding_required');
+}
+
+
+export async function storageRateLimit(env: Env, scope: string, limit: number) {
+  const window = Math.floor(Date.now() / 60000);
+  const row = await env.DB.prepare(`INSERT INTO r2_rate_windows(scope,window,requests) VALUES(?,?,1)
+    ON CONFLICT(scope,window) DO UPDATE SET requests=requests+1 WHERE requests<? RETURNING requests`)
+    .bind(scope, window, limit).first();
+  if (!row) throw new Error('storage_rate_limited');
+}
+async function storageGrowthAllowed(env: Env, key: string, size: number) {
+  const max = Number(env.R2_PLATFORM_MAX_BYTES ?? 1000000000000);
+  if (!Number.isSafeInteger(max) || max < 1) throw new Error('invalid_storage_configuration');
+  await env.DB.prepare("INSERT INTO r2_meter_state(id,value) VALUES('platform_max_bytes',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    .bind(String(max)).run();
+  if (env.R2_WRITES_PAUSED === 'true') {
+    const existing = await env.DB.prepare('SELECT size FROM r2_objects WHERE key=? AND deleted_at IS NULL').bind(key).first<{ size: number }>();
+    if (!existing || size > existing.size) throw new Error('storage_growth_paused');
+  }
+}
+
+export async function storageFundingQuote(env: Env, userId: string, projected = { bytes: 0, writes: 1 }) {
+  const pricing = storagePricing(env);
+  const ready = await env.DB.prepare("SELECT value FROM r2_meter_state WHERE id='inventory_complete'").first();
+  if (!ready && storageMetered(env)) throw new Error('storage_metering_incomplete');
+  const row = await env.DB.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM r2_objects WHERE user_id=? AND deleted_at IS NULL').bind(userId).first<{ bytes: number }>();
+  const today = Math.floor(Date.now() / STORAGE_DAY_MS) * STORAGE_DAY_MS;
+  const peak = await env.DB.prepare(`WITH sizes AS(SELECT app_id,at,delta,
+    SUM(delta) OVER(PARTITION BY app_id ORDER BY at,sequence ROWS UNBOUNDED PRECEDING) AS bytes FROM r2_object_events WHERE user_id=?)
+    SELECT COALESCE(SUM(peak),0) AS bytes FROM(SELECT app_id,
+      MAX(COALESCE(MAX(CASE WHEN at>=? THEN MAX(bytes,bytes-delta) END),0),SUM(delta)) AS peak FROM sizes GROUP BY app_id)`)
+    .bind(userId, today).first<{ bytes: number }>();
+  const operations = await env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN category='a' THEN 4500 WHEN category='b' THEN 360 ELSE 0 END),0) AS nano FROM r2_operations o
+    WHERE user_id=? AND NOT EXISTS(SELECT 1 FROM r2_daily_usage d WHERE d.user_id=o.user_id AND d.app_id=o.app_id AND d.day=strftime('%Y-%m-%d',o.started_at/1000,'unixepoch'))`).bind(userId).first<{ nano: number }>();
+  const bytes = row!.bytes + projected.bytes;
+  return {
+    bytes, retentionNanoUsd: storageRetentionNanoUsd(bytes, pricing.markupBps)
+      + Math.ceil((operations!.nano + 4500 * projected.writes + Math.max(peak!.bytes, bytes) / 2000) * (1 + pricing.markupBps / 10000)), retentionDays: STORAGE_RETENTION_DAYS,
+  };
 }
