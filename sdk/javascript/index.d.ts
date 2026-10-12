@@ -61,7 +61,7 @@ export interface Capabilities {
   secrets: { vault: boolean };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
-export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; retryAfterSeconds?: number; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; readiness?: RestoreReadiness; constructor(code: string, status?: number, details?: Record<string, unknown>) }
+export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; retryAfterSeconds?: number; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; readiness?: RestoreReadiness; executionId?: string; gitOperation?: string; gitPhase?: 'configuration' | 'operation'; configurationKey?: string; configurationExecutionId?: string; exitCode?: number | null; stderr?: string; constructor(code: string, status?: number, details?: Record<string, unknown>) }
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;

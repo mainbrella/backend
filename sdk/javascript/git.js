@@ -1,4 +1,7 @@
-const bytes = value => new TextEncoder().encode(value).length;
+const bytes = value => {
+  const encoded = new TextEncoder().encode(value);
+  return new TextDecoder().decode(encoded) === value ? encoded.length : Infinity;
+};
 const defaults = ['git', '--no-pager', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
   '-c', 'core.attributesFile=/dev/null', '-c', 'protocol.allow=never', '-c', 'submodule.recurse=false',
   '-c', 'commit.gpgsign=false', '-c', 'core.quotePath=false'];
@@ -101,7 +104,7 @@ export function gitTools(sandbox, ErrorType) {
     },
     async checkout({ branch, create = false, ...options } = {}) {
       if (!validBranch(branch) || typeof create !== 'boolean' || options.idempotencyKey === undefined) throw error('invalid_git_options');
-      const { stdout, ...identity } = await execute('checkout', ['switch', '--no-guess', '--no-recurse-submodules', ...(create ? ['--no-track', '--create', branch, '--'] : ['--', branch])], options);
+      const { stdout, ...identity } = await execute('checkout', ['switch', '--no-guess', '--no-overwrite-ignore', '--no-recurse-submodules', ...(create ? ['--no-track', '--create', branch, '--'] : ['--', branch])], options);
       return { branch, ...identity };
     },
   };

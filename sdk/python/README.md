@@ -340,6 +340,38 @@ Dockerfile and logs. Builds require a configured private build repository.
 Existing images without inline cache metadata may yield no cache hits. These
 options require migration, configuration and live qualification.
 
+## Local Git operations
+
+The 0.2.0 source SDK adds `sandbox.git.status`, `branches`, `diff`, `commit` and
+`checkout`. Each requires an absolute repository `cwd` and Git 2.23+ in the guest.
+
+```python
+cwd = '/workspace/project'
+entries = sandbox.git.status(cwd=cwd)['entries']
+branches = sandbox.git.branches(cwd=cwd)['branches']
+patch = sandbox.git.diff(cwd=cwd, staged=True)['patch']
+sandbox.git.checkout(cwd=cwd, branch='work/fix', create=True, idempotency_key='work-fix')
+# The caller must stage changes first; commit never runs git add.
+result = sandbox.git.commit(cwd=cwd, message='Fix prepared change',
+                            author={'name': 'Developer', 'email': 'developer@example.com'},
+                            idempotency_key='prepared-fix')
+```
+
+Results preserve `executionId` and `idempotencyKey`; status entries include
+`indexStatus`, `worktreeStatus`, `path` and rename `originalPath`. Branches are
+local names with commit IDs and the current flag. Diff defaults to unstaged
+changes and accepts literal `paths`. Mutations require a key and are never
+retried automatically. Errors expose `git_operation`, `git_phase`,
+`idempotency_key`, and a known `execution_id` for reconciliation.
+
+Two bounded argv executions inspect filter names and run the operation. Hooks,
+configured filters, external diffs/text conversion and signing are disabled.
+No fetch, push, credentials or forced checkout are implicit; Git protects local
+changes. Keep repository configuration and the index stable during an operation.
+Each execution defaults to 30 seconds (maximum 60) and output to 1 MiB; partial
+output is rejected. See the
+[Git SDK contract](https://github.com/mainbrella/backend/blob/main/docs/git-sdk.md).
+
 ## Streaming transfers and directory copies
 
 Check `client.capabilities()["files"]["streamingTransfers"]` before using the new

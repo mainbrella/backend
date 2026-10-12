@@ -12,7 +12,10 @@ ENVIRONMENT = {'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONF
 
 
 def _bytes(value):
-    return len(value.encode('utf-8'))
+    try:
+        return len(value.encode('utf-8'))
+    except UnicodeError:
+        raise _error('invalid_git_options') from None
 
 
 def _error(code, **details):
@@ -140,7 +143,7 @@ class GitTools:
     def checkout(self, *, cwd, branch, idempotency_key, create=False, timeout_ms=30000):
         if not _branch(branch) or type(create) is not bool or idempotency_key is None:
             raise _error('invalid_git_options')
-        argv = ['switch', '--no-guess', '--no-recurse-submodules'] + (['--no-track', '--create', branch, '--'] if create else ['--', branch])
+        argv = ['switch', '--no-guess', '--no-overwrite-ignore', '--no-recurse-submodules'] + (['--no-track', '--create', branch, '--'] if create else ['--', branch])
         result = self._execute('checkout', argv, cwd, timeout_ms, idempotency_key)
         result.pop('stdout')
         return dict(result, branch=branch)

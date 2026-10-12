@@ -4,6 +4,17 @@ Engineering status for the October 11, 2026 source changes. Source implementatio
 local tests, deployed qualification and published SDK availability are separate.
 This change does not close every P1 gap.
 
+October 12 follow-up: ordinary source containers now accept a saved startup
+recipe, and repository launches register their foreground command and readiness
+path. Native local staging passed actual HTTP listener checks after both fork
+and resume, with fresh nonces and no client-side launch; replay did not restart
+the restored app. See [workspace startup](workspaces.md#saved-launch-recipes-and-application-readiness).
+The 0.2.0 SDK source also adds [native filesystem watching](native-file-watch.md)
+through bounded managed executions. The historical table below describes the
+October 11 change; those two items have since advanced. RAM cloning and independent
+mounted volumes remain open. The [process assessment](process-cloning-feasibility.md)
+records the production permission diagnostic and the failed local CRIU dump.
+
 The subsequent [October 11 release-readiness record](release-readiness-2026-10-11.md)
 tracks the CI correction, local qualification and read-only production checks.
 In particular, migrations 039 and 040 are already applied in production; the

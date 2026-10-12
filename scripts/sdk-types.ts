@@ -120,3 +120,16 @@ async function nativeWatchWorkflow(sandbox: import('@mainbrella/sdk').Sandbox) {
   } finally { await watcher.close(); }
 }
 void nativeWatchWorkflow;
+
+async function gitWorkflow(sandbox: import('@mainbrella/sdk').Sandbox) {
+  const cwd = '/workspace/project';
+  const status = await sandbox.git.status({ cwd });
+  const paths: string[] = status.entries.map(entry => entry.path);
+  const { patch } = await sandbox.git.diff({ cwd, paths, staged: true });
+  const { branches } = await sandbox.git.branches({ cwd });
+  const current: string | undefined = branches.find(branch => branch.current)?.name;
+  await sandbox.git.checkout({ cwd, branch: 'work/fix', create: true, idempotencyKey: 'create-work-fix' });
+  const commit = await sandbox.git.commit({ cwd, message: 'Fix prepared change', author: { name: 'Developer', email: 'developer@example.com' }, idempotencyKey: 'commit-prepared-fix' });
+  return { patch, current, executionId: commit.executionId };
+}
+void gitWorkflow;

@@ -92,7 +92,7 @@ original Worker fetch handler. This permits actual token routing, credential
 stripping and Docker forwarding to be tested; it does not qualify deployed DNS,
 TLS or hostile Host-header handling. The production gateway is unchanged.
 
-The final recorded local run is
+The earlier reviewed local run is
 `artifacts/local-staging-reviewed-final/qualification.json` (`ok: true`). It passed the
 integrated scenario, including immediate command cancellation followed by file
 write/removal and retained marker bytes in the same running generation, and
@@ -109,6 +109,19 @@ runner (exit 130). Cleanup recovered the actor's persisted handle.
 SIGTERM during real Python context work (exit 143). Both interruption checks
 completed cleanup with no errors and empty observed inventories. All three
 reports record identical API/runtime bundle hashes and runner hashes.
+
+The October 12 parity follow-up is
+`artifacts/p0-parity-final-20261012/qualification.json` (`ok: true`). It also
+configures a multiline startup recipe on an existing source without changing
+its PID or nonce, then verifies that fork and resume automatically start an
+HTTP listener and pass readiness without a client launch command. Both restored
+processes have fresh nonces: this qualifies application relaunch, not RAM
+preservation. Replaying resume retains the restored PID and nonce instead of
+launching again. The source remains alive and independent after the fork.
+All other integrated checks passed, with two active generations, three reported
+snapshots and three owned Docker containers/proxies removed, no cleanup errors,
+and empty observed inventories. This remains an isolated local qualification;
+the deployed and publication gates above are unchanged.
 
 The local Miniflare Docker provider logs `SYS_ADMIN`, `/dev/fuse` and
 `apparmor:unconfined` settings at startup. Deployed container isolation and
