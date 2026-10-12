@@ -50,7 +50,7 @@ export class ContainerAccountController {
   async machine(state, id, method, entitlement, reservationId = state.reservations?.[id], selection) {
     // A versioned private start path prevents a runtime downgrade between
     // discovery and boot from silently ignoring the internet-off selection.
-    const path = method === 'POST' && selection?.networkPolicy ? '/container/egress-v1' : method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.lifecycle === 'production' ? '/container/production-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
+    const path = method === 'POST' && selection?.restoreLaunch ? '/container/workspace-launch-v1' : method === 'POST' && selection?.networkPolicy ? '/container/egress-v1' : method === 'POST' && selection?.workspaceId ? '/container/workspace-v1' : method === 'POST' && selection?.lifecycle === 'production' ? '/container/production-v1' : method === 'POST' && selection?.internet === false ? '/container/network-v1' : '/container';
     const response = await this.machineFor(state.userId, id).fetch(new Request(`https://internal${path}`, {
       method, headers: { ...entitlementHeaders(entitlement), 'x-mainbrella-user': state.userId, 'x-mainbrella-container': id, ...(selection?.recover ? { 'x-mainbrella-recover': '1' } : {}), ...(reservationId ? { 'x-mainbrella-reservation': String(reservationId) } : {}), ...(state.leases?.[id] ? { 'x-mainbrella-compute-until': String(state.leases[id].endAt) } : {}), ...(method === 'POST' && selection ? { 'Content-Type': 'application/json' } : {}) },
       ...(method === 'POST' && selection ? { body: JSON.stringify(selection) } : {}),
@@ -60,6 +60,7 @@ export class ContainerAccountController {
       if (path === '/container/egress-v1' && response.status === 404) throw new Error('network_policy_unavailable');
       if (path === '/container/network-v1' && response.status === 404) throw new Error('network_policy_unavailable');
       if (path === '/container/workspace-v1' && response.status === 404) throw new Error('persistence_unavailable');
+      if (path === '/container/workspace-launch-v1' && response.status === 404) throw new Error('workspace_launch_unavailable');
       const data = await response.json().catch(() => null);
       if (data?.error === 'compute_allowance_exhausted') throw new Error('compute_allowance_exhausted');
       if (['workspace_expired','workspace_image_incompatible','workspace_restore_failed'].includes(data?.error)) throw new Error(data.error);
@@ -156,7 +157,8 @@ export class ContainerAccountController {
   creationResponse(state, containers, record) {
     const container = (state.reservations[record.slot] === record.reservationId || state.production?.[record.slot]?.initialReservationId === record.reservationId) && containers.find(c => c.id === record.slot);
     if (!container) return this.respond({ error: 'creation_no_longer_running', creation: { id: record.id, containerId: record.slot, status: 'stopped' } }, 409);
-    return this.respond({ ...this.status(state, containers), creation: { id: record.id, containerId: record.slot, createdAt: container.createdAt, status: container.status } });
+    return this.respond({ ...this.status(state, containers), creation: { id: record.id, containerId: record.slot, createdAt: container.createdAt, status: container.status,
+      ...(container.readiness ? { readiness: container.readiness } : {}) } });
   }
   async saveState(state, retry = false) {
     state.leases ??= {};
@@ -336,7 +338,7 @@ export class ContainerAccountController {
         computeUnitHours: prepaid ? (prepaid.monthly - prepaid.monthlyInference) / 3600000 : Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
         reservedComputeUnitHours: (prepaid ? prepaid.monthReserved - prepaid.inferenceReserved - prepaid.storageReserved : reservedUnitMs) / 3600000,
         availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
-        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers: [...containers, ...this.lifecycle.descriptors(state)], imageCatalog: state.imageCatalog ?? [] };
+        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers: [...containers, ...this.lifecycle.descriptors(state)].map(({ _restoreLaunch, ...container }) => container), imageCatalog: state.imageCatalog ?? [] };
   }
   prepaidEntitlement(state) {
     const active = Boolean(state.wallet && !state.wallet.fundingRevoked && this.billing.wallet.metrics(state).balance > 0);
@@ -535,7 +537,7 @@ export class ContainerAccountController {
               if ((state.usage[month] ?? 0) >= policy.maxStartsPerMonth) return this.respond({ error: 'container_quota_exceeded' }, 429);
             }
             // A durable snapshot receipt lets a retry continue after the source stops.
-            const captured = await this.workspaces.capture(state, source, `fork:${idempotencyKey}`, { id: actionSource.id, createdAt: actionSource.createdAt, name: actionSource.name?.trim() ?? `Fork ${actionSource.id}`, stop: false });
+            const captured = await this.workspaces.capture(state, source, `fork:${idempotencyKey}`, { id: actionSource.id, createdAt: actionSource.createdAt, name: actionSource.name?.trim() ?? `Fork ${actionSource.id}`, stop: false }, { inheritLaunch: true });
             if (captured instanceof Response) return captured;
             selection = { workspaceId: captured.record.id, ...(actionSource.name === undefined ? {} : { name: actionSource.name.trim() }) };
           }
@@ -576,6 +578,7 @@ export class ContainerAccountController {
               const data = await response.json().catch(()=>null);
               return this.respond({error:data?.error==='workspace_image_incompatible'?'workspace_image_incompatible':data?.error==='workspace_expired'?'workspace_expired':'persistence_unavailable'}, data?.error==='workspace_expired'?410:data?.error==='workspace_image_incompatible'?409:503);
             }
+            if (selection.restoreLaunch && (await response.json()).workspaceRestoreLaunch !== 1) return this.respond({ error: 'workspace_launch_unavailable' }, 503);
           }
           if (selection?.networkPolicy || selection?.internet === false || selection?.lifecycle === 'production') {
             try {
@@ -654,7 +657,7 @@ export class ContainerAccountController {
       if (error.message === 'image_not_available') return this.respond({ error: error.message }, 409);
       if (error.message === 'compute_allowance_exhausted') return this.respond({ error: error.message }, 429);
       if (error.message === 'subscription_required') return this.respond({ error: error.message }, 402);
-      if (['billing_unavailable','billing_reconciliation_required','network_policy_unavailable','persistence_unavailable','production_unavailable'].includes(error.message)) return this.respond({ error: error.message }, 503);
+      if (['billing_unavailable','billing_reconciliation_required','network_policy_unavailable','persistence_unavailable','production_unavailable','workspace_launch_unavailable'].includes(error.message)) return this.respond({ error: error.message }, 503);
       if (error.message === 'workspace_expired') return this.respond({error:error.message},410);
       if (error.message === 'workspace_not_found') return this.respond({error:error.message},404);
       if (['workspace_not_ready','workspace_policy_conflict','workspace_image_incompatible','workspace_restore_failed'].includes(error.message)) return this.respond({error:error.message},409);

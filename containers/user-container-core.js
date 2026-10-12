@@ -6,6 +6,7 @@ import { captureWorkspace } from './workspaces.js';
 import { validWorkspaceId } from './workspace-contract.js';
 import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
 import { EGRESS_CA_ENV } from './security-runtime.js';
+import { normalizeRestoreLaunch, restoreEntrypoint, publicRestoreReadiness, observeRestoreReadiness } from './restore-launch.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
 const METADATA_KEY = "builderMachine";
@@ -23,6 +24,7 @@ export class UserContainerController {
     this.setTimer = timers.setTimeout.bind(timers);
     this.clearTimer = timers.clearTimeout.bind(timers);
     this.tail = Promise.resolve();
+    this.restoreReadinessTasks = new Map();
     this.observations = new WorkloadObservations(this);
   }
 
@@ -43,18 +45,19 @@ export class UserContainerController {
     if(path==='/workspaces/snapshot-v1') return captureWorkspace(this,request);
     return this.serialized(async () => {
       const url = new URL(request.url);
-      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, production: 1, ...(this.security?.available() ? { egressPolicies: 1 } : {}) });
+      if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, workspaceRestoreLaunch: 1, production: 1, ...(this.security?.available() ? { egressPolicies: 1 } : {}) });
       if(path==='/workspaces/restore-preflight-v1' && request.method==='POST') {
         let body;try{body=await request.json();}catch{return this.respond({error:'invalid_request'},400);}
         if(!body || body.expiresAt<=this.now())return this.respond({error:'workspace_expired'},410);
         if(!body.imageKey || typeof body.imageDigest!=='string' || this.container.images[body.imageKey]!==body.imageDigest)return this.respond({error:'workspace_image_incompatible'},409);
-        return this.respond({compatible:true});
+        return this.respond({compatible:true, workspaceRestoreLaunch: 1});
       }
       if (url.pathname.startsWith('/observations/')) return this.observations.fetch(request);
       const productionStart = url.pathname === '/container/production-v1';
       const networkStart = url.pathname === '/container/network-v1';
       const egressStart = url.pathname === '/container/egress-v1';
-      const workspaceStart = url.pathname === '/container/workspace-v1';
+      const launchStart = url.pathname === '/container/workspace-launch-v1';
+      const workspaceStart = url.pathname === '/container/workspace-v1' || launchStart;
       if (url.pathname !== '/container' && !networkStart && !workspaceStart && !productionStart && !egressStart) return this.respond({ error: "Not found" }, 404);
       if (egressStart && (request.method !== 'POST' || !this.security?.available())) return this.respond({ error: 'network_policy_unavailable' }, 503);
       if((workspaceStart || productionStart) && request.method!=='POST')return this.respond({error:'method_not_allowed'},405);
@@ -131,9 +134,11 @@ export class UserContainerController {
         try {
           const selection = request.body ? await request.json() : {};
           if(workspaceStart && (!validWorkspaceId(selection?.workspaceId) || !selection?.containerSnapshot?.id))return this.respond({error:'invalid_request'},400);
+          if(launchStart && !normalizeRestoreLaunch(selection?.restoreLaunch))return this.respond({error:'invalid_launch_recipe'},400);
+          if(!launchStart && selection?.restoreLaunch)return this.respond({error:'workspace_launch_unavailable'},503);
           if(!workspaceStart && !egressStart && selection?.containerSnapshot)return this.respond({error:'invalid_request'},400);
           if (egressStart && (!normalizeNetworkPolicy(selection?.networkPolicy) || selection?.containerSnapshot && (!validWorkspaceId(selection.workspaceId) || !selection.containerSnapshot.id))) return this.respond({ error: 'invalid_network_policy' }, 400);
-          if (!egressStart && (selection?.networkPolicy !== undefined || selection?.secretBindings?.length)) return this.respond({ error: 'network_policy_unavailable' }, 503);
+          if (!egressStart && !launchStart && (selection?.networkPolicy !== undefined || selection?.secretBindings?.length)) return this.respond({ error: 'network_policy_unavailable' }, 503);
           if (networkStart && selection?.internet !== false) return this.respond({ error: 'invalid_internet_policy' }, 400);
           if (productionStart && selection?.lifecycle !== 'production') return this.respond({ error: 'invalid_lifecycle' }, 400);
           const result = await this.start(selection, recovering);
@@ -160,6 +165,7 @@ export class UserContainerController {
     const month = monthFor(date);
     const usage = (await this.ctx.storage.get(USAGE_KEY)) ?? {};
     const metadata = await this.ctx.storage.get(METADATA_KEY);
+    if (metadata?.readiness?.status === 'starting' && this.container.running) this.ensureRestoreReadiness(metadata);
     if (metadata && !this.container.running && metadata.computeStoppedAt === undefined) {
       this.onStopped?.();
       await this.recordStopped(metadata, 'runtime_stopped');
@@ -180,6 +186,9 @@ export class UserContainerController {
           ...(metadata.catalogId ? { catalogId: metadata.catalogId } : {}),
           ...(metadata.imageDigest ? { imageDigest: metadata.imageDigest } : {}),
           ...(metadata.workspaceId ? { workspaceId: metadata.workspaceId } : {}),
+          ...(metadata.readiness ? { readiness: publicRestoreReadiness(metadata.readiness) } : {}),
+          // Private account-to-runtime metadata; stripped from public responses.
+          ...(metadata.restoreLaunch ? { _restoreLaunch: metadata.restoreLaunch } : {}),
           createdAt: new Date(metadata.createdAt).toISOString(),
           expiresAt: new Date(metadata.expiresAt).toISOString(),
         }]
@@ -201,6 +210,14 @@ export class UserContainerController {
     const idleExpiresAt = metadata.idleExpiresAt
       ?? metadata.createdAt + (metadata.idleTimeoutMs ?? BUILDER_LIMITS.idleTimeoutMs);
     return metadata.lifecycle === 'production' ? metadata.expiresAt : Math.min(idleExpiresAt, metadata.expiresAt);
+  }
+
+  ensureRestoreReadiness(metadata) {
+    if (metadata.readiness?.status !== 'starting' || !metadata.readiness.deadlineAt || this.restoreReadinessTasks.has(metadata.telemetryId)) return;
+    const task = observeRestoreReadiness(this, metadata).catch(() => { console.error('restore_readiness_observation_failed'); })
+      .finally(() => this.restoreReadinessTasks.delete(metadata.telemetryId));
+    this.restoreReadinessTasks.set(metadata.telemetryId, task);
+    this.ctx.waitUntil?.(task);
   }
 
   async getTerminalMetadata(createdAt, expiresAt) {
@@ -323,6 +340,8 @@ exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
     if (selection.lifecycle !== undefined && !validLifecycle(selection.lifecycle)) return this.respond({ error: 'invalid_lifecycle' }, 400);
     if (selection.lifecycle === 'production' && this.entitlement.plan !== 'usage') return this.respond({ error: 'production_requires_usage' }, 402);
     if (selection.startupCommand !== undefined && (!validStartupCommand(selection.startupCommand) || selection.lifecycle !== 'production')) return this.respond({ error: 'invalid_startup_command' }, 400);
+    const restoreLaunch = selection.restoreLaunch === undefined ? undefined : normalizeRestoreLaunch(selection.restoreLaunch);
+    if (restoreLaunch === null || restoreLaunch && (!selection.workspaceId || selection.lifecycle === 'production')) return this.respond({ error: 'invalid_launch_recipe' }, 400);
     const size = machineSize(selection.size ?? 'lite');
     if (!size) return this.respond({ error: 'invalid_size' }, 400);
     if (selection.internet !== undefined && typeof selection.internet !== 'boolean') return this.respond({ error: 'invalid_internet_policy' }, 400);
@@ -367,6 +386,7 @@ exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
       imageDigest: image,
       imageKey,
       ...(selection.workspaceId?{workspaceId:selection.workspaceId}:{}),
+      ...(restoreLaunch ? { restoreLaunch } : {}),
       ...(catalogImage ? { catalogId: catalogImage.id, imageName: catalogImage.name } : {}),
       ...(selection.imageId ? { imageId: selection.imageId, imageName: selection.imageName } : {}),
       lastActivityAt: now,
@@ -374,6 +394,8 @@ exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
       idleExpiresAt: Math.min(now + limits.idleTimeoutMs, this.entitlement.validUntil),
       idleTimeoutMs: selection.lifecycle === 'production' ? PRODUCTION_INACTIVITY_MS : limits.idleTimeoutMs,
     };
+    if (restoreLaunch) metadata.readiness = { status: 'starting', port: restoreLaunch.readiness.port, path: restoreLaunch.readiness.path,
+      logPath: `/tmp/mainbrella-restore-${crypto.randomUUID()}.log` };
     await this.ctx.storage.put(METADATA_KEY, metadata);
     await this.observations.append(metadata, 'starting');
     await this.ctx.storage.setAlarm(this.deadline(metadata));
@@ -387,7 +409,8 @@ exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
       this.container.start({
         ...(selection.workspaceId ? {containerSnapshot:{id:selection.containerSnapshot.id}} : {image}),
         instance: size.instance,
-        entrypoint: metadata.lifecycle === 'production' ? productionEntrypoint(metadata.startupCommand) : ['sleep', 'infinity'],
+        entrypoint: restoreLaunch ? restoreEntrypoint(restoreLaunch, metadata.readiness.logPath)
+          : metadata.lifecycle === 'production' ? productionEntrypoint(metadata.startupCommand) : ['sleep', 'infinity'],
         enableInternet: metadata.internet,
         ...(metadata.networkPolicy ? { env: EGRESS_CA_ENV } : {}),
         labels: { mb_generation: metadata.telemetryId },
@@ -421,6 +444,11 @@ exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
       }
       await this.onReady?.();
       await this.observations.append(metadata, 'started');
+      if (restoreLaunch) {
+        metadata.readiness.deadlineAt = Math.min(this.now() + restoreLaunch.readiness.timeoutMs, this.deadline(metadata));
+        await this.ctx.storage.put(METADATA_KEY, metadata);
+        this.ensureRestoreReadiness(metadata);
+      }
       return this.status();
     } catch (error) {
       await this.observations.append(metadata, 'failed', 'startup_failed');

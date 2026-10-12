@@ -25,7 +25,10 @@ test('enabled saves preserve body and key while stripping caller control-plane h
   const response=await handleRequest(new Request('https://api.mainbrella.com/workspaces',{method:'POST',headers:{Origin:'https://mainbrella.com',Cookie:`mainbrella_session=${SESSION_ONE}`,'Idempotency-Key':'save-1','x-mainbrella-user':'victim','x-provider-handle':'private'},body:JSON.stringify(body)}),env);
   assert.equal(response.status,200);assert.deepEqual(await internal!.json(),body);assert.equal(internal!.headers.get('Idempotency-Key'),'save-1');
   assert.equal(internal!.headers.get('x-mainbrella-user'),USER_ONE);assert.equal(internal!.headers.has('x-provider-handle'),false);
-  const large=await handleRequest(new Request('https://api.mainbrella.com/workspaces',{method:'POST',headers:{Origin:'https://mainbrella.com',Cookie:`mainbrella_session=${SESSION_ONE}`},body:'x'.repeat(2049)}),env);assert.equal(large.status,413);
+  const large=await handleRequest(new Request('https://api.mainbrella.com/workspaces',{method:'POST',headers:{Origin:'https://mainbrella.com',Cookie:`mainbrella_session=${SESSION_ONE}`},body:'x'.repeat(32769)}),env);assert.equal(large.status,413);
+  const unicodeBody={...body,launch:{command:'echo '+'測'.repeat(4091),readiness:{port:3000}}};
+  const unicode=await handleRequest(new Request('https://api.mainbrella.com/workspaces',{method:'POST',headers:{Origin:'https://mainbrella.com',Cookie:`mainbrella_session=${SESSION_ONE}`,'Idempotency-Key':'unicode-save'},body:JSON.stringify(unicodeBody)}),env);
+  assert.equal(unicode.status,200);assert.deepEqual(await internal!.json(),unicodeBody);
   const wrong=await handleRequest(new Request('https://api.mainbrella.com/containers',{method:'POST',headers:{Origin:'https://mainbrella.com',Cookie:`mainbrella_session=${SESSION_ONE}`},body:JSON.stringify({workspaceId,catalogId:'node'})}),env);assert.equal(wrong.status,400);
   const discovery=await handleRequest(new Request('https://api.mainbrella.com/capabilities'),env);const caps=await discovery.json() as any;
   assert.equal(caps.persistence.snapshots,true);assert.equal(caps.persistence.filesystemAfterStop,false);

@@ -3,7 +3,7 @@ import { containerUser } from './container-auth';
 import { runningContainer, containerError } from '../lib/container-service';
 import { machineName, validContainerId, validIdempotencyKey } from '../../containers/container-account-core.js';
 import { readCommandBody } from '../../containers/command-contract.js';
-import { EXECUTION_SIGNALS, MAX_STDIN_CHUNK_BYTES, validExecution, validExecutionId, validTerminalSize } from '../../containers/execution-contract.js';
+import { EXECUTION_SIGNALS, EXECUTION_RETENTION_MS, MAX_STDIN_CHUNK_BYTES, validExecution, validExecutionId, validTerminalSize } from '../../containers/execution-contract.js';
 import { readFileBytes } from '../../containers/file-contract.js';
 
 export async function handleExecutionRequest(request: Request, env: Env): Promise<Response> {
@@ -85,11 +85,17 @@ export async function handleExecutionRequest(request: Request, env: Env): Promis
     const response = await stub.fetch(new Request(internal, { method: request.method, headers,
       ...(inputBytes !== undefined ? { body: inputBytes } : body ? { body: JSON.stringify(body) } : {}), signal: request.signal }));
     if (!response.ok) {
-      const data = await response.json().catch(() => ({})) as { error?: string };
+      const data = await response.json().catch(() => ({})) as { error?: string; retryAfterSeconds?: unknown };
       const errors = new Set(['invalid_request', 'invalid_cursor', 'invalid_idempotency_key', 'idempotency_key_conflict',
-        'container_not_running', 'execution_not_found', 'execution_not_running', 'execution_limit', 'execution_history_limit', 'execution_stream_limit',
+        'container_not_running', 'execution_not_found', 'execution_not_running', 'execution_limit', 'execution_history_limit', 'execution_output_history_limit', 'execution_event_history_limit', 'execution_stream_limit',
         'stdin_closed', 'stdin_too_large', 'stdin_limit', 'stdin_unavailable', 'pty_unavailable']);
-      if ([400, 404, 409, 413, 429, 503].includes(response.status) && data.error && errors.has(data.error)) return authJson({ error: data.error }, response.status, cors);
+      if ([400, 404, 409, 413, 429, 503].includes(response.status) && data.error && errors.has(data.error)) {
+        const retry = response.status === 429 && typeof data.retryAfterSeconds === 'number'
+          && Number.isSafeInteger(data.retryAfterSeconds) && data.retryAfterSeconds >= 1
+          && data.retryAfterSeconds <= EXECUTION_RETENTION_MS / 1000 ? data.retryAfterSeconds : undefined;
+        return authJson({ error: data.error, ...(retry === undefined ? {} : { retryAfterSeconds: retry }) }, response.status,
+          retry === undefined ? cors : { ...cors, 'Retry-After': String(retry), 'Access-Control-Expose-Headers': 'Retry-After' });
+      }
       throw new Error('execution_unavailable');
     }
     if (events) return new Response(response.body, { status: response.status,

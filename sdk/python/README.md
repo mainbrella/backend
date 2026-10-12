@@ -66,6 +66,10 @@ reconnects to a retained job. Preserve `idempotency_key` on start errors and ret
 the same options within one hour. Runtime restart interrupts unfinished managed
 jobs and stops their matching container generation.
 
+Managed execution capacity errors expose `error.retry_after_seconds` when the
+API provides a valid retry hint. The SDK does not automatically resubmit commands.
+Retain the original idempotency key and stay within its recovery window.
+
 Check `client.capabilities()["execution"]` for `argv`, `stdin`, `signals`, `managedProcessListing`, `programmaticPty` and `ptyResize` before using richer process control:
 
 ```python
@@ -155,6 +159,15 @@ client.workspaces.delete(saved["id"])
 ```
 
 `client.workspaces.list()`, `.get(id)` and `.update(id, name=…, archived=True)` manage metadata. Retry an ambiguous save with the original body and key (`error.idempotency_key`). Restore consumes one start and requires the saved image digest, size and internet policy. Filesystem bytes return in a fresh generation; RAM, processes and previews do not resume. Quotas and expiry apply. Archive retains quota; deletion revokes future restores without immediately erasing provider-held bytes.
+
+The unreleased SDK accepts `launch={"command": "node server.mjs",
+"cwd": "/workspace/app", "readiness": {"port": 3000, "path": "/health"}}`
+in `save_workspace` when the deployment advertises `persistence.restoreLaunch`.
+Each restore starts that command once. Restore returns when the machine is
+running; inspect `restored.readiness` and refresh the exact container through
+`client.list()` until its readiness status is `ready` or `failed`. Failure
+diagnostics include a log path and bounded tail. This starts a new process;
+it does not preserve the original application's memory.
 
 ## Unreleased stateful Python interpreter
 

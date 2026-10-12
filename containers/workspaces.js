@@ -2,6 +2,7 @@ import { WORKSPACE_POLICY, WORKSPACE_CAPTURE_RETENTION_MS, WORKSPACE_OPERATION_R
 import { entitlementHeaders, requestEntitlement, validEntitlement, machineSize, MACHINE_SIZES } from './plan-policy.js';
 import { validContainerId, validIdempotencyKey } from './container-account-core.js';
 import { readFileBytes } from './file-contract.js';
+import { normalizeRestoreLaunch, MAX_WORKSPACE_REQUEST_BYTES } from './restore-launch.js';
 
 const KEY='workspaceIndex';
 const maxDiskBytes=Math.max(...MACHINE_SIZES.map(size=>size.diskGB))*1_000_000_000;
@@ -11,12 +12,17 @@ function reserveCapture(index,bytes,at){
     retainUntil:Math.max(previous?.retainUntil??0,at+WORKSPACE_CAPTURE_RETENTION_MS)};
 }
 function captureUsage(index,now){
-  const month=new Date(now).toISOString().slice(0,7);
+  const date=new Date(now),month=date.toISOString().slice(0,7),buckets=Object.values(index.captureUsage);
+  const nextRelease=Math.min(Infinity,...buckets.map(bucket=>bucket.retainUntil));
   return {savesThisMonth:index.usage[month]??0,
     captureBytesThisMonth:Object.entries(index.captureUsage).reduce((sum,[day,bucket])=>sum+(day.startsWith(month)?bucket.bytes:0),0),
-    retainedCaptureBytes:Object.values(index.captureUsage).reduce((sum,bucket)=>sum+bucket.bytes,0)};
+    retainedCaptureBytes:buckets.reduce((sum,bucket)=>sum+bucket.bytes,0),
+    captureBudgetResetsAt:Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+1,1),
+    nextRetainedCaptureReleaseAt:Number.isFinite(nextRelease)?nextRelease:null,
+    nextRetainedCaptureReleaseBytes:buckets.reduce((sum,bucket)=>sum+(bucket.retainUntil===nextRelease?bucket.bytes:0),0)};
 }
 const fail=(code,status)=>Response.json({error:code},{status,headers:{'Cache-Control':'no-store'}});
+const saveFingerprint=body=>JSON.stringify([body.id,body.createdAt,body.name,body.stop??false,...(body.launch?[body.launch]:[])]);
 // Uses the same account lock and owner namespace as start/stop. Provider handles
 // never cross the public boundary. Capture intent precedes any provider call.
 export class AccountWorkspaces {
@@ -81,11 +87,12 @@ export class AccountWorkspaces {
     if(selection.size!==undefined && selection.size!==record.size || selection.internet!==undefined && selection.internet!==record.internet)throw new Error('workspace_policy_conflict');
     if(selection.networkPolicy!==undefined&&JSON.stringify(selection.networkPolicy)!==JSON.stringify(record.networkPolicy)||selection.secretBindings!==undefined&&JSON.stringify(selection.secretBindings)!==JSON.stringify(record.secretBindings??[]))throw new Error('workspace_policy_conflict');
     return {...selection,size:record.size,internet:record.internet,imageKey:record.imageKey,imageDigest:record.imageDigest,
-      imageId:record.imageId,imageName:record.imageName,networkPolicy:record.networkPolicy,secretBindings:record.secretBindings,containerSnapshot:record.handle,workspaceExpiresAt:record.expiresAt};
+      imageId:record.imageId,imageName:record.imageName,networkPolicy:record.networkPolicy,secretBindings:record.secretBindings,containerSnapshot:record.handle,workspaceExpiresAt:record.expiresAt,
+      ...(record.launch?{restoreLaunch:record.launch}:{})};
   }
   async capture(state, source, key, body, existing) {
     const account=this.account, now=account.now(), index=existing?.index??await this.prune();
-    const fingerprint=JSON.stringify([body.id,body.createdAt,body.name,body.stop??false]);
+    const fingerprint=saveFingerprint(body);
     let record=existing?.record??index.records.find(r=>r.operationKey===key&&r.operationExpiresAt>now);
     if(record&&record.fingerprint!==fingerprint)return fail('idempotency_key_conflict',409);
     if(record?.deleted)return fail('workspace_not_found',404);
@@ -95,6 +102,10 @@ export class AccountWorkspaces {
     if(source&&(typeof source.imageDigest!=='string'||!source.imageDigest))return fail('workspace_image_incompatible',409);
     const runtime=account.machineFor(state.userId,body.id);
     if(!record){
+      // Automatic lifecycle checkpoints retain the source generation's recipe,
+      // independently of its original workspace or a later deletion of it.
+      // Keep this in the durable capture record so retries need no live source.
+      const launch=body.launch??(existing?.inheritLaunch?normalizeRestoreLaunch(source._restoreLaunch):undefined);
       const features=await runtime.fetch(new Request('https://internal/features'));
       if(!features.ok || (await features.json()).workspaceSnapshots!==1)return fail('persistence_unavailable',503);
       const policy=WORKSPACE_POLICY[state.entitlement.plan],size=machineSize(source.size),reservedBytes=size.diskGB*1_000_000_000;
@@ -106,7 +117,7 @@ export class AccountWorkspaces {
       if(captures.retainedCaptureBytes+reservedBytes>policy.maxRetainedCaptureBytes)return fail('workspace_retained_budget_exceeded',429);
       record={id:crypto.randomUUID(),name:body.name,sourceReservationId:state.reservations?.[body.id],sourceSelection:{name:source.name,lifecycle:source.lifecycle??'ad_hoc',...(state.production?.[body.id]?.selection.startupCommand===undefined?{}:{startupCommand:state.production[body.id].selection.startupCommand})},source:{id:body.id,createdAt:body.createdAt},createdAt:new Date(now).toISOString(),expiresAt:now+policy.retentionMs,
         size:source.size,internet:source.internet??true,networkPolicy:source.networkPolicy,secretBindings:source.secretBindings,imageDigest:source.imageDigest,imageId:source.imageId,imageName:source.imageName,catalogId:source.catalogId,
-        operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false};
+        operationKey:key,operationExpiresAt:now+WORKSPACE_OPERATION_RETENTION_MS,fingerprint,reservedBytes,stop:body.stop??false,...(launch?{launch}:{})};
       index.records.push(record);index.usage[month]=(index.usage[month]??0)+1;
       reserveCapture(index,reservedBytes,now);
       await this.persist(index);await account.saveState(state);
@@ -127,11 +138,12 @@ export class AccountWorkspaces {
     const userId=request.headers.get('x-mainbrella-user');if(!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId))return fail('not_authenticated',401);
     let body;
     if(['POST','PATCH'].includes(request.method)){
-      try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await readFileBytes(request.body,2048,request.signal)));}catch{return fail('invalid_request',400);}
+      try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await readFileBytes(request.body,MAX_WORKSPACE_REQUEST_BYTES,request.signal)));}catch{return fail('invalid_request',400);}
       if(!body || typeof body!=='object' || Array.isArray(body))return fail('invalid_request',400);
     }
     const key=request.headers.get('Idempotency-Key');
-    if(request.method==='POST' && (!validIdempotencyKey(key) || id || Object.keys(body).some(k=>!['id','createdAt','name','stop'].includes(k)) || !validContainerId(body.id) || !validGeneration(body.createdAt) || !validWorkspaceName(body.name) || body.stop!==undefined && typeof body.stop!=='boolean'))return fail('invalid_request',400);
+    if(request.method==='POST' && (!validIdempotencyKey(key) || id || Object.keys(body).some(k=>!['id','createdAt','name','stop','launch'].includes(k)) || !validContainerId(body.id) || !validGeneration(body.createdAt) || !validWorkspaceName(body.name) || body.stop!==undefined && typeof body.stop!=='boolean'))return fail('invalid_request',400);
+    if(request.method==='POST' && body.launch!==undefined){const launch=normalizeRestoreLaunch(body.launch);if(!launch)return fail('invalid_launch_recipe',400);body.launch=launch;}
     if(request.method==='PATCH' && (!id || Object.keys(body).length===0 || Object.keys(body).some(k=>!['name','archived'].includes(k)) || body.name!==undefined&&!validWorkspaceName(body.name) || body.archived!==undefined&&typeof body.archived!=='boolean'))return fail('invalid_request',400);
     if(request.method==='DELETE'&&!id)return fail('invalid_request',400);
     try{return await account.serialized(async()=>{
@@ -151,7 +163,7 @@ export class AccountWorkspaces {
         await this.persist(index);await account.saveState(state);
         return request.method==='DELETE'?account.respond({deleted:true}):account.respond(publicWorkspace(record,now));
       }
-      const fingerprint=JSON.stringify([body.id,body.createdAt,body.name,body.stop??false]);
+      const fingerprint=saveFingerprint(body);
       let record=index.records.find(r=>r.operationKey===key && r.operationExpiresAt>now);
       if(record && record.fingerprint!==fingerprint)return fail('idempotency_key_conflict',409);
       if(record?.deleted)return fail('workspace_not_found',404);

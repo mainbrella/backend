@@ -880,9 +880,37 @@ and `outputTruncated`. New jobs also report `stdinEnabled`, `stdinClosed`, `stdi
 
 Matching key and all creation-option retries within the same generation return the retained
 execution. Changed options return 409 `idempotency_key_conflict`. Retention lasts
-one hour from admission, with 32 records per container; when full, a new job returns
-429 `execution_history_limit`. After retention expires, a key can launch new work.
-Preserve the key and never retry an old operation beyond its retention window.
+one hour from admission for both identity/state and complete retained output.
+Each physical container slot has separate limits of 512 compact execution records,
+32 MiB of raw output bytes and 16,384 output events, shared by all retained
+generations in that slot. These are reported by `execution.maxRetainedExecutions`,
+`maxRetainedOutputBytes`, `maxRetainedEvents` and `retentionScope: "container-slot"`
+in `/capabilities`. They are separate from the four active-operation limit.
+
+An active managed job reserves its complete 1 MiB and 512-event allowance before
+launch. On completion it charges only the bytes and events actually retained;
+small commands therefore do not consume a full retained-output slot. No unexpired
+identity or output is evicted to admit another job. Prior generations still count
+toward the slot budgets, but reads, cancellation and idempotency remain bound to
+the exact generation. Matching-key retries return their retained result even when
+a history budget is full; changed options still conflict.
+
+New admissions return 429 `execution_history_limit`,
+`execution_output_history_limit` or `execution_event_history_limit` when the
+corresponding budget is exhausted. The response includes `retryAfterSeconds` and
+`Retry-After`. A history hint uses the earliest retained expiry; active jobs may
+release unused reservation earlier, and a retry hint does not reserve or guarantee
+capacity. The shared active-operation error is `execution_limit` with a one-second
+hint. After retention expires, a key can launch new work. Preserve the key and never
+retry an old operation beyond its retention window.
+
+The output limit measures raw command bytes, not physical storage or billable
+bytes. UTF-8 replacement, event encoding and record metadata add storage overhead.
+The event and identity caps bound that overhead. The address space contains at
+most 500 slots (`small`, `c1`–`c499`), giving a hard account-wide ceiling of 256,000
+identities, 15.625 GiB of raw output and 8,192,000 events across all slots. These are
+upper bounds derived from per-slot limits, not a pooled account quota; account
+entitlements can permit fewer slots.
 
 Shell commands run `/bin/sh -lc`; alternatively pass `{"argv":["executable","literal argument"]}` without shell expansion. Supply exactly one of command/argv. Optional `cwd` is an absolute path without dot/parent segments; optional `env` has up to 64 POSIX variable names, 4096 UTF-8 bytes per value and 16 KiB of JSON. The provider inherits only PATH. Values are sent to the guest and may appear in its output; they are not a secrets vault. Jobs default to 30 seconds, allow up to 15 minutes,
 and remain bounded by the hard container deadline. They share four active
@@ -899,7 +927,7 @@ Client disconnect does not cancel the job. Images require GNU timeout. Cancellat
   `id` equal to `sequence`. Resume with the last received sequence as `cursor`.
   A cursor ahead of retained output returns 400 `invalid_cursor`.
 
-`GET /containers/executions?id=<id>&createdAt=<generation>` lists up to 32 retained managed-job summaries for that exact generation, including terminal records. It is not a guest-wide OS process table. `commands.attach(id)` reconnects SDK controls and output to a known retained job; attaching does not start or replay it.
+`GET /containers/executions?id=<id>&createdAt=<generation>` lists up to 512 retained managed-job summaries for that exact generation, including terminal records. It is not a guest-wide OS process table. `commands.attach(id)` reconnects SDK controls and output to a known retained job; attaching does not start or replay it.
 
 Start with `stdin:true` to accept raw input; otherwise stdin closes immediately. `POST /containers/executions/<execution-id>/stdin?...` sends `application/octet-stream`, up to 64 KiB per request, 1 MiB accepted per job and 256 KiB pending. Writes are ordered and respect pipe backpressure. Input is not retained or replayed. Ambiguous accepted bytes remain counted. A 30-second response bound or disconnect does not undo an accepted write; reconcile application state before sending again. `DELETE` at that stdin URL closes input after accepted writes. For a plain pipe this sends EOF; PTY closure can hang up the terminal. Closing input is not a cancellation request.
 
@@ -1033,11 +1061,37 @@ Use a trusted upstream and scoped, revocable tokens. Literal and common encoded 
 
 Discover `capabilities.persistence.snapshots` before issuing saves or restores. Saved-workspace issuance is enabled in the qualified production deployment; other deployments may disable it. For automatic capture on an explicit stop, separately require `persistence.filesystemAfterStop` and use `POST /containers/stop`. DELETE remains destructive.
 
-`POST /workspaces` accepts `{id, createdAt, name, stop?}` and requires an `Idempotency-Key`. The source identity must match a running generation owned by the authenticated account. Save captures the writable root filesystem, commits its private provider handle, and optionally stops that exact generation. Persist the request body and key before sending: repeat the identical request after a lost response. Recovery receipts last 24 hours. A capture whose provider result cannot be recovered fails closed rather than silently taking another snapshot.
+`POST /workspaces` accepts `{id, createdAt, name, stop?, launch?}` and requires an `Idempotency-Key`. The source identity must match a running generation owned by the authenticated account. Save captures the writable root filesystem, commits its private provider handle, and optionally stops that exact generation. Persist the request body and key before sending: repeat the identical request after a lost response. Recovery receipts last 24 hours. A capture whose provider result cannot be recovered fails closed rather than silently taking another snapshot.
 
 `GET /workspaces` lists account-owned metadata, limits and reserved usage. `GET /workspaces/{uuid}` reads one; `PATCH` renames it or sets `{archived:true|false}`; `DELETE` releases customer quota and revokes future restores. Archive retains quota. Reads, archive and deletion remain available during subscription outages or disabled issuance. Provider handles never appear in public responses. Deletion does not erase provider-held bytes immediately and does not terminate a restore already admitted.
 
 Restore with `POST /containers` and `{workspaceId}` using a new persisted creation key. A restore consumes one normal start and compute allowance and creates a fresh generation. It retains the saved machine size and internet policy, requires the same deployed image digest, and fails before admission if expired, archived or incompatible. A provider restore failure never falls back to an empty filesystem. RAM and running processes are not restored. Existing previews and generation-bound commands do not transfer.
+
+When `persistence.restoreLaunch` is true, an optional immutable `launch` recipe
+starts the application once in each restored generation:
+
+```json
+{
+  "command": "node server.mjs",
+  "cwd": "/workspace/app",
+  "readiness": { "port": 3000, "path": "/health", "timeoutMs": 30000 }
+}
+```
+
+The recipe runs a user-authored shell command; review it before saving. Working
+directory defaults to `/workspace`, health path to `/`, and readiness timeout to
+30 seconds (allowed range 1–60 seconds). Readiness checks use a local application
+port (1024–65535), require HTTP 2xx, and do not follow redirects. Existing outbound
+policy and vault bindings keep their normal behavior; the recipe does not accept
+raw environment secrets. Saving the recipe does not run it in the source.
+
+The container and creation response include `readiness.status` (`starting`,
+`ready`, or `failed`) separately from the machine's lifecycle `status`. A running
+container alone is not application readiness. Poll `GET /containers` for the
+exact generation. Failed startup leaves the restored machine accessible, with
+`readiness.error`, `logPath`, and an optional bounded `logTail` for inspection.
+Status polling and same-key creation recovery never rerun the launch command.
+This is a fresh process and does not preserve the source's memory or nonce.
 
 | Plan | Saved workspaces | Reserved capacity | Retention | Saves/month | Capture capacity/month | Retained capture capacity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -1049,6 +1103,15 @@ Restore with `POST /containers` and `{workspaceId}` using a new persisted creati
 Each new save reserves the full source disk capacity against both capture budgets before contacting the provider, even if the resulting snapshot is smaller. Failed or uncertain saves keep their reservations; identical keyed retries do not charge again. Monthly counts/bytes reset at UTC calendar month boundaries. Retained capture capacity stays charged for at least 60 days, covering customer retention plus the provider's 30-day TTL after the last restore; daily buckets may retain earlier captures for up to one extra day. Archive, deletion, expiry and subscription changes do not refund these capture budgets. Deletion releases only live workspace count/capacity. Existing workspaces keep their original expiry. Legacy usage is migrated conservatively: saves whose records are unavailable reserve the maximum supported disk capacity.
 
 `GET /workspaces` includes `maxCaptureBytesPerMonth` and `maxRetainedCaptureBytes` in `limits`, and `savesThisMonth`, `captureBytesThisMonth`, and `retainedCaptureBytes` in `usage`. New saves return HTTP 429 with `workspace_quota_exceeded`, `workspace_save_limit`, `workspace_capture_budget_exceeded`, or `workspace_retained_budget_exceeded` when the corresponding limit is reached. Reads, restores of otherwise eligible workspaces, archive and deletion remain available when a save budget is exhausted.
+
+Each workspace reports runtime-measured snapshot `bytes` (null until known) and
+its separate live `reservedBytes`. Usage includes `captureBudgetResetsAt` (the
+next UTC month boundary), `nextRetainedCaptureReleaseAt` (the earliest retained
+accounting release, or null), and `nextRetainedCaptureReleaseBytes` (the amount
+released then). Times are Unix milliseconds. Later captures in the same daily
+bucket can move its release time later. These fields describe accounting, not a
+provider physical-deletion deadline; the next release may free only part of the
+retained budget.
 
 Reservation uses the source machine's full disk capacity, even when the snapshot is smaller. Expiry releases quota and removes usable handles; the provider controls physical retention. Backup to your own storage with `GET /containers/export?id=…&createdAt=…`: this returns a gzip tar archive of `/workspace`, limited to 16 MiB compressed and 60 seconds. Export a restored saved workspace to download it. Export excludes other root paths, mounted volumes and process memory, and fails if the archive exceeds the limit or files change during capture. It shares the four-operation limit with other filesystem operations.
 

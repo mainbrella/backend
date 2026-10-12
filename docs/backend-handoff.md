@@ -31,7 +31,7 @@ guidance is synchronized for 0.1.0 on both registries.
 5. If desired, budget a separate start for `npm run status:canary` to record a synthetic provisioning observation. Recurring paid canaries are not enabled by these changes.
 6. Publish frontend integrations and claims after verifying the deployed contract.
 
-Managed commands share the four-command sandbox limit with foreground commands and file operations. They have a maximum 15-minute timeout bounded by the sandbox lease. Each sandbox retains up to 32 execution records for one hour. Disconnecting from the event stream does not cancel a command; cancellation is explicit.
+Managed commands share the four-command sandbox limit with foreground commands and file operations. They have a maximum 15-minute timeout bounded by the sandbox lease. Each physical sandbox slot retains identities/state and output for one hour across generations, with separate limits of 512 compact records, 32 MiB of raw output and 16,384 events. Active jobs reserve a full 1 MiB/512 events; terminal jobs charge actual retained counters. No unexpired output or idempotency identity is evicted. Capacity errors include bounded Retry-After hints; matching retries keep their original identity. These per-slot budgets imply a hard bound across the 500 addressable slots, not a separate pooled account quota. Disconnecting from the event stream does not cancel a command; cancellation is explicit.
 
 On a Durable Object restart, unfinished managed jobs become `interrupted`. Recovery destroys the affected container generation to stop orphaned processes, which can interrupt other work in that generation. Use a dedicated generation when that consequence matters. Commands are never replayed automatically.
 

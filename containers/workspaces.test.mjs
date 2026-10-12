@@ -55,6 +55,49 @@ test('save/stop/restore survives controller restart, restores bytes and issues a
   assert.equal(restored.data.usage.starts,2);
   const stale=await f.call('/containers?id=small&createdAt='+encodeURIComponent(source.createdAt),'DELETE');assert.equal(stale.status,409);assert.equal(runtime.running,true);
 });
+test('saved launch recipe is canonical, immutable on keyed save, and never launches in the source',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],sourceMachine=f.machineFor('owner',source.id);
+  sourceMachine.runtime.files={document:'source preserved'};
+  const launch={command:'npm start',readiness:{port:3000}};
+  const saved=await f.save(source,{launch},'save-launch');assert.equal(saved.status,201);
+  assert.deepEqual(saved.data.launch,{command:'npm start',cwd:'/workspace',readiness:{port:3000,path:'/',timeoutMs:30000}});
+  const replay=await f.save(source,{launch:{readiness:{timeoutMs:30000,path:'/',port:3000},cwd:'/workspace',command:'npm start'}},'save-launch');
+  assert.equal(replay.status,200);assert.equal(replay.data.id,saved.data.id);assert.equal(sourceMachine.runtime.captures,1);
+  assert.equal((await f.save(source,{launch:{...launch,command:'another command'}},'save-launch')).status,409);
+  const target=f.machineFor('owner','c1');target.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  const restored=await f.start({workspaceId:saved.data.id},'restore-launch');assert.equal(restored.status,200);
+  assert.ok(['starting','ready'].includes(restored.data.creation.readiness.status));
+  await Promise.all([...target.controller.restoreReadinessTasks.values()]);
+  const again=await f.start({workspaceId:saved.data.id},'restore-launch');
+  assert.equal(again.data.creation.readiness.status,'ready');assert.equal(again.data.creation.createdAt,restored.data.creation.createdAt);
+  assert.equal(target.runtime.starts.length,1);assert.equal(target.runtime.starts[0].entrypoint[3],'mainbrella-restore');
+  assert.equal(sourceMachine.runtime.starts.length,1);assert.deepEqual(sourceMachine.runtime.starts[0].entrypoint,['sleep','infinity']);
+  assert.deepEqual(sourceMachine.runtime.files,{document:'source preserved'});
+  assert.equal((await f.call('/workspaces?workspaceId='+saved.data.id)).data.launch.command,'npm start');
+});
+test('lost restore response and account restart reconcile the launched generation without running its recipe twice',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],saved=(await f.save(source,{launch:{command:'npm start',readiness:{port:3000}}})).data;
+  const target=f.machineFor('owner','c1'),original=target.fetch;let lost=true;
+  target.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  target.fetch=async request=>{const response=await original(request);if(lost&&new URL(request.url).pathname==='/container/workspace-launch-v1'){lost=false;throw new Error('response_lost');}return response;};
+  assert.equal((await f.start({workspaceId:saved.id},'lost-restore')).status,503);
+  await Promise.all([...target.controller.restoreReadinessTasks.values()]);
+  const account=f.accountFor('owner');f.accounts.set('owner',new ContainerAccountController(account.ctx,f.machineFor,f.now));
+  assert.equal((await f.start({workspaceId:saved.id},'lost-restore')).data.creation.status,'starting');
+  f.setTime(f.now()+90001);
+  const replay=await f.start({workspaceId:saved.id},'lost-restore');assert.equal(replay.status,200);
+  assert.equal(replay.data.creation.readiness.status,'ready');assert.equal(target.runtime.starts.length,1);
+  assert.equal(replay.data.usage.starts,2);
+});
+test('unsupported restore-launch runtime and malformed recipes fail before any restore start',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0];
+  assert.equal((await f.save(source,{launch:{command:'npm start',readiness:{port:22}}})).data.error,'invalid_launch_recipe');
+  const saved=(await f.save(source,{launch:{command:'npm start',readiness:{port:3000}}})).data;
+  const target=f.machineFor('owner','c1'),original=target.fetch;
+  target.fetch=request=>new URL(request.url).pathname==='/workspaces/restore-preflight-v1'?Promise.resolve(Response.json({compatible:true})):original(request);
+  const denied=await f.start({workspaceId:saved.id});assert.equal(denied.status,503);assert.equal(denied.data.error,'workspace_launch_unavailable');
+  assert.equal(target.runtime.starts.length,0);assert.equal((await f.call('/containers')).data.usage.starts,1);
+});
 test('ownership, archived policy, resource/network selection, image compatibility and expiry fail before admission',async()=>{
   const f=fixture(),source=(await f.start()).data.containers[0],saved=(await f.save(source,{stop:true})).data;
   assert.equal((await f.call('/workspaces?workspaceId='+saved.id,'GET',undefined,{},'other')).status,404);
@@ -85,7 +128,8 @@ test('lost snapshot response reconciles receipt without recapture, and changed i
   let lost=true;machine.fetch=async req=>{const response=await original(req);if(lost&&new URL(req.url).pathname==='/workspaces/snapshot-v1'){lost=false;throw new Error('response_lost');}return response;};
   assert.equal((await f.save(source,{},'recovery')).status,503);assert.equal(machine.runtime.captures,1);
   assert.equal((await f.save(source,{},'recovery')).status,201);assert.equal(machine.runtime.captures,1);
-  assert.deepEqual((await f.call('/workspaces')).data.usage,{saved:1,reservedBytes:2_000_000_000,savesThisMonth:1,captureBytesThisMonth:2_000_000_000,retainedCaptureBytes:2_000_000_000});
+  assert.deepEqual((await f.call('/workspaces')).data.usage,{saved:1,reservedBytes:2_000_000_000,savesThisMonth:1,captureBytesThisMonth:2_000_000_000,retainedCaptureBytes:2_000_000_000,
+    captureBudgetResetsAt:Date.UTC(2026,10,1),nextRetainedCaptureReleaseAt:f.now()+WORKSPACE_CAPTURE_RETENTION_MS,nextRetainedCaptureReleaseBytes:2_000_000_000});
   assert.equal((await f.save(source,{name:'different'},'recovery')).status,409);
 });
 test('provider restore rejection never starts an empty image; uncertain capture cannot be repeated',async()=>{
@@ -200,6 +244,34 @@ test('retained workspace receipts are stored in bounded chunks and legacy indexe
 
 
 const lifecycle = (f, action, source, key=crypto.randomUUID(), extra={}) => f.call(`/containers/${action}`, 'POST', {id:source.id,createdAt:source.createdAt,...extra}, {'Idempotency-Key':key});
+
+test('stop, resume and fork inherit the launch recipe after the original workspace is deleted',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0];
+  const saved=(await f.save(source,{stop:true,launch:{command:'npm start',readiness:{port:3000}}})).data;
+  const target=f.machineFor('owner',source.id);target.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  let restored=await f.start({workspaceId:saved.id});assert.equal(restored.status,200);
+  await Promise.all([...target.controller.restoreReadinessTasks.values()]);
+  const app=restored.data.containers[0];
+  assert.equal('_restoreLaunch' in app,false);
+  assert.equal((await f.call('/workspaces?workspaceId='+saved.id,'DELETE')).status,200);
+  assert.equal((await lifecycle(f,'stop',app,'recipe-stop')).status,200);
+  const checkpoint=(await f.accountFor('owner').workspaces.index()).records.find(record=>record.operationKey==='stop:recipe-stop');
+  assert.deepEqual(checkpoint.launch,saved.launch);
+  const account=f.accountFor('owner');f.accounts.set('owner',new ContainerAccountController(account.ctx,f.machineFor,f.now));
+  const resumed=await lifecycle(f,'resume',app,'recipe-resume');assert.equal(resumed.status,200);
+  await Promise.all([...target.controller.restoreReadinessTasks.values()]);
+  assert.equal(target.runtime.starts.at(-1).entrypoint[4],'npm start');
+  assert.equal(target.runtime.starts.length,3);
+  const current=resumed.data.containers[0];assert.notEqual(current.createdAt,app.createdAt);
+  const forkTarget=f.machineFor('owner','c1');forkTarget.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  const forked=await lifecycle(f,'fork',current,'recipe-fork');assert.equal(forked.status,200);
+  await Promise.all([...forkTarget.controller.restoreReadinessTasks.values()]);
+  assert.equal(forkTarget.runtime.starts.length,1);assert.equal(forkTarget.runtime.starts[0].entrypoint[4],'npm start');
+  assert.equal(target.runtime.starts.length,3);assert.equal(target.runtime.running,true);
+  const replay=await lifecycle(f,'fork',current,'recipe-fork');assert.equal(replay.status,200);
+  assert.equal(replay.data.creation.readiness.status,'ready');assert.equal(forkTarget.runtime.starts.length,1);
+  assert.ok(replay.data.containers.every(container=>!('_restoreLaunch' in container)));
+});
 
 test('safe stop preserves bytes, reserves identity without compute, and resumes with a fresh generation after eviction', async()=>{
   const f=fixture(),source=(await f.start({name:'Development'})).data.containers[0],runtime=f.machineFor('owner',source.id).runtime;
@@ -390,4 +462,45 @@ test('a lost stop capture can recover its workspace without stopping a newer slo
   assert.equal((await lifecycle(f,'stop',source,'old-capture')).status,409);assert.equal(machine.runtime.running,true);assert.equal(machine.runtime.captures,1);
   const saved=(await f.call('/workspaces')).data.workspaces[0];assert.equal(saved.status,'ready');
   const restored=await f.start({workspaceId:saved.id});assert.equal(restored.status,200);assert.deepEqual(f.machineFor('owner',restored.data.creation.containerId).runtime.files,{old:'checkpoint'});
+});
+
+test('workspace accounting distinguishes snapshot bytes, live reservations and retained budget release',async()=>{
+  const f=fixture('scale'),source=(await f.start()).data.containers[0],firstAt=f.now();
+  const first=(await f.save(source)).data;
+  assert.equal(first.bytes,2048);assert.equal(first.reservedBytes,2_000_000_000);
+  f.setTime(firstAt+60_000);
+  const second=(await f.save(source)).data;
+  await f.call('/workspaces?workspaceId='+first.id,'DELETE');
+  let usage=(await f.call('/workspaces')).data.usage;
+  assert.equal(usage.reservedBytes,second.reservedBytes);
+  assert.equal(usage.retainedCaptureBytes,4_000_000_000);
+  assert.equal(usage.nextRetainedCaptureReleaseAt,firstAt+60_000+WORKSPACE_CAPTURE_RETENTION_MS);
+  assert.equal(usage.nextRetainedCaptureReleaseBytes,4_000_000_000);
+  assert.equal(usage.captureBudgetResetsAt,Date.UTC(2026,10,1));
+  // A later day's capture releases independently; the earliest release is not
+  // a promise to free all retained capacity or physically erase provider data.
+  f.setTime(firstAt+86400_000);
+  const laterSource=(await f.start()).data.containers[0];
+  const third=(await f.save(laterSource)).data;
+  usage=(await f.call('/workspaces')).data.usage;
+  assert.equal(usage.retainedCaptureBytes,6_000_000_000);
+  assert.equal(usage.nextRetainedCaptureReleaseBytes,4_000_000_000);
+  f.setTime(second.expiresAt);
+  assert.equal((await f.call('/workspaces?workspaceId='+second.id)).data.reservedBytes,0);
+  await f.call('/workspaces?workspaceId='+third.id,'DELETE');
+  f.setTime(firstAt+WORKSPACE_CAPTURE_RETENTION_MS);
+  usage=(await f.call('/workspaces')).data.usage;
+  assert.equal(usage.saved,0);assert.equal(usage.reservedBytes,0);
+  assert.equal(usage.retainedCaptureBytes,6_000_000_000);
+  assert.equal(usage.captureBytesThisMonth,0);
+  f.setTime(firstAt+60_000+WORKSPACE_CAPTURE_RETENTION_MS);
+  usage=(await f.call('/workspaces')).data.usage;
+  assert.equal(usage.retainedCaptureBytes,2_000_000_000);
+  assert.equal(usage.nextRetainedCaptureReleaseBytes,2_000_000_000);
+  assert.equal(usage.nextRetainedCaptureReleaseAt,firstAt+86400_000+WORKSPACE_CAPTURE_RETENTION_MS);
+  f.setTime(usage.nextRetainedCaptureReleaseAt);
+  usage=(await f.call('/workspaces')).data.usage;
+  assert.equal(usage.retainedCaptureBytes,0);
+  assert.equal(usage.nextRetainedCaptureReleaseAt,null);
+  assert.equal(usage.nextRetainedCaptureReleaseBytes,0);
 });

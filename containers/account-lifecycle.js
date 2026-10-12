@@ -75,7 +75,7 @@ export class AccountLifecycle {
         if (pendingCapture) await a.workspaces.capture(state, undefined, `stop:${key}`, { ...body, name: pendingCapture.name, stop: false }, { index, record: pendingCapture });
         return a.respond({ error: 'container_not_running' }, 409);
       }
-      const capture = await a.workspaces.capture(state, source, `stop:${key}`, { ...body, name: pendingCapture?.name ?? `Stopped ${source.name}`.slice(0, 80), stop: false }, { index, record: pendingCapture });
+      const capture = await a.workspaces.capture(state, source, `stop:${key}`, { ...body, name: pendingCapture?.name ?? `Stopped ${source.name}`.slice(0, 80), stop: false }, { index, record: pendingCapture, inheritLaunch: true });
       if (capture instanceof Response) return capture;
       const selection = capture.record.sourceSelection ?? { lifecycle: source.lifecycle ?? 'ad_hoc', name: source.name };
       state.suspended ??= {};

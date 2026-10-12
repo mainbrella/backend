@@ -2,7 +2,7 @@ import { MAX_EXECUTIONS, MAX_OUTPUT_BYTES, readCommandBody } from './command-con
 import { validIdempotencyKey } from './container-account-core.js';
 import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 import { FILE_TIMEOUT_MS, readFileBytes } from './file-contract.js';
-import { MAX_MANAGED_TIMEOUT_MS, EXECUTION_RETENTION_MS, MAX_RETAINED_EXECUTIONS, MAX_EXECUTION_EVENTS,
+import { MAX_MANAGED_TIMEOUT_MS, EXECUTION_RETENTION_MS, MAX_RETAINED_EXECUTIONS, MAX_RETAINED_EXECUTION_OUTPUT_BYTES, MAX_RETAINED_EXECUTION_EVENTS, MAX_EXECUTION_EVENTS,
   MAX_EXECUTION_STREAMS, EXECUTION_STREAM_MS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES,
   EXECUTION_SIGNALS, executionFingerprintValues, validExecution, validExecutionId, validTerminalSize, terminalExecution } from './execution-contract.js';
 
@@ -34,6 +34,27 @@ export class ManagedExecutions {
     try { return await fn(); } finally { release(); }
   }
   async records() { return this.ctx.storage.list({ prefix: RECORD, limit: MAX_RETAINED_EXECUTIONS + 1 }); }
+  capacityError(error, records = []) {
+    // An active command may release unused reservation earlier. The first
+    // retained expiry is a conservative retry hint, never a promise of admission.
+    const now = this.controller.now();
+    const expiry = records.length ? Math.min(...records.map(record => record.retainUntil)) : now + 1000;
+    const retryAfterSeconds = Math.max(1, Math.ceil((expiry - now) / 1000));
+    const response = this.controller.respond({ error, retryAfterSeconds }, 429);
+    response.headers.set('Retry-After', String(retryAfterSeconds));
+    return response;
+  }
+  retainedCapacity(records) {
+    let outputBytes = 0, events = 0;
+    for (const record of records) {
+      // Legacy records already contain both counters. An incomplete legacy
+      // counter reserves its full allowance rather than assuming zero storage.
+      const terminal = terminalExecution(record);
+      outputBytes += terminal && Number.isSafeInteger(record.outputBytes) && record.outputBytes >= 0 ? record.outputBytes : MAX_OUTPUT_BYTES;
+      events += terminal && Number.isSafeInteger(record.cursor) && record.cursor >= 0 ? record.cursor : MAX_EXECUTION_EVENTS;
+    }
+    return { outputBytes, events };
+  }
   async erase(record) {
     this.activityStatuses.delete(record.id);
     const events = await this.ctx.storage.list({ prefix: eventPrefix(record.id), limit: MAX_EXECUTION_EVENTS + 2 });
@@ -123,9 +144,15 @@ export class ManagedExecutions {
         ? this.controller.respond(summary(existing), 202) : this.controller.respond({ error: 'idempotency_key_conflict' }, 409);
       const metadata = await this.controller.getTerminalMetadata(createdAt, expiresAt);
       if (!metadata) return this.controller.respond({ error: 'container_not_running' }, 409);
-      if (this.active.size >= MAX_EXECUTIONS) return this.controller.respond({ error: 'execution_limit' }, 429);
-      // Reject admission instead of evicting an unexpired idempotency identity.
-      if (records.size >= MAX_RETAINED_EXECUTIONS) return this.controller.respond({ error: 'execution_history_limit' }, 429);
+      if (this.active.size >= MAX_EXECUTIONS) return this.capacityError('execution_limit');
+      // Keep every unexpired identity and output event. Reserve the complete
+      // per-command payload allowance before launch; terminal jobs charge only
+      // their actual counters, so short commands do not consume full 1 MiB slots.
+      const retained = [...records.values()];
+      if (records.size >= MAX_RETAINED_EXECUTIONS) return this.capacityError('execution_history_limit', retained);
+      const capacity = this.retainedCapacity(retained);
+      if (capacity.outputBytes + MAX_OUTPUT_BYTES > MAX_RETAINED_EXECUTION_OUTPUT_BYTES) return this.capacityError('execution_output_history_limit', retained);
+      if (capacity.events + MAX_EXECUTION_EVENTS > MAX_RETAINED_EXECUTION_EVENTS) return this.capacityError('execution_event_history_limit', retained);
       const now = this.controller.now();
       const record = { id: crypto.randomUUID(), createdAt, incarnation: metadata.telemetryId, startedAt: new Date(now).toISOString(), status: 'starting',
         retainUntil: now + EXECUTION_RETENTION_MS, cursor: 0, outputBytes: 0, exitCode: null,

@@ -7,7 +7,7 @@ import { UserContainerController } from './user-container-core.js';
 import { hostProcessGroups } from './test-process-group.js';
 import { executeCommand } from './commands.js';
 import { MAX_OUTPUT_BYTES } from './command-contract.js';
-import { MAX_RETAINED_EXECUTIONS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES, MAX_EXECUTION_EVENTS, validExecution } from './execution-contract.js';
+import { MAX_RETAINED_EXECUTIONS, MAX_RETAINED_EXECUTION_OUTPUT_BYTES, MAX_RETAINED_EXECUTION_EVENTS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES, MAX_EXECUTION_EVENTS, validExecution } from './execution-contract.js';
 
 const createdAt = '2026-10-05T12:00:00.000Z';
 const now = Date.parse(createdAt);
@@ -406,4 +406,99 @@ test('managed PTY cancellation terminates its group and replacement resize canno
   await Promise.all(f.work);
   assert.equal((await (await f.manager.fetch(request(`/${record.id}`))).json()).status, 'canceled');
   assert.equal(f.active.size, 0);
+});
+
+test('more than 32 short jobs and replacement generations retain output and idempotency across restart', async t => {
+  const f = fixture(t), records = [];
+  const nextGeneration = new Date(now + 1).toISOString();
+  for (let n = 0; n < 80; n++) {
+    const generation = n < 40 ? createdAt : nextGeneration;
+    if (n === 40) f.values.get('builderMachine').createdAt = now + 1;
+    const response = await f.manager.fetch(request('', 'POST', { command: `printf job-${n}` }, `short-${n}`, generation));
+    assert.equal(response.status, 202, `job ${n}: ${await response.clone().text()}`);
+    records.push(await response.json());
+    await Promise.all(f.work);
+  }
+  assert.equal(f.children.length, 80);
+  const restarted = new ManagedExecutions(f.manager.controller, f.active, f.ctx);
+  await restarted.recover();
+  for (const n of [0, 39, 40, 79]) {
+    const generation = n < 40 ? createdAt : nextGeneration;
+    const result = await (await restarted.fetch(request(`/${records[n].id}`, 'GET', undefined, '', generation))).json();
+    assert.equal(result.stdout, `job-${n}`); assert.equal(result.status, 'succeeded');
+    const replay = await (await restarted.fetch(request(`/${records[n].id}/events`, 'GET', undefined, '', generation))).text();
+    assert.ok(replay.includes(`job-${n}`));
+  }
+  const replay = await (await restarted.fetch(request('', 'POST', { command: 'printf job-79' }, 'short-79', nextGeneration))).json();
+  assert.equal(replay.id, records[79].id); assert.equal(f.children.length, 80);
+  const list = await (await restarted.fetch(request('', 'GET', undefined, '', nextGeneration))).json();
+  assert.equal(list.executions.length, 40);
+  assert.equal((await restarted.fetch(request(`/${records[0].id}`, 'GET', undefined, '', nextGeneration))).status, 404);
+  const newScopedKey = await (await restarted.fetch(request('', 'POST', { command: 'printf replacement' }, 'short-0', nextGeneration))).json();
+  assert.notEqual(newScopedKey.id, records[0].id);
+  await Promise.all(f.work);
+  assert.equal(f.children.length, 81);
+});
+
+function retainedRecord(f, index, { outputBytes = 0, cursor = 0, retainUntil = now + 3600_000, generation = createdAt } = {}) {
+  const id = crypto.randomUUID();
+  f.values.set('execution-record:' + id, { id, key: `retained-${index}`, fingerprint: 'legacy-fingerprint', createdAt: generation,
+    status: 'succeeded', cursor, outputBytes, retainUntil });
+  return id;
+}
+
+test('active reservations share the slot byte budget with legacy and previous-generation output', async t => {
+  const f = fixture(t);
+  for (let n = 0; n < MAX_RETAINED_EXECUTION_OUTPUT_BYTES / MAX_OUTPUT_BYTES - 1; n++) {
+    retainedRecord(f, n, { outputBytes: MAX_OUTPUT_BYTES, cursor: 1, generation: '2026-10-05T11:00:00.000Z' });
+  }
+  const active = await (await f.manager.fetch(request('', 'POST', { command: 'exec sleep 20' }, 'reserved'))).json();
+  const retry = await f.manager.fetch(request('', 'POST', { command: 'exec sleep 20' }, 'reserved'));
+  assert.equal(retry.status, 202); assert.equal((await retry.json()).id, active.id);
+  const denied = await f.manager.fetch(request('', 'POST', { command: 'printf extra' }, 'extra'));
+  assert.equal(denied.status, 429); assert.equal(denied.headers.get('Retry-After'), '3600');
+  assert.deepEqual(await denied.json(), { error: 'execution_output_history_limit', retryAfterSeconds: 3600 });
+  assert.equal(f.active.size, 1); // Three active-operation slots are still free.
+  await f.manager.fetch(request(`/${active.id}`, 'DELETE')); await Promise.all(f.work);
+  const admitted = await f.manager.fetch(request('', 'POST', { command: 'printf recovered' }, 'extra'));
+  assert.equal(admitted.status, 202); await Promise.all(f.work);
+  const result = await (await f.manager.fetch(request(`/${(await admitted.json()).id}`))).json();
+  assert.equal(result.stdout, 'recovered');
+});
+
+test('event retention has its own limit and expiry frees admission without evicting unexpired records', async t => {
+  const f = fixture(t);
+  const ids = [];
+  for (let n = 0; n < MAX_RETAINED_EXECUTION_EVENTS / MAX_EXECUTION_EVENTS; n++) {
+    ids.push(retainedRecord(f, n, { cursor: MAX_EXECUTION_EVENTS, outputBytes: 100, retainUntil: now + 2000 }));
+  }
+  const denied = await f.manager.fetch(request('', 'POST', { command: 'printf later' }, 'later'));
+  assert.equal(denied.status, 429); assert.equal(denied.headers.get('Retry-After'), '2');
+  assert.deepEqual(await denied.json(), { error: 'execution_event_history_limit', retryAfterSeconds: 2 });
+  assert.ok(ids.every(id => f.values.has('execution-record:' + id)));
+  f.setTime(now + 2000);
+  const admitted = await f.manager.fetch(request('', 'POST', { command: 'printf later' }, 'later'));
+  assert.equal(admitted.status, 202); await Promise.all(f.work);
+  assert.ok(ids.every(id => !f.values.has('execution-record:' + id)));
+});
+
+test('compact identity saturation keeps old idempotency and output through recovery and conflicting retries', async t => {
+  const f = fixture(t);
+  const first = await (await f.manager.fetch(request('', 'POST', { command: 'printf retain-me' }, 'protected'))).json();
+  await Promise.all(f.work);
+  for (let n = 1; n < MAX_RETAINED_EXECUTIONS; n++) retainedRecord(f, n);
+  const denied = await f.manager.fetch(request('', 'POST', { command: 'printf rejected' }, 'new'));
+  assert.equal(denied.status, 429); assert.equal(denied.headers.get('Retry-After'), '3600');
+  assert.deepEqual(await denied.json(), { error: 'execution_history_limit', retryAfterSeconds: 3600 });
+  const restarted = new ManagedExecutions(f.manager.controller, f.active, f.ctx);
+  await restarted.recover();
+  const replay = await restarted.fetch(request('', 'POST', { command: 'printf retain-me' }, 'protected'));
+  assert.equal(replay.status, 202); assert.equal((await replay.json()).id, first.id);
+  assert.equal((await restarted.fetch(request('', 'POST', { command: 'printf changed' }, 'protected'))).status, 409);
+  assert.equal((await (await restarted.fetch(request(`/${first.id}`))).json()).stdout, 'retain-me');
+  assert.equal(f.children.length, 1);
+  f.setTime(first.retainUntil);
+  await restarted.prune();
+  assert.equal((await restarted.fetch(request(`/${first.id}`))).status, 404);
+  assert.equal((await restarted.records()).size, 0);
 });

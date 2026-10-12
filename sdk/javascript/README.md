@@ -82,6 +82,10 @@ to a known job. Preserve the idempotency key from a failed `commands.start()` ca
 and retry the same options within the one-hour retention window. Runtime restart
 interrupts unfinished jobs and stops their matching container generation.
 
+Managed execution capacity errors expose `error.retryAfterSeconds` when the API
+provides a valid retry hint. The SDK does not automatically resubmit commands.
+Retain the original idempotency key and stay within its recovery window.
+
 For richer process control, check `execution.argv`, `stdin`, `signals`, `managedProcessListing`, `programmaticPty` and `ptyResize` in `client.capabilities()`:
 
 ```js
@@ -191,6 +195,15 @@ await client.workspaces.delete(saved.id);
 ```
 
 `client.workspaces.list()`, `.get(id)` and `.update(id, {name, archived})` manage saved metadata. Retry an ambiguous save with its original body and key (`error.idempotencyKey`). Restore consumes one start, requires the saved image digest, size and internet policy, and restores filesystem bytes with a fresh generation. RAM, processes and previews do not resume. Plan quotas and expiry apply; archive retains quota, while deletion revokes future restores without immediately erasing provider-held bytes.
+
+The unreleased SDK also accepts a launch recipe when the deployment advertises
+`persistence.restoreLaunch`. Pass `launch: {command: 'node server.mjs',
+cwd: '/workspace/app', readiness: {port: 3000, path: '/health'}}` to
+`saveWorkspace`. Each restore starts that command once in the new generation.
+Restore returns when the machine is running; inspect its `readiness` field and
+refresh the exact container through `client.list()` until it is `ready` or
+`failed`. Failure diagnostics include a log path and bounded tail. A successful
+health check does not imply that the original process memory was restored.
 
 ## Run a public GitHub repository
 

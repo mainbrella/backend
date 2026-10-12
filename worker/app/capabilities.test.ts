@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { handleRequest } from './router';
 import { capabilitiesSchema } from './openapi-capabilities';
 import { MAX_EXECUTIONS, MAX_TIMEOUT_MS, MAX_OUTPUT_BYTES } from '../../containers/command-contract.js';
+import { MAX_RETAINED_EXECUTIONS, MAX_RETAINED_EXECUTION_OUTPUT_BYTES, MAX_RETAINED_EXECUTION_EVENTS } from '../../containers/execution-contract.js';
 import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 
 test('public discovery needs no bindings, matches runtime limits and parses against its response schema', async () => {
@@ -13,6 +14,11 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
   assert.equal(value.execution.maxConcurrentOperations, MAX_EXECUTIONS);
   assert.equal(value.execution.maxTimeoutMs, MAX_TIMEOUT_MS);
   assert.equal(value.execution.maxOutputBytes, MAX_OUTPUT_BYTES);
+  assert.equal(value.execution.maxRetainedExecutions, MAX_RETAINED_EXECUTIONS);
+  assert.equal(value.execution.maxRetainedOutputBytes, MAX_RETAINED_EXECUTION_OUTPUT_BYTES);
+  assert.equal(value.execution.maxRetainedEvents, MAX_RETAINED_EXECUTION_EVENTS);
+  assert.equal(value.execution.retentionScope, 'container-slot');
+  assert.equal(value.persistence.restoreLaunch, false);
   assert.equal(value.files.maxFileBytes, MAX_FILE_BYTES);
   assert.equal(value.images.customBuilds, false);
   assert.equal(value.images.crossBuildCache, false);
@@ -55,4 +61,14 @@ test('managed pools and private registry discovery require complete deployment c
   assert.equal((await read()).images.customBuilds, false);
   assert.equal((await read()).images.crossBuildCache, false);
   assert.equal((await read()).images.privateRegistryImports, false);
+});
+
+
+test('restore launch discovery requires all saved-workspace deployment bindings', async () => {
+  const env = { USER_CONTAINER: {}, CONTAINER_ACCOUNT: {}, WORKSPACE_PERSISTENCE_ENABLED: 'true' } as unknown as Env;
+  const read = async () => capabilitiesSchema.parse(await (await handleRequest(new Request('https://api.mainbrella.com/capabilities'), env)).json());
+  assert.equal((await read()).persistence.restoreLaunch, true);
+  env.WORKSPACE_PERSISTENCE_ENABLED = 'false'; assert.equal((await read()).persistence.restoreLaunch, false);
+  env.WORKSPACE_PERSISTENCE_ENABLED = 'true'; delete (env as Partial<Env>).CONTAINER_ACCOUNT;
+  assert.equal((await read()).persistence.restoreLaunch, false);
 });

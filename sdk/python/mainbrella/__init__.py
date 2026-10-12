@@ -35,12 +35,13 @@ def verify_webhook_signature(body, signature, signing_secret, now=None, toleranc
 
 
 class MainbrellaError(Exception):
-    def __init__(self, code, status=0, idempotency_key=None, preview_id=None):
+    def __init__(self, code, status=0, idempotency_key=None, preview_id=None, retry_after_seconds=None):
         super().__init__(code)
         self.code = code
         self.status = status
         self.idempotency_key = idempotency_key
         self.preview_id = preview_id
+        self.retry_after_seconds = retry_after_seconds
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -102,17 +103,21 @@ class Mainbrella:
                 with data:
                     data = data.read(16384)
             preview_id = None
+            retry_after_seconds = None
             try:
                 value = json.loads(data)
                 code = value.get("error") if isinstance(value, dict) else None
                 candidate = value.get("previewId") if isinstance(value, dict) else None
                 if code == "preview_reconciliation_required" and isinstance(candidate, str) and re.fullmatch(r"[a-f0-9]{32}", candidate):
                     preview_id = candidate
+                retry = value.get('retryAfterSeconds') if isinstance(value, dict) else None
+                if status == 429 and type(retry) is int and 1 <= retry <= 3600:
+                    retry_after_seconds = retry
             except (ValueError, TypeError):
                 code = None
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
                 code = "request_failed"
-            raise MainbrellaError(code, status, preview_id=preview_id)
+            raise MainbrellaError(code, status, preview_id=preview_id, retry_after_seconds=retry_after_seconds)
         if stream:
             if isinstance(data, bytes):
                 return Download(io.BytesIO(data), len(data))
@@ -222,9 +227,10 @@ class Mainbrella:
                     sandbox.workspace_id = selected.get('workspaceId')
                     sandbox.network_policy = selected.get('networkPolicy')
                     sandbox.secret_bindings = selected.get('secretBindings')
+                    sandbox.readiness = selected.get('readiness')
                     return sandbox
             except MainbrellaError as error:
-                if error.code in ('network_policy_unavailable', 'persistence_unavailable', 'secrets_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
+                if error.code in ('network_policy_unavailable', 'persistence_unavailable', 'workspace_launch_unavailable', 'secrets_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
                     error.idempotency_key = key
                     raise
             time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
@@ -642,12 +648,15 @@ class Sandbox:
             error.idempotency_key = key
             raise
 
-    def save_workspace(self, name, stop=False, idempotency_key=None):
+    def save_workspace(self, name, stop=False, idempotency_key=None, launch=None):
         key = idempotency_key or str(uuid.uuid4())
         if not isinstance(name, str) or not 1 <= len(name) <= 80 or type(stop) is not bool or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', key):
             raise MainbrellaError('invalid_workspace_options')
         try:
-            return self.client.request('/workspaces', 'POST', {'id': self.id, 'createdAt': self.created_at, 'name': name, 'stop': stop}, {'Idempotency-Key': key})
+            body = {'id': self.id, 'createdAt': self.created_at, 'name': name, 'stop': stop}
+            if launch is not None:
+                body['launch'] = launch
+            return self.client.request('/workspaces', 'POST', body, {'Idempotency-Key': key})
         except MainbrellaError as error:
             error.idempotency_key = key
             raise

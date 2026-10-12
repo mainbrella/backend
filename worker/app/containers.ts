@@ -98,7 +98,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
     // Forward only the server-resolved image, never browser image keys or resources.
     const response = await accountResponse(env, user.id, entitlement, request.method, id, url.searchParams.get('createdAt'), selection, idempotencyKey);
     const data = await response.json() as { error?: string };
-    if (response.status === 503 && ['network_policy_unavailable', 'production_unavailable', 'secrets_unavailable'].includes(data.error ?? '')) return authJson(data, 503, cors);
+    if (response.status === 503 && ['network_policy_unavailable', 'production_unavailable', 'secrets_unavailable', 'workspace_launch_unavailable'].includes(data.error ?? '')) return authJson(data, 503, cors);
     if ([400, 402, 404, 409, 410, 429].includes(response.status) || response.status===503&&data.error==='persistence_unavailable') return authJson(data, response.status, cors);
     if (!response.ok) throw new Error('machine_request_failed');
     return authJson(data, response.status, cors);

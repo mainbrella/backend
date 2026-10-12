@@ -10,6 +10,53 @@ GENERATION = "2026-10-05T12:00:00.000Z"
 
 
 class ClientTests(unittest.TestCase):
+    def test_execution_capacity_preserves_bounded_retry_hint_without_resubmitting(self):
+        for retry in (45, -1, '45', 3601, True):
+            calls = []
+            def transport(url, method, headers, body, timeout):
+                calls.append(url)
+                return 429, json.dumps({'error': 'execution_output_history_limit', 'retryAfterSeconds': retry}).encode()
+            sandbox = Mainbrella(KEY, transport=transport).connect('small', GENERATION)
+            with self.assertRaises(MainbrellaError) as caught:
+                sandbox.commands.start('echo once', idempotency_key='capacity-key')
+            self.assertEqual(caught.exception.code, 'execution_output_history_limit')
+            self.assertEqual(caught.exception.idempotency_key, 'capacity-key')
+            self.assertEqual(caught.exception.retry_after_seconds, 45 if type(retry) is int and retry == 45 else None)
+            self.assertEqual(len(calls), 1)
+
+    def test_unsupported_restore_launch_does_not_retry_known_rejection(self):
+        calls = []
+        def transport(url, method, headers, body, timeout):
+            calls.append(urlsplit(url).path)
+            if calls[-1] == '/capabilities':
+                return 200, b'{"persistence":{"snapshots":true,"restoreLaunch":true}}'
+            return 503, b'{"error":"workspace_launch_unavailable"}'
+        client = Mainbrella(KEY, transport=transport)
+        with self.assertRaises(MainbrellaError) as caught:
+            client.workspaces.restore('d688d42a-25ef-4c13-9b28-21a0fde6e163',
+                                      idempotency_key='restore-recovery', wait_timeout=0.1, poll_interval=0.001)
+        self.assertEqual(caught.exception.code, 'workspace_launch_unavailable')
+        self.assertEqual(caught.exception.idempotency_key, 'restore-recovery')
+        self.assertEqual(calls, ['/capabilities', '/containers'])
+
+    def test_workspace_launch_recipe_survives_an_ambiguous_save(self):
+        calls = []
+        launch = {"command": "node server.mjs", "cwd": "/workspace/app",
+                  "readiness": {"port": 3000, "path": "/health", "timeoutMs": 5000}}
+        def transport(url, method, headers, body, timeout):
+            calls.append((urlsplit(url).path, headers, body))
+            if len(calls) == 1:
+                return 503, b'{"error":"workspaces_unavailable"}'
+            return 200, b'{"id":"d688d42a-25ef-4c13-9b28-21a0fde6e163"}'
+        sandbox = Mainbrella(KEY, transport=transport).connect("small", GENERATION)
+        with self.assertRaises(MainbrellaError) as caught:
+            sandbox.save_workspace("Application", idempotency_key="save-recovery", launch=launch)
+        self.assertEqual(caught.exception.idempotency_key, "save-recovery")
+        sandbox.save_workspace("Application", idempotency_key="save-recovery", launch=launch)
+        self.assertEqual(calls[0][2], calls[1][2])
+        self.assertEqual(calls[1][1]["Idempotency-Key"], "save-recovery")
+        self.assertEqual(json.loads(calls[1][2])["launch"], launch)
+
     def test_workspace_restore_fails_closed_without_start(self):
         calls = []
         def transport(url, method, headers, body, timeout):

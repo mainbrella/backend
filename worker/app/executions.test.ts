@@ -119,3 +119,27 @@ test('PTY resize validates dimensions, running paid generation and private forwa
   f.containers.get(USER_ONE)![0].createdAt = GENERATION_ONE; f.setBillingMode('failure');
   assert.equal((await handleRequest(resize(), f.env)).status, 503);
 });
+
+test('managed admission forwards bounded retry hints and distinct quotas without leaking internal headers', async t => {
+  const f = await paidContainerFixture(t); t.after(() => f.close());
+  let code = 'execution_history_limit', retry: unknown = 3600;
+  f.env.USER_CONTAINER = { idFromName(name: string) { f.machineNames.push(name); return name; }, get() { return {
+    async fetch() { return Response.json({ error: code, retryAfterSeconds: retry, internal: 'private' },
+      { status: 429, headers: { 'Retry-After': '999999999', 'Set-Cookie': 'private-cookie' } }); },
+  }; } } as unknown as DurableObjectNamespace;
+  for (const error of ['execution_limit', 'execution_history_limit', 'execution_output_history_limit', 'execution_event_history_limit']) {
+    code = error;
+    const response = await handleRequest(request('', 'POST', '{"command":"printf x"}'), f.env);
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get('Retry-After'), '3600');
+    assert.equal(response.headers.get('Access-Control-Expose-Headers'), 'Retry-After');
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.deepEqual(await response.json(), { error, retryAfterSeconds: 3600 });
+  }
+  for (const invalid of [0, -1, 3601, 1.5, '60', null]) {
+    retry = invalid;
+    const response = await handleRequest(request('', 'POST', '{"command":"printf x"}'), f.env);
+    assert.equal(response.status, 429); assert.equal(response.headers.get('Retry-After'), null);
+    assert.deepEqual(await response.json(), { error: code });
+  }
+});

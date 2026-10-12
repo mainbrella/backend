@@ -1,8 +1,12 @@
-import { MAX_COMMAND_BYTES } from './command-contract.js';
+import { MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES } from './command-contract.js';
 import { validFilesystemPath } from './filesystem-contract.js';
 export const MAX_MANAGED_TIMEOUT_MS = 15 * 60_000;
 export const EXECUTION_RETENTION_MS = 60 * 60_000;
-export const MAX_RETAINED_EXECUTIONS = 32;
+// Compact identities are cheap; output and event retention have separate budgets.
+// These are per physical container slot, including every retained generation.
+export const MAX_RETAINED_EXECUTIONS = 512;
+export const MAX_RETAINED_EXECUTION_OUTPUT_BYTES = 32 * MAX_OUTPUT_BYTES;
+export const MAX_RETAINED_EXECUTION_EVENTS = 32 * 512;
 export const MAX_EXECUTION_EVENTS = 512;
 export const MAX_EXECUTION_STREAMS = 8;
 export const EXECUTION_STREAM_MS = 30_000;

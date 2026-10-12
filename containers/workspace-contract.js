@@ -20,5 +20,6 @@ export function publicWorkspace(record, now) {
   const { id, name, createdAt, expiresAt, source, size, internet, networkPolicy, secretBindings, imageDigest, imageId, imageName, catalogId, bytes, archived, stop, stopCompleted } = record;
   const status = record.deleted ? 'deleted' : expiresAt <= now ? 'expired' : record.handle ? 'ready' : record.failed ? 'failed' : 'saving';
   return { id, name, createdAt, expiresAt, source, size, internet, ...(networkPolicy ? {networkPolicy,secretBindings:secretBindings??[]} : {}), imageDigest, ...(imageId ? {imageId} : {}), ...(imageName ? {imageName} : {}), ...(catalogId ? {catalogId} : {}),
-    bytes: bytes ?? null, archived: Boolean(archived), status, stopRequested: stop, stopCompleted: Boolean(stopCompleted) };
+    bytes: bytes ?? null, reservedBytes: record.deleted || expiresAt <= now ? 0 : record.reservedBytes ?? 0,
+    archived: Boolean(archived), status, stopRequested: stop, stopCompleted: Boolean(stopCompleted), ...(record.launch ? { launch: record.launch } : {}) };
 }

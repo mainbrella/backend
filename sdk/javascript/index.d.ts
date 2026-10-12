@@ -14,7 +14,9 @@ export interface ManagedPoolOptions { name: string; targetSize: number; ttlSecon
 export interface ImageBuildOptions { name: string; dockerfile: string; context?: Uint8Array; cacheFrom?: string; baseImage?: { image: string; username?: string; password?: string } }
 export class SandboxPool { constructor(client: Mainbrella, options?: PoolOptions); readonly state: PoolState; refill(): Promise<PoolState>; acquire(): Promise<Sandbox>; close(): Promise<PoolState> }
 export interface ContainerIdentity { id: string; createdAt: string }
-export interface Workspace {id:string;name:string;createdAt:string;expiresAt:number;source:ContainerIdentity;size:MachineSize;internet:boolean;networkPolicy?:NetworkPolicy;secretBindings?:string[];imageDigest:string;imageId?:string;imageName?:string;catalogId?:string;bytes:number|null;archived:boolean;status:'saving'|'ready'|'failed'|'expired'|'deleted';stopRequested:boolean;stopCompleted:boolean}
+export interface RestoreLaunch { command: string; cwd?: string; readiness: { port: number; path?: string; timeoutMs?: number } }
+export interface RestoreReadiness { status: 'starting' | 'ready' | 'failed'; port: number; path: string; logPath: string; checkedAt?: string; error?: string; logTail?: string }
+export interface Workspace {id:string;name:string;createdAt:string;expiresAt:number;source:ContainerIdentity;size:MachineSize;internet:boolean;networkPolicy?:NetworkPolicy;secretBindings?:string[];imageDigest:string;imageId?:string;imageName?:string;catalogId?:string;bytes:number|null;reservedBytes:number;launch?:RestoreLaunch;archived:boolean;status:'saving'|'ready'|'failed'|'expired'|'deleted';stopRequested:boolean;stopCompleted:boolean}
 export interface FileEntry { name: string; path: string; type: 'file' | 'directory' | 'symlink' | 'fifo' | 'socket' | 'character' | 'block' | 'other'; size: number; mode: string; uid: number; gid: number; modifiedAt: string; linkTarget?: string }
 export interface DirectoryPage { path: string; entries: FileEntry[]; nextOffset: number | null }
 export interface ExecutionOptions { timeoutMs?: number; idempotencyKey?: string; stdin?: boolean; cwd?: string; env?: Record<string, string>; pty?: { cols: number; rows: number } }
@@ -25,7 +27,7 @@ export interface CodeContextRecord { id: string; language: 'python'; createdAt: 
 export interface CodeResult { stdout: string; stderr: string; outputTruncated: boolean;
   results: { mimeType: 'text/plain' | 'application/json' | 'text/html' | 'image/png'; data: string }[];
   error: { name: string; message: string; traceback: string } | null }
-export interface Container extends ContainerIdentity { internet?: boolean; status: 'starting' | 'running' | 'stopped'; name?: string; lifecycle?: 'ad_hoc' | 'production'; workspaceId?: string; persistenceExpiresAt?: number; networkPolicy?: NetworkPolicy; secretBindings?: string[]; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
+export interface Container extends ContainerIdentity { internet?: boolean; status: 'starting' | 'running' | 'stopped'; name?: string; lifecycle?: 'ad_hoc' | 'production'; workspaceId?: string; readiness?: RestoreReadiness; persistenceExpiresAt?: number; networkPolicy?: NetworkPolicy; secretBindings?: string[]; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | 'usage' | null; active: boolean; containers: Container[];
   sizes: Size[]; imageCatalog: { id: string; name: string }[]; limits: { maxComputeUnitHours: number; maxConcurrentComputeUnits: number; maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
   usage: { month: string; starts: number; computeUnitHours: number; reservedComputeUnitHours: number; availableComputeUnitHours: number; concurrentComputeUnits: number } }
@@ -37,9 +39,9 @@ export interface Capabilities {
     programmaticPty: boolean; ptyResize: boolean; stdin: boolean; signals: boolean; argv: boolean; managedProcessListing: boolean; processListing: boolean;
     maxStdinChunkBytes: number; maxStdinBytes: number; maxPendingStdinBytes: number;
     maxCommandBytes: number; maxTimeoutMs: number; maxOutputBytes: number; maxConcurrentOperations: number;
-    maxManagedTimeoutMs: number; retentionMs: number; maxRetainedExecutions: number };
+    maxManagedTimeoutMs: number; retentionMs: number; maxRetainedExecutions: number; maxRetainedOutputBytes: number; maxRetainedEvents: number; retentionScope: 'container-slot' };
   files: { read: boolean; write: boolean; binary: boolean; maxFileBytes: number; maxPathBytes: number; timeoutMs: number; [key: string]: boolean | number };
-  persistence: { filesystemAfterStop: boolean; filesystemFork: boolean; snapshots: boolean; workspaces?:boolean; exports?:boolean; memory: boolean; volumes: boolean };
+  persistence: { restoreLaunch: boolean; filesystemAfterStop: boolean; filesystemFork: boolean; snapshots: boolean; workspaces?:boolean; exports?:boolean; memory: boolean; volumes: boolean };
   observability: { lifecycleEvents: boolean; metrics: boolean; webhooks: boolean; otlp: boolean; eventRetentionMs: number; maxLifecycleEvents: number; maxMetricRangeMs: number; metricBucketMs: number };
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };
@@ -48,7 +50,7 @@ export interface Capabilities {
   secrets: { vault: boolean };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
-export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; constructor(code: string, status?: number, details?: Record<string, unknown>) }
+export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; retryAfterSeconds?: number; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; constructor(code: string, status?: number, details?: Record<string, unknown>) }
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
@@ -61,7 +63,7 @@ export class Mainbrella {
     create(options: ManagedPoolOptions): Promise<{ pool: ManagedPool }>; update(id: string, options: { name?: string; targetSize?: number }): Promise<{ pool: ManagedPool }>;
     delete(id: string): Promise<{ deleted: true }>; acquire(id: string, options?: { idempotencyKey?: string }): Promise<Sandbox> };
   secrets: { list(): Promise<{ secrets: SecretMetadata[] }>; create(options: { name: string; value: string; hostname: string; header: SecretMetadata['header']; prefix?: string }): Promise<SecretMetadata>; rotate(id: string, value: string): Promise<SecretMetadata>; delete(id: string): Promise<{ deleted: true }> };
-  workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number;maxCaptureBytesPerMonth:number;maxRetainedCaptureBytes:number}|null;usage:{saved:number;reservedBytes:number;savesThisMonth:number;captureBytesThisMonth:number;retainedCaptureBytes:number}}>;
+  workspaces:{list():Promise<{workspaces:Workspace[];limits:{maxSaved:number;maxReservedBytes:number;retentionMs:number;maxSavesPerMonth:number;maxCaptureBytesPerMonth:number;maxRetainedCaptureBytes:number}|null;usage:{saved:number;reservedBytes:number;savesThisMonth:number;captureBytesThisMonth:number;retainedCaptureBytes:number;captureBudgetResetsAt:number;nextRetainedCaptureReleaseAt:number|null;nextRetainedCaptureReleaseBytes:number}}>;
     get(id:string):Promise<Workspace>;update(id:string,options:{name?:string;archived?:boolean}):Promise<Workspace>;delete(id:string):Promise<{deleted:true}>;
     restore(id:string,options?:{idempotencyKey?:string;waitTimeoutMs?:number;pollIntervalMs?:number}):Promise<Sandbox>};
   request<T = unknown>(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string>; binary?: boolean; stream?: boolean; signal?: AbortSignal }): Promise<T>;
@@ -98,7 +100,8 @@ export class Sandbox implements ContainerIdentity {
   fork(options?: LifecycleOptions & { name?: string }): Promise<Sandbox>;
   networkPolicy?: NetworkPolicy; secretBindings?: string[];
   workspaceId?:string;
-  saveWorkspace(name:string,options?:{stop?:boolean;idempotencyKey?:string}):Promise<Workspace>;
+  readiness?:RestoreReadiness;
+  saveWorkspace(name:string,options?:{stop?:boolean;launch?:RestoreLaunch;idempotencyKey?:string}):Promise<Workspace>;
   exportWorkspace():Promise<Uint8Array>;
   webhook: { get(): Promise<{webhook: WebhookConfig | null}>; configure(url: string, options?: {replayFromCursor?: number}): Promise<{webhook: WebhookConfig; signingSecret: string}>;
     remove(): Promise<{removed: true}>; deliveries(): Promise<{deliveries: WebhookDelivery[]}>; retry(eventId: string): Promise<WebhookDelivery> };

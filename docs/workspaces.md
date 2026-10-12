@@ -80,6 +80,63 @@ and Production checkpoint recovery. These are not new paid-provider
 qualification results. Keep lifecycle issuance gated until a deployed runtime,
 API, SDK and dashboard qualification is completed under an approved budget.
 
+## Saved launch recipes and application readiness
+
+When `persistence.restoreLaunch` is enabled, `POST /workspaces` accepts an
+optional immutable `launch` recipe:
+
+```json
+{
+  "command": "npm start",
+  "cwd": "/workspace/app",
+  "readiness": { "port": 3000, "path": "/health", "timeoutMs": 30000 }
+}
+```
+
+Saving only records this recipe; it never starts or changes the source
+application. A restore starts the command once in its new filesystem generation.
+The command must stay in the foreground. There is no automatic restart, memory
+copy, process continuation or live cloning. Without a recipe, restore preserves
+the existing filesystem-only behavior. Safe Stop/Resume and Fork inherit the
+source generation's saved recipe, including after its original workspace has
+been deleted. Explicit Save without `launch` still creates a filesystem-only
+workspace.
+
+The command is a single line of at most 4096 characters. `cwd` is an absolute
+directory without dot segments, defaults to `/workspace`, and is limited to
+1024 characters. Readiness uses an application port from 1024–65535 and a local
+HTTP path (default `/`, at most 1024 characters); redirects are not followed.
+The timeout is 1000–60000 ms, default 30000, starting after machine boot and
+clamped to the machine's compute deadline. The save request is limited to 32 KiB.
+Recipe defaults are canonicalized before the keyed-save fingerprint is recorded.
+Recipes accept no raw environment values. Existing vault secret bindings retain
+their established egress behavior; their values are not injected into the guest.
+
+Machine `status: running` and application `readiness.status` are distinct.
+Creation responses, keyed creation retries and `GET /containers` expose
+`starting`, `ready` or `failed`. Only a local HTTP 2xx before the saved deadline
+marks the application ready. This is an initial readiness check, not continuous
+health monitoring. Status reads and retries only observe the saved launch; they
+never execute it again. The watcher operates outside account mutations, fences
+the exact generation and runtime incarnation, and resumes after controller
+eviction without relaunching the command.
+
+An exited foreground command or readiness timeout leaves the machine available
+for inspection, with `error: launch_exited` or `readiness_timeout`, `logPath` and
+up to 8192 UTF-8 bytes of diagnostic `logTail`. This tail is best effort at the
+time of failure; output may still be draining to the guest log. Exit reporting
+does not wait indefinitely for background descendants to close output streams.
+The guest retains current and
+previous log files, each bounded to 1 MiB, under the generation-specific log
+path; this bound is per launch. Later snapshots can inherit earlier log files,
+which continue to use ordinary guest disk space. Logs are authenticated account
+data and may contain application output. An unavailable launch-capable runtime
+fails closed with `workspace_launch_unavailable` rather than silently restoring
+an idle filesystem. The local controller and shell tests cover response loss,
+single launch, readiness deadlines, retained diagnostics, controller eviction,
+generation replacement and recipe inheritance. Deployment and paid-provider
+qualification remain separate work.
+
 ## Installed SDK workspace qualification
 
 On October 6, 2026, clean registry installations of `@mainbrella/sdk@0.1.0`

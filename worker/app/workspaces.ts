@@ -4,6 +4,7 @@ import { resolveEntitlement } from '../lib/entitlements';
 import { entitlementHeaders } from '../../containers/plan-policy.js';
 import { validWorkspaceId } from '../../containers/workspace-contract.js';
 import { readFileBytes } from '../../containers/file-contract.js';
+import { MAX_WORKSPACE_REQUEST_BYTES } from '../../containers/restore-launch.js';
 
 export async function handleWorkspacesRequest(request: Request, env: Env): Promise<Response> {
   const cors=authCorsHeaders(request);
@@ -22,7 +23,7 @@ export async function handleWorkspacesRequest(request: Request, env: Env): Promi
     const entitlement=request.method==='POST'?await resolveEntitlement(env,user.id):{plan:null,active:false,validUntil:null};
     let body:Uint8Array|undefined;
     if(['POST','PATCH'].includes(request.method)){
-      try{body=await readFileBytes(request.body,2048,request.signal);}catch{return authJson({error:'request_too_large'},413,cors);}
+      try{body=await readFileBytes(request.body,MAX_WORKSPACE_REQUEST_BYTES,request.signal);}catch{return authJson({error:'request_too_large'},413,cors);}
     }
     const internal=new URL('https://internal/workspaces');if(match[1])internal.searchParams.set('workspaceId',match[1]);
     const response=await env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName(`account:${user.id}`)).fetch(new Request(internal,{method:request.method,

@@ -94,6 +94,7 @@ export class Mainbrella {
       const code = typeof data?.error === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(data.error) ? data.error : 'request_failed';
       const details = code === 'preview_reconciliation_required' && /^[a-f0-9]{32}$/.test(data?.previewId ?? '')
         ? { previewId: data.previewId } : {};
+      if (response.status === 429 && Number.isSafeInteger(data?.retryAfterSeconds) && data.retryAfterSeconds >= 1 && data.retryAfterSeconds <= 3600) details.retryAfterSeconds = data.retryAfterSeconds;
       throw new MainbrellaError(code, response.status, details);
     }
     if (stream) return response;
@@ -154,7 +155,7 @@ export class Mainbrella {
           return sandbox;
         }
       } catch (error) {
-        if (!(error instanceof MainbrellaError) || ['network_policy_unavailable','persistence_unavailable','secrets_unavailable'].includes(error.code) || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
+        if (!(error instanceof MainbrellaError) || ['network_policy_unavailable','persistence_unavailable','workspace_launch_unavailable','secrets_unavailable'].includes(error.code) || error.status && error.status !== 503 || error.status === 0 && error.code !== 'transport_unavailable') {
           error.idempotencyKey = idempotencyKey;
           throw error;
         }
@@ -173,6 +174,7 @@ export class Sandbox {
     if (typeof value.internet === 'boolean') this.internet = value.internet;
     if (value.networkPolicy) this.networkPolicy = value.networkPolicy;
     if (value.secretBindings) this.secretBindings = value.secretBindings;
+    if (value.readiness) this.readiness = value.readiness;
     for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance','workspaceId']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
       ...fileTransfers(this, MainbrellaError),
@@ -244,9 +246,9 @@ export class Sandbox {
     this.desktop = desktopTools(this, MainbrellaError);
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
-  async saveWorkspace(name,{stop=false,idempotencyKey=crypto.randomUUID()}={}) {
+  async saveWorkspace(name,{stop=false,launch,idempotencyKey=crypto.randomUUID()}={}) {
     if(typeof name!=='string'||!name.length||name.length>80||typeof stop!=='boolean'||!/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey))throw new MainbrellaError('invalid_workspace_options');
-    try{return await this.client.request('/workspaces',{method:'POST',body:{id:this.id,createdAt:this.createdAt,name,stop},headers:{'Idempotency-Key':idempotencyKey}});}
+    try{return await this.client.request('/workspaces',{method:'POST',body:{id:this.id,createdAt:this.createdAt,name,stop,...(launch===undefined?{}:{launch})},headers:{'Idempotency-Key':idempotencyKey}});}
     catch(error){error.idempotencyKey=idempotencyKey;throw error;}
   }
   async stop({ idempotencyKey = crypto.randomUUID() } = {}) {

@@ -54,6 +54,7 @@ export class UserContainer extends DurableObject {
     this.webhooks.onChange = () => ctx.waitUntil(this.executions.scheduleCleanup().catch(() => { console.error('webhook_alarm_schedule_failed'); }));
     this.controller.onStarted = createdAt => this.monitor(createdAt);
     this.controller.onReady = () => this.privateServices.restore();
+    this.controller.onRestoreReadiness = createdAt => this.notifyActivity({ resource: 'containers', createdAt: new Date(createdAt).toISOString() });
     this.controller.onStopped = () => {
       this.monitoredGeneration = undefined;
       this.previews.close();
