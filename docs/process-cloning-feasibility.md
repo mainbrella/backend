@@ -20,6 +20,16 @@ queue, a paused call stack, or open connections. Report those separately in any
 comparison. Retrying a restore must reuse the original creation receipt rather
 than start another process.
 
+Ordinary running containers can now save their future recipe with
+`PATCH /containers/startup`; the app exposes Startup settings and repository
+launches register their known command, directory and readiness path. Filesystem
+fork and stop/resume inherit it. The JavaScript and Python SDKs expose an
+explicit readiness wait that fences the exact generation and surfaces startup
+failures. See [startup and readiness](workspaces.md#saved-launch-recipes-and-application-readiness).
+This is a source change, and the new `startupConfiguration` discovery flag lets
+clients distinguish it from older deployments that only accept a recipe when
+saving a workspace.
+
 ## Alternatives and their prerequisites
 
 **Provider-native memory snapshots:** the smallest integration if Cloudflare
@@ -33,9 +43,13 @@ can save and restore Linux tasks. It requires appropriate kernel features,
 permissions, and support for the workload's resources; installing a binary is
 not sufficient. See the project's
 [command and privilege documentation](https://github.com/checkpoint-restore/criu/blob/criu-dev/Documentation/criu.txt).
-We have not qualified CRIU inside a deployed Cloudflare container. The current
-start API does not expose the host privileges needed to configure a supported
-checkpoint environment. A restricted single-process experiment would not prove
+We have not qualified CRIU checkpoint/restore inside a deployed Cloudflare
+container. A read-only production diagnostic did find effective and bounding
+`SYS_ADMIN` and `SYS_PTRACE`, no seccomp filter, and a `/dev/kvm` device. The start
+API does not expose controls for those facilities, but their observed presence
+makes it incorrect to dismiss an in-guest CRIU experiment solely for missing
+privileges. Kernel features, process resources and cross-container restoration
+still need direct tests. A restricted single-process experiment would not prove
 arbitrary sandbox cloning.
 
 **A runtime we operate with memory snapshots:**
@@ -66,6 +80,48 @@ or `CHECKPOINT_RESTORE`, no `/dev/kvm`, and no CRIU binary. The container was re
 on exit. This is evidence about that local Docker configuration only; it does
 not establish the deployed Cloudflare kernel's permissions. The diagnostic's
 `processRestoreVerified` remains false in every case.
+
+The separate production diagnostic completed at 2026-10-12 12:29:19 UTC, before
+the parity work and comparison pause. It reported Linux x64,
+`6.18.54-cloudflare-microvm-2026.9.16`, UID 0, effective/bounding `SYS_ADMIN` and
+`SYS_PTRACE`, no `CHECKPOINT_RESTORE`, seccomp mode 0, `/dev/kvm` present, and no
+installed CRIU. It created and removed one owned sandbox; cleanup was confirmed.
+The input script SHA-256 was
+`6390420db07e9565fcafd1903f7e417ef6f94bdf594a47e790b9701fbc1a13f1`.
+Retained evidence is in the sibling Repo Rodeo checkout at
+`artifacts/mainbrella-checkpoint-support-2026-10-12T12-29-10-337Z/result.json`.
+This reports available facilities, not a successful checkpoint or usable nested
+virtualization.
+
+## First process experiment
+
+`experiments/criu-process-smoke.mjs` runs only in a disposable Linux guest with
+Node and CRIU already installed. It prepares five random memory-only jobs in its
+own HTTP worker, attempts a CRIU dump and restore, and compares the listening
+worker's PID, nonce and jobs before trying a cold restart. It checks the unique
+fixture path and Linux process start time before cleanup. Its report always
+distinguishes a same-guest process restore from a cross-container fork:
+
+```sh
+node experiments/criu-process-smoke.mjs --output /tmp/criu-NEW-RUN
+```
+
+The first actual run used local native ARM64 Linux, CRIU 4.1.1, added
+`SYS_ADMIN`/`SYS_PTRACE`, and seccomp disabled. CRIU's kernel check failed on
+restricted network operations and the read-only `ns_last_pid` sysctl. The actual
+Node dump also failed on an `anon_inode:[io_uring]` mapping. No restore succeeded;
+the owned worker and disposable container were removed. Evidence is in
+`artifacts/mb-criu-parity-1b1c937e/`. These are local runtime/workload failures;
+they are not evidence that the different Cloudflare x64 kernel has the same
+restrictions. Catalog images, production processes and feature flags were not
+changed by this experiment.
+
+The next gate is a bounded same-guest restore on the deployed runtime, followed
+by a consistent filesystem capture while the process is stopped and restoration
+into independent containers. Even after that works, the backend must account
+for interpreter/execution metadata held outside the guest in Durable Objects,
+process identity, sockets, timers, failure recovery and secret isolation. Keep
+`persistence.memory:false` until those semantics are implemented and qualified.
 
 ## Acceptance before enabling memory persistence
 

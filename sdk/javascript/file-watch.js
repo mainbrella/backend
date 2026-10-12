@@ -40,7 +40,7 @@ export async function watchNative(sandbox, path, { recursive = true, timeoutMs =
             try { event = JSON.parse(pending.slice(0, boundary)); } catch { throw new ErrorType('invalid_file_watch_response'); }
             pending = pending.slice(boundary + 1);
             if (event?.type === 'error') {
-              if (!['file_watch_output_limit', 'file_watch_filename_invalid', 'file_watch_unavailable'].includes(event.code)) throw new ErrorType('invalid_file_watch_response');
+              if (!['file_watch_output_limit', 'file_watch_directory_limit', 'file_watch_filename_invalid', 'file_watch_unavailable'].includes(event.code)) throw new ErrorType('invalid_file_watch_response');
               throw new ErrorType(event.code);
             }
             if (!(event?.type === 'ready' && event.path === path && event.recursive === recursive)
@@ -54,7 +54,7 @@ export async function watchNative(sandbox, path, { recursive = true, timeoutMs =
     async close() {
       if (closed) return { closed: true };
       const result = await execution.cancel();
-      if (!['succeeded', 'failed', 'canceled', 'timed_out'].includes(result?.status)) throw new ErrorType('file_watch_cleanup_unconfirmed');
+      if (!['succeeded', 'failed', 'canceled', 'timed_out', 'output_limit', 'interrupted'].includes(result?.status)) throw new ErrorType('file_watch_cleanup_unconfirmed');
       closed = true;
       return { closed: true };
     },

@@ -489,6 +489,35 @@ requests, defaults to one second, and starts after an initial baseline; transien
 changes and same-size rewrites within one second may be missed. It is independent
 of the server's native `files.watch` capability, which remains unavailable.
 
+### Native Linux notifications
+
+`watchNative` runs Linux filesystem notifications through a supervised execution;
+it does not repeatedly list files. The guest must have Node 22+ on PATH.
+
+```js
+const watcher = await sandbox.files.watchNative('/workspace/project', {
+  idempotencyKey: 'project-watch', timeoutMs: 60_000,
+});
+try {
+  for await (const event of watcher.events()) {
+    if (event.type === 'ready') continue;
+    console.log(event.type, event.filename); // rename/change; relative name or null
+    break;
+  }
+} finally { await watcher.close(); }
+```
+
+Wait for `ready` before making changes you need to observe. Recursion defaults to
+true, with at most 2,048 directories and 64 levels. The execution lasts at most
+15 minutes, occupies managed execution capacity, and stops after 512 KiB of guest
+output. Preserve `watcher.execution.id` and `watcher.idempotencyKey` for recovery.
+An aborted/disconnected event reader leaves the watcher running: call `events()`
+again on the same handle to consume retained output, or `close()` to cancel it.
+Always close in `finally`. Native notifications can coalesce or be lost, and a
+new subtree has a registration race; this is not a durable file-change journal.
+Start a new watcher after a generation ends. No server watch capability is enabled.
+See [native watcher limits](https://github.com/mainbrella/backend/blob/main/docs/native-file-watch.md).
+
 ## Linux desktop automation (unreleased)
 
 Desktop helpers require a compatible image with Python 3, Xvfb, xdpyinfo,

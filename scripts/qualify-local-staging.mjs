@@ -119,6 +119,22 @@ export async function qualifyLocalStaging({ image, output }) {
   process.on('SIGINT', onSigint); process.on('SIGTERM', onSigterm);
 
   const phase = async (name, action) => { if (abort.signal.aborted) throw new Error('local_staging_deadline'); report.stage = name; await persist(); await bounded(action(), 90_000, 'local_staging_phase_timeout', abort.signal); await persist(); };
+  const restoredListener = async (sandbox, action) => {
+    const readiness = await sandbox.waitUntilReady({ waitTimeoutMs: 65_000, pollIntervalMs: 50 });
+    assert.equal(readiness.status, 'ready');
+    const link = await sandbox.previews.create(3000, { ttlSeconds: 300 });
+    try {
+      const response = await gateway.fetch(link.url);
+      assert.equal(response.status, 200);
+      const process = await response.json();
+      assert.equal(process.fixture, 'local-staging');
+      assert.notEqual(process.nonce, report.restoreStartup.source.nonce);
+      assert.equal(process.auth, null); assert.equal(process.cookie, null);
+      assert.equal(typeof process.pid, 'number');
+      report.restoreStartup[action] = { ...identity(sandbox), initiallyListeningAfterAutomaticLaunch: true, readiness, process,
+        clientLaunchCommands: 0, sourceMemoryPreserved: false };
+    } finally { await sandbox.previews.revoke(link.id); }
+  };
   try {
     report.dockerVersion = docker(['version', '--format', '{{.Server.Version}}']);
     const details = JSON.parse(docker(['image', 'inspect', image]))[0]; // Refuses absent images; never pulls.
@@ -226,14 +242,26 @@ export async function qualifyLocalStaging({ image, output }) {
       const isolated = await source.code.create();
       try { assert.equal((await isolated.run('values')).error?.name, 'NameError'); } finally { await isolated.close(); }
       report.checks.pythonStateAndIsolation = true;
-      await source.files.write('/workspace/staging-preview.py', new TextEncoder().encode(`from http.server import BaseHTTPRequestHandler, HTTPServer\nimport json\nclass Handler(BaseHTTPRequestHandler):\n def do_GET(self):\n  data=json.dumps({'fixture':'local-staging','auth':self.headers.get('Authorization'),'cookie':self.headers.get('Cookie')}).encode()\n  self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(data)\n def log_message(self,*args):pass\nHTTPServer(('0.0.0.0',3000),Handler).serve_forever()\n`));
+      await source.files.write('/workspace/staging-preview.py', new TextEncoder().encode(`from http.server import BaseHTTPRequestHandler, HTTPServer\nimport json,os,uuid\nnonce=uuid.uuid4().hex\nclass Handler(BaseHTTPRequestHandler):\n def do_GET(self):\n  data=json.dumps({'fixture':'local-staging','pid':os.getpid(),'nonce':nonce,'auth':self.headers.get('Authorization'),'cookie':self.headers.get('Cookie')}).encode()\n  self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(data)\n def log_message(self,*args):pass\nHTTPServer(('0.0.0.0',3000),Handler).serve_forever()\n`));
       job = await source.commands.start(['python3', '-u', '/workspace/staging-preview.py'], { timeoutMs: 240_000 });
       preview = await source.previews.create(3000, { ttlSeconds: 300 });
       const previewAddress = new URL(preview.url); const previewToken = previewAddress.hostname.slice(0, -'.localhost'.length);
       report.previewDiagnostics = { protocol: previewAddress.protocol, port: previewAddress.port, expectedPort: String(port), localHost: previewAddress.hostname.endsWith('.localhost'), tokenLength: previewToken.length, jobStatus: (await job.get()).status, routeMatches: await (await mf.getD1Database('PREVIEW_ROUTES', apiName)).prepare('SELECT COUNT(*) AS count FROM preview_routes WHERE token_hash = ?').bind(checksum(previewToken)).first('count') };
       let response;
       for (let i = 0; i < 30; i++) { response = await gateway.fetch(preview.url, { headers: { Host: previewAddress.host, Authorization: 'Bearer disposable-preview-must-strip', Cookie: 'session=disposable-preview-must-strip' } }); if (response.ok) break; report.previewDiagnostics.responseText = (await response.text()).slice(0, 100); await new Promise(resolve => setTimeout(resolve, 100)); }
-      assert.equal(response.status, 200); assert.deepEqual(await response.json(), { fixture: 'local-staging', auth: null, cookie: null });
+      assert.equal(response.status, 200);
+      const sourceProcess = await response.json();
+      assert.equal(sourceProcess.fixture, 'local-staging'); assert.equal(sourceProcess.auth, null); assert.equal(sourceProcess.cookie, null);
+      assert.match(sourceProcess.nonce, /^[a-f0-9]{32}$/); assert.equal(typeof sourceProcess.pid, 'number');
+      const launch = { command: 'set -eu\nexec python3 -u /workspace/staging-preview.py', cwd: '/workspace', readiness: { port: 3000, path: '/', timeoutMs: 60000 } };
+      const configured = await source.configureStartup(launch);
+      assert.deepEqual(configured.launch, launch);
+      const afterConfiguration = await gateway.fetch(preview.url);
+      assert.equal(afterConfiguration.status, 200); assert.deepEqual(await afterConfiguration.json(), sourceProcess);
+      const listed = (await primary.client.list()).containers.find(value => value.id === source.id && value.createdAt === source.createdAt);
+      assert.deepEqual(listed.launch, launch);
+      report.restoreStartup = { source: sourceProcess, launch, sourceUnchangedByConfiguration: true };
+      report.checks.sourceStartupConfiguration = true;
       const blocked = await gateway.fetch(`http://${'a'.repeat(48)}.localhost:${port}/`);
       assert.equal(blocked.status, 404); report.checks.protectedPreviewAndHeaderIsolation = true;
     });
@@ -242,6 +270,10 @@ export async function qualifyLocalStaging({ image, output }) {
         assert.ok(report.accountStartsRequested < report.maxAccountStarts); report.accountStartsRequested++; report.forkKey = randomUUID(); await persist();
         fork = await source.fork({ name: 'Local staging fork', idempotencyKey: report.forkKey, waitTimeoutMs: 60_000, pollIntervalMs: 50 });
         known.push(identity(fork)); ownedIds.add(fork.id); report.generations.push({ action: 'fork', ...identity(fork) });
+        await restoredListener(fork, 'fork');
+        const original = await gateway.fetch(preview.url); assert.equal(original.status, 200);
+        assert.deepEqual(await original.json(), report.restoreStartup.source);
+        report.checks.forkAutomaticListener = true;
         assert.notEqual(fork.id, source.id);
         assert.equal(new TextDecoder().decode(await fork.files.read('/workspace/nested/marker')), 'source');
         await fork.files.write('/workspace/nested/marker', new TextEncoder().encode('fork'));
@@ -254,12 +286,16 @@ export async function qualifyLocalStaging({ image, output }) {
         report.stopKey = randomUUID(); await persist();
         const stopped = await source.stop({ idempotencyKey: report.stopKey });
         const descriptor = stopped.containers.find(value => value.id === source.id && value.status === 'stopped'); assert.ok(descriptor?.workspaceId);
+        assert.deepEqual(descriptor.launch, report.restoreStartup.launch);
         assert.ok(!(await primary.client.list()).containers.some(value => value.id === source.id && value.status === 'running'));
         report.checks.stoppedContextDenied = await denied(() => context.run('sum(values)'), [404, 409]);
         const deadPreview = await gateway.fetch(preview.url); assert.ok([403, 404].includes(deadPreview.status)); await deadPreview.arrayBuffer(); report.checks.stoppedPreviewDenied = deadPreview.status;
         assert.ok(report.accountStartsRequested < report.maxAccountStarts); report.accountStartsRequested++; report.resumeKey = randomUUID(); await persist();
         resumed = await source.resume({ idempotencyKey: report.resumeKey, waitTimeoutMs: 60_000, pollIntervalMs: 50 });
         known.push(identity(resumed)); report.generations.push({ action: 'resume', ...identity(resumed) });
+        await restoredListener(resumed, 'resume');
+        assert.notEqual(report.restoreStartup.resume.process.nonce, report.restoreStartup.fork.process.nonce);
+        report.checks.resumeAutomaticListener = true;
         assert.equal(resumed.id, source.id); assert.notEqual(resumed.createdAt, source.createdAt);
         const bytes = await resumed.files.read('/workspace/staging 界 &?.bin'); assert.equal(checksum(bytes), report.binaryFile.sha256);
         assert.equal((await resumed.commands.run('test "$(cat /workspace/staging-link)" = source && test "$(stat -c %a /workspace/nested/marker)" = 640 && test "$(stat -c %Y /workspace/nested/marker)" = 1700000000', { timeoutMs: 15_000 })).exitCode, 0);
@@ -270,6 +306,10 @@ export async function qualifyLocalStaging({ image, output }) {
         report.checks.staleDelete = await denied(() => source.kill(), [409]);
         const replacement = (await primary.client.list()).containers.find(value => value.id === resumed.id); assert.equal(replacement.createdAt, resumed.createdAt);
         const replay = await source.resume({ idempotencyKey: report.resumeKey, waitTimeoutMs: 60_000, pollIntervalMs: 50 }); assert.equal(replay.createdAt, resumed.createdAt);
+        await restoredListener(replay, 'resumeReplay');
+        assert.equal(report.restoreStartup.resumeReplay.process.nonce, report.restoreStartup.resume.process.nonce);
+        assert.equal(report.restoreStartup.resumeReplay.process.pid, report.restoreStartup.resume.process.pid);
+        report.checks.restoreReplayDoesNotRelaunch = true;
         report.checks.stopResumePersistenceAndReplay = true;
       });
     } else report.lifecycleBlocked = report.nativeSnapshot.snapshotError;
@@ -339,7 +379,8 @@ export async function qualifyLocalStaging({ image, output }) {
     await rm(work, { recursive: true, force: true });
     report.finishedAt = new Date().toISOString();
     report.ok = !report.error && !report.deadlineExceeded && !report.interruptedBy && report.checks.nativeSnapshot === true && report.checks.stopResumePersistenceAndReplay === true
-      && report.checks.immediateCommandCancellationPreservesSandbox === true && report.checks.noWorkerOutboundFetches === true && report.cleanup.errors.length === 0 && report.cleanup.remainingContainers === 0;
+      && report.checks.immediateCommandCancellationPreservesSandbox === true && report.checks.noWorkerOutboundFetches === true && report.cleanup.errors.length === 0 && report.cleanup.remainingContainers === 0
+      && report.checks.sourceStartupConfiguration === true && report.checks.forkAutomaticListener === true && report.checks.resumeAutomaticListener === true && report.checks.restoreReplayDoesNotRelaunch === true;
     report.stage = 'completed'; await persist();
     process.removeListener('SIGINT', onSigint); process.removeListener('SIGTERM', onSigterm);
   }

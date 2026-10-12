@@ -39,8 +39,8 @@ automatically from the copied files, without rerunning clone or setup. The saved
 command retains Bash semantics and a 60-second initial HTTP check. Registration
 is generation-fenced; a lost response retries the metadata update before any
 start command is admitted. Persisted `restoreLaunchConfigured` records the result.
-Terminal-only launches have no server recipe. Multiline commands and commands
-whose quoted Bash form exceeds the single-line 4096-character recipe limit retain
+Terminal-only launches have no server recipe. Multiline scripts are preserved.
+Commands whose quoted Bash form exceeds the 4096-character recipe limit retain
 their existing launch behavior with `restoreLaunchConfigured:false`; configure a
 short foreground wrapper through startup settings for those applications. This
 does not preserve RAM or the source process. Existing completed launch records

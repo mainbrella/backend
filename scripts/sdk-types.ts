@@ -107,3 +107,16 @@ async function desktopWorkflow(client: Mainbrella, id: string, createdAt: string
   } finally { await desktop.close(); }
 }
 void desktopWorkflow;
+
+async function nativeWatchWorkflow(sandbox: import('@mainbrella/sdk').Sandbox) {
+  const watcher = await sandbox.files.watchNative('/workspace', { recursive: true, timeoutMs: 60000, idempotencyKey: 'watch-project' });
+  const execution: Execution = watcher.execution;
+  try {
+    for await (const event of watcher.events()) {
+      if (event.type === 'ready') continue;
+      const filename: string | null = event.filename;
+      return { executionId: execution.id, filename };
+    }
+  } finally { await watcher.close(); }
+}
+void nativeWatchWorkflow;

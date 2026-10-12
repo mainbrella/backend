@@ -6,7 +6,7 @@ export const networkPolicySchema = z.object({ allow: z.array(z.string().min(1).m
 const secretBindingsSchema = z.array(z.string().regex(/^sec_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/)).max(16);
 export const limitsSchema = z.object({ maxComputeUnitHours: z.number().nullable(), maxConcurrentComputeUnits: z.number(), maxContainers: z.number(), maxStartsPerMonth: z.number(), maxSessionMs: z.number(), idleTimeoutMs: z.number() });
 export const sizeSchema = z.enum(['lite', 'small', 'medium', 'large', 'xl']);
-export const restoreLaunchSchema = z.object({ command: z.string().min(1).max(4096).regex(/^[^\u0000\r\n]+$/),
+export const restoreLaunchSchema = z.object({ command: z.string().min(1).max(4096).regex(/^[^\u0000]+$/).describe('Shell source up to 4096 characters; multiline commands are allowed. NUL bytes are rejected.'),
   cwd: z.string().min(1).max(1024).optional().describe('Absolute working directory without dot segments; defaults to /workspace.'),
   readiness: z.object({ port: z.number().int().min(1024).max(65535), path: z.string().min(1).max(1024).optional().describe('Local HTTP path, default /. Redirects are not followed.'),
     timeoutMs: z.number().int().min(1000).max(60000).optional().describe('Readiness deadline after machine boot, default 30000 ms.') }).strict(),

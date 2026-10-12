@@ -377,6 +377,33 @@ stable during copying. Polling `watch` starts after an initial metadata baseline
 its default interval is one second. Transient changes and same-size rewrites within
 one second may be missed. The native server watcher capability remains unavailable.
 
+### Native Linux notifications
+
+`watch_native` runs native filesystem notifications in one supervised execution.
+The guest requires Node 22+ on PATH; the Python client keeps its standard-library
+runtime. It does not repeatedly list files.
+
+```python
+with sandbox.files.watch_native('/workspace/project', timeout_ms=60000,
+                               idempotency_key='project-watch') as watcher:
+    for event in watcher.events():
+        if event['type'] == 'ready':
+            continue
+        print(event['type'], event['filename'])  # rename/change; relative name or None
+        break
+```
+
+Wait for `ready` before changes you need to observe. Recursion defaults to true,
+with at most 2,048 directories and 64 levels. A watcher occupies managed execution
+capacity for at most 15 minutes, with 512 KiB of guest output. Preserve
+`watcher.execution.id` and `watcher.idempotency_key`. A disconnected reader leaves
+the execution running; call `events()` again on the same handle to consume
+retained output, or `close()` to cancel it. The context manager cancels on exit.
+Notifications can coalesce or be lost, and registering a new subtree has a race;
+they are not a durable file-change journal. Start a new watcher after a generation
+ends. This SDK helper does not enable a server watch endpoint. See
+[native watcher limits](https://github.com/mainbrella/backend/blob/main/docs/native-file-watch.md).
+
 ## Linux desktop automation (unreleased)
 
 Use a compatible image with Python 3, Xvfb, xdpyinfo, xdotool and ImageMagick

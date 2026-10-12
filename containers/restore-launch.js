@@ -1,6 +1,5 @@
 import { validPreviewPort } from './preview-contract.js';
 import { validFilesystemPath } from './filesystem-contract.js';
-import { validStartupCommand } from './production-policy.js';
 
 export const MAX_WORKSPACE_REQUEST_BYTES = 32 * 1024;
 export const MAX_RESTORE_LOG_BYTES = 8192;
@@ -11,7 +10,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 // are deliberately not part of saved launch metadata.
 export function normalizeRestoreLaunch(value) {
   if (!object(value) || Object.keys(value).some(key => !['command', 'cwd', 'readiness'].includes(key)) ||
-      !validStartupCommand(value.command) || !value.command.trim() || !object(value.readiness)) return null;
+      typeof value.command !== 'string' || value.command.length > 4096 || value.command.includes('\0') || !value.command.trim() || !object(value.readiness)) return null;
   const cwd = value.cwd === undefined ? '/workspace' : value.cwd;
   const path = value.readiness.path === undefined ? '/' : value.readiness.path;
   const timeoutMs = value.readiness.timeoutMs === undefined ? 30_000 : value.readiness.timeoutMs;

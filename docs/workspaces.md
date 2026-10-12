@@ -121,7 +121,9 @@ Their successful return establishes the saved initial HTTP check, not continuous
 uptime. These additions have local regression coverage; they require deployment
 and SDK publication before customer use, followed by production qualification.
 
-The command is a single line of at most 4096 characters. `cwd` is an absolute
+The command is shell source of at most 4096 characters, including multiline
+scripts; NUL bytes are rejected. It is passed as a shell argument without
+interpolating it into the supervisor. `cwd` is an absolute
 directory without dot segments, defaults to `/workspace`, and is limited to
 1024 characters. Readiness uses an application port from 1024–65535 and a local
 HTTP path (default `/`, at most 1024 characters); redirects are not followed.

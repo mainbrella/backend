@@ -72,7 +72,7 @@ class NativeFileWatch:
                         raise _error('invalid_file_watch_response')
                     if event.get('type') == 'error':
                         code = event.get('code')
-                        if code not in ('file_watch_output_limit', 'file_watch_filename_invalid', 'file_watch_unavailable'):
+                        if code not in ('file_watch_output_limit', 'file_watch_directory_limit', 'file_watch_filename_invalid', 'file_watch_unavailable'):
                             raise _error('invalid_file_watch_response')
                         raise _error(code)
                     valid = event.get('type') == 'ready' and event.get('path') == self._path and event.get('recursive') is self._recursive
@@ -97,7 +97,7 @@ class NativeFileWatch:
         if self._closed:
             return {'closed': True}
         result = self.execution.cancel()
-        if not isinstance(result, dict) or result.get('status') not in ('succeeded', 'failed', 'canceled', 'timed_out'):
+        if not isinstance(result, dict) or result.get('status') not in ('succeeded', 'failed', 'canceled', 'timed_out', 'output_limit', 'interrupted'):
             raise _error('file_watch_cleanup_unconfirmed')
         self._closed = True
         return {'closed': True}

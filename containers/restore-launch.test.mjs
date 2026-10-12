@@ -11,7 +11,8 @@ import { UserContainerController } from './user-container-core.js';
 test('saved launch recipes normalize defaults and reject unsafe target, directory, secret and command shapes', () => {
   const recipe = { command: 'npm start', readiness: { port: 3000 } };
   assert.deepEqual(normalizeRestoreLaunch(recipe), { command: 'npm start', cwd: '/workspace', readiness: { port: 3000, path: '/', timeoutMs: 30_000 } });
-  for (const change of [null, {}, { ...recipe, command: '' }, { ...recipe, command: 'echo\nsecond' }, { ...recipe, command: 'x'.repeat(4097) },
+  assert.equal(normalizeRestoreLaunch({ ...recipe, command: 'set -eu\nexec node server.mjs' }).command, 'set -eu\nexec node server.mjs');
+  for (const change of [null, {}, { ...recipe, command: '' }, { ...recipe, command: 'echo\0second' }, { ...recipe, command: 'x'.repeat(4097) },
     { ...recipe, cwd: '/workspace/../etc' }, { ...recipe, cwd: 'relative' }, { ...recipe, cwd: '/x'.repeat(600) },
     { ...recipe, env: { SECRET: 'not metadata' } }, { ...recipe, readiness: { port: 22 } }, { ...recipe, readiness: { port: 65536 } },
     { ...recipe, readiness: { port: 3000, path: '//outside.test/' } }, { ...recipe, readiness: { port: 3000, path: '/\\outside.test' } },
@@ -21,7 +22,7 @@ test('saved launch recipes normalize defaults and reject unsafe target, director
 test('restore entrypoint launches once, honors a quoted cwd, and retains failed output without restarting', async t => {
   const directory = await mkdtemp(join(tmpdir(), "restore 'recipe "));
   const log = join(directory, 'app.log');
-  const argv = restoreEntrypoint(normalizeRestoreLaunch({ command: 'printf x >> launches; echo "useful failure"; exit 7', cwd: directory, readiness: { port: 3000 } }), log);
+  const argv = restoreEntrypoint(normalizeRestoreLaunch({ command: 'printf x >> launches\necho "useful failure"\nexit 7', cwd: directory, readiness: { port: 3000 } }), log);
   const child = spawn(argv[0], argv.slice(1), { detached: true, stdio: 'ignore' });
   t.after(async () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} await rm(directory, { recursive: true, force: true }); });
   let drained = false;

@@ -42,6 +42,10 @@ test('real Linux watcher sees a short-lived file, recursive edits and rename the
   await probe.wait(event => event.filename === 'nested/界');
   await rename(join(directory, 'nested/界'), join(directory, 'nested/moved'));
   await probe.wait(event => event.filename === 'nested/moved' && event.type === 'rename');
+  await mkdir(join(directory, 'new-directory'));
+  await probe.wait(event => event.filename === 'new-directory');
+  await writeFile(join(directory, 'new-directory/later'), 'registered after startup');
+  await probe.wait(event => event.filename === 'new-directory/later');
   probe.child.kill('SIGTERM');
   assert.deepEqual(await probe.exited, [0, null]);
   assert.throws(() => process.kill(probe.child.pid, 0), { code: 'ESRCH' });

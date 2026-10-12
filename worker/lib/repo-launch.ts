@@ -12,7 +12,8 @@ export const launchOptionsSchema = z.object({
   size: z.enum(['lite', 'small', 'medium', 'large', 'xl']).default('small'), cwd: repoCwd.default('.'),
   setupCommand: command.optional(), startCommand: command.optional(), port: z.number().int().min(1024).max(65535).optional(),
   readinessPath: z.string().min(1).max(1024).refine(path => Boolean(normalizeRestoreLaunch({ command: 'true', readiness: { port: 1024, path } }))).optional(),
-}).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' });
+}).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' })
+  .refine(value => value.readinessPath === undefined || Boolean(value.startCommand), { message: 'readinessPath requires startCommand and port' });
 export type LaunchOptions = z.infer<typeof launchOptionsSchema>;
 export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[]; private?: boolean }
 interface GithubDiagnostic {

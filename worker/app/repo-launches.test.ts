@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 import { cloneCommand, launchOptionsSchema, previewCommand, setupCommand, repositoryRestoreLaunch } from '../lib/repo-launch';
@@ -414,7 +415,7 @@ test('repository startup recipe is registered once before launch and response lo
   f.complete(state, 'starting'); state = await f.step(state); state = await f.step(state);
   assert.equal(state.phase, 'ready'); assert.equal(f.startupCalls.length, 2); assert.equal(f.executionKeys.size, 2);
   const options = launchOptionsSchema.parse({ ...defaultOptions, startCommand: 'echo ready\nnode server.mjs', port: 3000 });
-  assert.equal(repositoryRestoreLaunch(options), null);
+  assert.equal(repositoryRestoreLaunch(options)?.command, "exec /bin/bash -lc 'echo ready\nnode server.mjs'");
   assert.equal(repositoryRestoreLaunch({ ...options, startCommand: 'a'.repeat(4096) }), null);
   assert.equal(repositoryRestoreLaunch({ ...options, cwd: 'packages/web', startCommand: 'npm start' })?.cwd, '/workspace/repo/packages/web');
   const healthy = { ...options, startCommand: 'npm start', readinessPath: '/health?check=1' };
@@ -422,6 +423,19 @@ test('repository startup recipe is registered once before launch and response lo
   assert.match(previewCommand(healthy), /http:\/\/127\.0\.0\.1:3000\/health\?check=1/);
   assert.match(previewCommand(healthy), /\[ "\$status" -ge 200 \] && \[ "\$status" -lt 300 \]/);
   for (const readinessPath of ['//other.example/', '/health#fragment', '/health bad']) assert.equal(launchOptionsSchema.safeParse({ ...healthy, readinessPath }).success, false);
+  assert.equal(launchOptionsSchema.safeParse({ ...defaultOptions, readinessPath: '/health' }).success, false);
+});
+
+test('repository preview readiness accepts direct 2xx and rejects redirects without following them', () => {
+  const options = launchOptionsSchema.parse({ ...defaultOptions, startCommand: 'node server.mjs', port: 3000, readinessPath: '/health' });
+  // Exercise the generated shell branching with an isolated command fixture;
+  // no repository, process launcher or network request is needed on the host.
+  for (const [httpStatus, expected] of [[204, 0], [302, 1], [404, 1]] as const) {
+    const fixture = `cd(){ :; }; pwd(){ printf /workspace/repo; }; tmux(){ [ "$1" = new-session ]; }; curl(){ printf '${httpStatus}'; }; tail(){ :; };\n`;
+    const result = spawnSync('/bin/bash', ['-c', fixture + previewCommand(options)], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, expected, result.stderr);
+    assert.equal(result.stdout.includes('Preview ready on port 3000'), expected === 0);
+  }
 });
 
 test('setup failure preserves shell and retained logs and cannot silently rerun setup', async t => {
