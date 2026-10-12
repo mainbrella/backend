@@ -213,8 +213,8 @@ the guest trust store cannot enable direct internet access. Account-authorized
 
 ### Operator setup and release gate
 
-Nothing in this change deploys a service, starts a paid guest, or enables the
-production gates. The relay is runnable with Node 24 and no new dependencies:
+Checked-in flags remain false and the account list remains empty. The standalone
+relay is runnable with Node 24 and no new dependencies:
 
 ```sh
 node services/egress-relay.mjs
@@ -254,6 +254,41 @@ The shared Node relay is needed for DNS checks and IP-pinned HTTP/TLS transport.
 Encrypted vault storage uses the existing account Durable Objects. A dedicated
 Cloudflare relay Container can sleep when idle; it shares the account's included
 Container allowances and incurs usage charges beyond them.
+
+The dedicated configurations are `wrangler.egress-relay.jsonc` (HTTPS ingress,
+one named Durable Object and a shared Lite Node container) and
+`wrangler.security-ack.jsonc` (temporary acknowledgment fixture, no container).
+Relay ingress authenticates before accessing the container, limits concurrency
+to two requests, and destroys the relay after 60 seconds idle. The Node image
+pins its base digest and runs as `node`. The acknowledgment service uses a
+separate operator token and expires each disposable run after 15 minutes;
+reflection endpoints are adversaries for randomly generated test tokens only.
+Neither service logs bodies or authorization headers.
+
+Provision them with Node 22.22.2 or newer:
+
+```sh
+node scripts/deploy-security-services.mjs
+npm run deploy:containers -- --dry-run --security-account=<exact-account-id>
+npm run deploy:containers -- --security-account=<exact-account-id>
+node scripts/deploy-security-services.mjs --api-account=<exact-account-id>
+```
+
+The provisioning script creates `.wrangler/security-service-credentials.json`
+with mode 0600, installs service/API secrets through stdin, and records deployed
+versions. Retain that ignored file securely: its vault encryption key must not
+be regenerated while stored secrets exist. It refuses to overwrite existing
+security secrets without their recorded operator file. Runtime deployment keeps
+the published catalog/custom image map and its normal deployment lease.
+The API enable command accepts one exact account ID; it cannot select `*`.
+
+Run `../repo-rodeo`'s `qualify:security:production` with that private file,
+the two exact qualification account IDs and a new evidence directory. It has
+a six-start/two-capture guest budget. After bounded qualification, withdraw the
+API first with `npm run deploy:api` (checked-in disabled defaults), verify
+authenticated and anonymous discovery, then run `npm run deploy:containers`
+to withdraw runtime mediation. Leave service secrets installed for repeatable
+qualification; the relay sleeps idle and the disposable upstream state is deleted.
 
 
 Local tests exercise ciphertext ownership/tamper rejection, write-only metadata,

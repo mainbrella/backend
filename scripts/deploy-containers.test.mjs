@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { IMAGE_CATALOG } from '../containers/image-catalog.js';
 
 function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, apiStatus = 200, dryRun = true, secret = true, localSecret, invalidCatalog = false, withoutActivity = false,
-  busyResponses = 0, lockStatus = 200, releaseStatus = 200, lockError = false, manifestSignal, wranglerScript, preload = '', requireStoppedChild = false } = {}) {
+  busyResponses = 0, lockStatus = 200, releaseStatus = 200, lockError = false, manifestSignal, wranglerScript, preload = '', requireStoppedChild = false, securityArgs = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'terminal-deploy-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ['scripts', 'containers', 'containers/catalog', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
@@ -52,7 +52,7 @@ function fixture(t, { outdated = false, exitCode = 0, custom = { images: {} }, a
     return Response.json(${JSON.stringify(custom)}, { status: ${apiStatus} });
   };`);
   if (localSecret !== undefined) writeFileSync(join(root, '.env'), `IMAGE_BUILD_SECRET="${localSecret}"\n`);
-  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : []), ...(withoutActivity ? ['--without-activity'] : [])], { cwd: root, encoding: 'utf8', timeout: 15_000, env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
+  const run = () => spawnSync(process.execPath, ['--import', join(root, 'fetch.mjs'), join(root, 'scripts/deploy-containers.mjs'), ...(dryRun ? ['--dry-run'] : []), ...(withoutActivity ? ['--without-activity'] : []), ...securityArgs], { cwd: root, encoding: 'utf8', timeout: 15_000, env: { ...process.env, PATH: join(root, 'bin'), ...(secret === 'local' ? { IMAGE_BUILD_SECRET: undefined } : { IMAGE_BUILD_SECRET: secret ? 's'.repeat(32) : '' }) } });
   return { root, image, run, catalog };
 }
 
@@ -79,6 +79,22 @@ test('activity bootstrap omits only the activity binding and preserves the track
   assert.ok(JSON.parse(readFileSync(join(f.root, 'wrangler.containers.jsonc'))).durable_objects.bindings.some(binding => binding.name === 'ACCOUNT_ACTIVITY'));
   assert.equal(readFileSync(join(f.root, 'locks.log'), 'utf8'), 'POST\nDELETE\n');
   assert.equal(readdirSync(f.root).some(name => name.startsWith('.wrangler-containers-')), false);
+});
+test('private security deployment restricts access without changing published images or tracked defaults', t => {
+  const f = fixture(t, { securityArgs: ['--security-account=canary_user'] });
+  assert.equal(f.run().status, 0);
+  const deployed = JSON.parse(readFileSync(join(f.root, 'result.json')));
+  assert.deepEqual(deployed.config.vars, { EGRESS_POLICIES_ENABLED: 'true', SECURITY_FEATURE_ACCOUNTS: 'canary_user' });
+  assert.deepEqual(deployed.config.containers[0].images.terminal, { image: f.image });
+  assert.equal(deployed.args.some(arg => arg.startsWith('--security-account')), false);
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'wrangler.containers.jsonc'))).vars, undefined);
+});
+test('private security deployment rejects public wildcard and ambiguous accounts before network access', t => {
+  for (const securityArgs of [['--security-account=*'], ['--security-account=a,b'], ['--security-account='], ['--security-account=a', '--security-account=b']]) {
+    const f = fixture(t, { securityArgs }); assert.equal(f.run().status, 1);
+    assert.equal(readdirSync(f.root).includes('result.json'), false);
+    assert.equal(readdirSync(f.root).includes('locks.log'), false);
+  }
 });
 test('outdated image prevents deployment', t => {
   const f = fixture(t, { outdated: true });

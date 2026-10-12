@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { readFileBytes } from '../containers/file-contract.js';
 import { createSecurityInfrastructureApp } from './app/openapi';
 import { handleSecurityRelay } from './app/security-relay';
-import { infrastructureError } from './lib/security-infrastructure';
+import { infrastructureError, operatorAuthorized } from './lib/security-infrastructure';
 
 export class EgressRelay extends DurableObject<Env> {
   private active = 0;
@@ -30,6 +30,7 @@ export class EgressRelay extends DurableObject<Env> {
     throw new Error('relay_not_ready');
   }
   async fetch(request: Request): Promise<Response> {
+    if (!await operatorAuthorized(request, this.env.EGRESS_RELAY_TOKEN)) return infrastructureError('egress_denied', 403);
     if (this.active >= 2) return infrastructureError('egress_busy', 503);
     this.active++;
     try {
