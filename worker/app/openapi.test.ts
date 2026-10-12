@@ -89,6 +89,17 @@ async function document() {
   return response.json() as Promise<any>;
 }
 
+test('streamed downloads publish the length contract required by SDK consumers', async () => {
+  const { paths } = await document();
+  const download = paths['/containers/files/transfer'].get;
+  assert.equal(download.operationId, 'downloadContainerFile');
+  assert.deepEqual(download.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }]);
+  const length = download.responses[200].headers['Content-Length'];
+  assert.equal(length.required, true);
+  assert.deepEqual(length.schema, { type: 'integer', minimum: 0, maximum: 64 * 1024 * 1024 });
+  assert.equal(download.responses[200].content['application/octet-stream'].schema.format, 'binary');
+});
+
 test('managed pool schemas describe bounded billed inventory and idempotent acquisition', async () => {
   const { paths, components } = await document();
   for (const path of ['/pools', '/pools/{poolId}/acquire']) {

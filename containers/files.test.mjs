@@ -8,6 +8,7 @@ import { Readable, Writable } from 'node:stream';
 import { accessFile } from './files.js';
 import { MAX_FILE_BYTES, readFileBytes } from './file-contract.js';
 import { UserContainerController } from './user-container-core.js';
+import { hostProcessGroups } from './test-process-group.js';
 
 const createdAt = '2026-10-05T12:00:00.000Z';
 const now = Date.parse(createdAt);
@@ -31,7 +32,7 @@ async function fixture(t, timers = globalThis) {
   const ctx = {
     storage: { async get(key) { return structuredClone(values.get(key)); },
       async put(key, value) { values.set(key, structuredClone(value)); }, async setAlarm() {} },
-    container: { running: true, async setInactivityTimeout() {}, async exec(argv, options) {
+    container: { running: true, async setInactivityTimeout() {}, async destroy() { this.running = false; for (const child of children) child.kill('SIGKILL'); }, async exec(argv, options) {
       calls.push({ argv, options });
       const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' });
       children.push(child);
@@ -46,7 +47,7 @@ async function fixture(t, timers = globalThis) {
     } },
   };
   t.after(async () => { for (const child of children) child.kill('SIGKILL'); await rm(dir, { recursive: true, force: true }); });
-  const controller = new UserContainerController(ctx, () => now);
+  const controller = hostProcessGroups(new UserContainerController(ctx, () => now));
   const active = new Set();
   return { dir, ctx, values, calls, children, controller, active, run: req => accessFile(controller, req, active, timers) };
 }
@@ -149,6 +150,7 @@ test('timeout, disconnect and machine stop bound pending startup and kill late p
   for (const mode of ['timeout', 'disconnect', 'stop']) {
     const f = await fixture(t, { setTimeout(callback) { return setTimeout(callback, mode === 'timeout' ? 10 : 1000); }, clearTimeout });
     let resolveStart;
+    f.controller.signalOperationGroup = undefined;
     f.controller.startTerminalProcess = () => new Promise(resolve => { resolveStart = resolve; });
     const abort = new AbortController();
     const pending = f.run(request(join(f.dir, 'file'), 'GET', undefined, {}, abort.signal));
@@ -176,6 +178,7 @@ test('disconnect closes active output streams and kills the running process', as
   const f = await fixture(t);
   let killed = false;
   let closed = 0;
+  f.controller.signalOperationGroup = undefined;
   f.controller.startTerminalProcess = async () => ({
     stdin: new WritableStream(),
     stdout: new ReadableStream({ cancel() { closed++; } }),

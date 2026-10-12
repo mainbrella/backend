@@ -1,7 +1,7 @@
 import { MAX_EXECUTIONS } from './command-contract.js';
 import { readFileBytes } from './file-contract.js';
-import { exactByteStream, MAX_TRANSFER_BYTES, TRANSFER_TIMEOUT_MS, transferSize, validTransferPath } from './file-transfer-contract.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { exactByteStream, fixedByteStream, MAX_TRANSFER_BYTES, TRANSFER_TIMEOUT_MS, transferSize, validTransferPath } from './file-transfer-contract.js';
+import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 
 const readScript = `
   [ -e "$1" ] || exit 44
@@ -45,7 +45,7 @@ export async function transferFile(controller, request, active, timers = globalT
   if (active.size >= MAX_EXECUTIONS) return controller.respond({ error: 'execution_limit' }, 429);
 
   const abort = new AbortController();
-  let process, reader, output, timer, exited = false, handedOff = false, reason, cleanup;
+  let process, starting, reader, output, timer, exited = false, handedOff = false, reason, cleanup;
   let rejectStopped;
   const stopped = new Promise((_, reject) => { rejectStopped = reject; });
   void stopped.catch(() => {});
@@ -55,9 +55,8 @@ export async function transferFile(controller, request, active, timers = globalT
     if (!exited) { abort.abort(); try { process?.kill(9); } catch {} }
     try { await reader?.cancel(); } catch {}
     try { reader?.releaseLock(); } catch {}
-    const confirmed = await process?.dispose?.();
-    if (confirmed !== false || exited) active.delete(session);
-    else void process.exitCode.finally(() => active.delete(session)).catch(() => {});
+    process ??= starting?.operationProcess;
+    await finishOperationProcess(controller, createdAt, process, active, session);
   })();
   const stop = value => {
     if (reason || cleanup) return;
@@ -67,7 +66,7 @@ export async function transferFile(controller, request, active, timers = globalT
     if (output) { try { output.error(new Error(value)); } catch {} void finish(); }
   };
   const disconnected = () => stop('request_aborted');
-  const session = { close: () => stop('container_not_running') };
+  const session = { close: () => { stop('container_not_running'); return finish(); } };
   active.add(session);
   request.signal.addEventListener('abort', disconnected, { once: true });
   const timeout = Math.max(0, Math.min(TRANSFER_TIMEOUT_MS, metadata.expiresAt - controller.now()));
@@ -75,9 +74,9 @@ export async function transferFile(controller, request, active, timers = globalT
   try {
     if (request.signal.aborted) disconnected();
     const commit = crypto.randomUUID();
-    const starting = startOperationProcess(controller, createdAt, expiresAt,
+    starting = startOperationProcess(controller, createdAt, expiresAt,
       ['/bin/sh', '-c', request.method === 'GET' ? readScript : writeScript, 'mainbrella-transfer', path, String(size ?? ''), commit],
-      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal }, timeout);
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal }, timeout, metadata.telemetryId);
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
     const exit = process.exitCode.then(code => { exited = true; return code; });
@@ -145,8 +144,9 @@ export async function transferFile(controller, request, active, timers = globalT
       async cancel() { stop('request_aborted'); await finish(); },
     }, { highWaterMark: 0 });
     handedOff = true;
-    return new Response(stream, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(length), 'cache-control': 'no-store' } });
+    return new Response(fixedByteStream(stream, length, abort.signal), { headers: { 'content-type': 'application/octet-stream', 'content-length': String(length), 'cache-control': 'no-store' } });
   } catch (error) {
+    process ??= error.operationProcess ?? starting?.operationProcess;
     const unavailable = reason === 'container_not_running' || error.message === 'container_not_running' || error.message === 'Machine unavailable';
     return controller.respond({ error: unavailable ? 'container_not_running' : 'files_unavailable' }, unavailable ? 409 : 503);
   } finally { if (!handedOff) await finish(); }

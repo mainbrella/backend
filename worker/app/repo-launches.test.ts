@@ -269,6 +269,8 @@ test('invalid GitHub credentials fail without an unauthenticated retry and are r
 
 test('transport failure retains nested causes while redacting credentials and submitted commands', async t => {
   const f = await fixture(t);
+  const stripeSecret = f.env.STRIPE_SECRET_KEY;
+  assert.ok(stripeSecret, 'redaction fixture must include a Stripe credential');
   const logs: unknown[][] = [];
   t.mock.method(console, 'error', (...args: unknown[]) => { logs.push(args); });
   const command = 'echo private-command-content';
@@ -276,7 +278,7 @@ test('transport failure retains nested causes while redacting credentials and su
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
     if (url.hostname !== 'api.github.com') return delegate(input);
-    throw new Error(`connection failed ${SESSION_ONE} ${command}`, { cause: new Error(`socket closed ${f.env.STRIPE_SECRET_KEY}`) });
+    throw new Error(`connection failed ${SESSION_ONE} ${command}`, { cause: new Error(`socket closed ${stripeSecret}`) });
   });
   const response = await handleRequest(api('/repo-launches', 'POST', { ...defaultOptions, setupCommand: command }), f.env);
   assert.equal(response.status, 503);
@@ -285,7 +287,7 @@ test('transport failure retains nested causes while redacting credentials and su
   assert.equal(details.stage, 'resolve_repository');
   assert.match(details.error.cause.message, /connection failed \[redacted\] \[redacted\]/);
   assert.match(details.error.cause.cause.message, /socket closed \[redacted\]/);
-  for (const secret of [SESSION_ONE, command, f.env.STRIPE_SECRET_KEY]) assert.ok(!JSON.stringify(logs).includes(secret));
+  for (const secret of [SESSION_ONE, command, stripeSecret]) assert.ok(!JSON.stringify(logs).includes(secret));
 });
 
 test('advance failure logs its launch identity and original stage after releasing the lease', async t => {

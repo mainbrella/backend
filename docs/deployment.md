@@ -89,6 +89,16 @@ the API configuration. Local Email Sending simulates delivery.
 
 ## Prepare a release
 
+The [October 11 readiness record](release-readiness-2026-10-11.md) separates local
+checks from observed production state and outstanding release gates.
+
+Type checking must pass without developer secret files. `npm run generate-types`
+uses the tracked, empty `scripts/type-generation.env` explicitly so local `.env`
+and `.dev.vars` contents cannot add secret-dependent fields to `Env`. Keep optional
+integration declarations in `worker/env.d.ts`; only secret names and types belong
+there. `STRIPE_SECRET_KEY` is optional because handlers also run when billing is
+not configured. Do not add secret values to Wrangler vars or the generation file.
+
 Record the backend and web commits, current API and container deployment/version
 IDs, published image digests, and the last qualified compatible pair. Retain the
 previous checkout and its dependency lockfile. Account Durable Object data is

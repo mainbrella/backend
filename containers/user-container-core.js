@@ -212,21 +212,22 @@ export class UserContainerController {
   async terminalMetadata(createdAt, expiresAt) {
     if (!this.container.running || !await this.hasPaidAccess()) return null;
     const metadata = await this.ctx.storage.get(METADATA_KEY);
-    if (!metadata || this.now() >= this.deadline(metadata) || !await this.hasPaidAccess()) return null;
+    if (!metadata || metadata.operationCleanupPending || this.now() >= this.deadline(metadata) || !await this.hasPaidAccess()) return null;
     if (new Date(metadata.createdAt).toISOString() !== createdAt) return null;
     if (!Number.isSafeInteger(expiresAt) || expiresAt <= this.now()
       || expiresAt > metadata.expiresAt) return null;
     return metadata;
   }
 
-  async startTerminalProcess(createdAt, expiresAt, argv, options) {
+  async startTerminalProcess(createdAt, expiresAt, argv, options, fence) {
     return this.serialized(async () => {
       if (!this.container.running) throw new Error("Machine unavailable");
       const metadata = await this.ctx.storage.get(METADATA_KEY);
-      if (!metadata || this.now() >= this.deadline(metadata)
+      if (!metadata || metadata.operationCleanupPending || this.now() >= this.deadline(metadata)
         || !await this.hasPaidAccess()
         || new Date(metadata.createdAt).toISOString() !== createdAt
-        || expiresAt <= this.now() || expiresAt > metadata.expiresAt) {
+        || expiresAt <= this.now() || expiresAt > metadata.expiresAt
+        || fence && metadata.telemetryId !== fence.incarnation) {
         throw new Error("Machine unavailable");
       }
       return this.container.exec(argv, metadata.networkPolicy ? { ...options, env: { ...EGRESS_CA_ENV, ...options?.env } } : options);
@@ -241,7 +242,7 @@ export class UserContainerController {
   async touchTerminalActivityLocked(createdAt) {
       if (!this.container.running) return false;
       const metadata = await this.ctx.storage.get(METADATA_KEY);
-      if (!metadata || new Date(metadata.createdAt).toISOString() !== createdAt
+      if (!metadata || metadata.operationCleanupPending || new Date(metadata.createdAt).toISOString() !== createdAt
         || this.now() >= this.deadline(metadata) || !await this.hasPaidAccess()) return false;
       metadata.lastActivityAt = this.now();
       metadata.idleExpiresAt = Math.min(
@@ -254,17 +255,58 @@ export class UserContainerController {
       return true;
   }
 
-  async signalOperationGroup(createdAt, groupId, signal) {
+  async signalOperationGroup(createdAt, groupId, signal, incarnation) {
     if (!Number.isSafeInteger(groupId) || groupId <= 1 || ![2, 9, 15].includes(signal)) return false;
     return this.serialized(async () => {
       const metadata = await this.ctx.storage.get(METADATA_KEY);
-      if (!this.container.running || !metadata || new Date(metadata.createdAt).toISOString() !== createdAt) return false;
+      if (!metadata || !this.container.running) return false;
+      if (new Date(metadata.createdAt).toISOString() !== createdAt || metadata.telemetryId !== incarnation) return false;
       // Cleanup cannot provision, renew a lease or act on a replacement. It
       // remains possible during billing outages and after a deadline expires.
-      const process = await this.container.exec(['/bin/bash', '-c', 'kill -s "$2" -- "-$1"', 'mainbrella-group-signal', String(groupId), String(signal)],
-        { stdout: 'ignore', stderr: 'ignore' });
+      const process = await this.container.exec(['/bin/bash', '-c', `
+group="$1"
+if kill -s "$2" -- "-$group" 2>/dev/null; then exit 0; fi
+# A group may already have exited. Confirm absence in the guest PID namespace;
+# permission errors, unavailable /proc, and unreadable live records fail closed.
+[ -d /proc/self ] || exit 1
+for file in /proc/[0-9]*/stat; do
+  if IFS= read -r value < "$file" 2>/dev/null; then
+    value="\${value##*) }"
+    read -r state parent current rest <<< "$value"
+    [[ "$current" =~ ^[0-9]+$ ]] || exit 1
+    [ "$current" != "$group" ] || exit 1
+  elif [ -e "$file" ]; then exit 1; fi
+done
+exit 0`, 'mainbrella-group-signal', String(groupId), String(signal)],
+        { stdout: 'ignore', stderr: 'ignore', signal: AbortSignal.timeout(10_000) });
       return await process.exitCode === 0;
     });
+  }
+
+  async stopOperationGeneration(createdAt, incarnation) {
+    return this.serialized(async () => {
+      if (!this.container.running) return true;
+      const metadata = await this.ctx.storage.get(METADATA_KEY);
+      if (!metadata) return false;
+      // A replacement is admitted only after the preceding incarnation stops.
+      if (new Date(metadata.createdAt).toISOString() !== createdAt || metadata.telemetryId !== incarnation) return true;
+      metadata.operationCleanupPending = true;
+      await this.ctx.storage.put(METADATA_KEY, metadata);
+      await this.ctx.storage.setAlarm(Math.min(this.deadline(metadata), this.now() + 1000));
+      await this.destroy('Operation process-group cleanup could not be confirmed');
+      return !this.container.running;
+    });
+  }
+
+  async recoverOperationCleanup() {
+    const metadata = await this.ctx.storage.get(METADATA_KEY);
+    if (!metadata?.operationCleanupPending) return;
+    if (!await this.stopOperationGeneration(new Date(metadata.createdAt).toISOString(), metadata.telemetryId)) throw new Error('operation_cleanup_unconfirmed');
+    const current = await this.ctx.storage.get(METADATA_KEY);
+    if (current?.createdAt === metadata.createdAt && current.telemetryId === metadata.telemetryId) {
+      delete current.operationCleanupPending;
+      await this.ctx.storage.put(METADATA_KEY, current);
+    }
   }
 
   async hasPaidAccess() {
@@ -427,6 +469,11 @@ export class UserContainerController {
   async alarm() {
     return this.serialized(async () => {
       const metadata = await this.ctx.storage.get(METADATA_KEY);
+      if (metadata?.operationCleanupPending && this.container.running) {
+        await this.ctx.storage.setAlarm(Math.min(this.deadline(metadata), this.now() + 1000));
+        await this.destroy('Operation process-group cleanup retry');
+        return;
+      }
       if (metadata && this.now() < this.deadline(metadata) && await this.hasPaidAccess()) {
         // Defensive handling for an early alarm: preserve the idle/hard deadline.
         await this.ctx.storage.setAlarm(this.deadline(metadata));

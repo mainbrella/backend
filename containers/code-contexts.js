@@ -1,7 +1,7 @@
 import { MAX_EXECUTIONS, MAX_OUTPUT_BYTES, readCommandBody } from './command-contract.js';
 import { MAX_CODE_CONTEXT_MS, MAX_CODE_RESULT_BYTES, validCodeContext, validCodeContextId, validCodeExecution } from './code-contract.js';
 import { PYTHON_KERNEL } from './code-kernel.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { startOperationProcess, cleanupWithin } from './process-supervisor.js';
 
 const PREFIX = 'code-context:';
 const encoder = new TextEncoder();
@@ -52,7 +52,11 @@ export class CodeContexts {
     Object.assign(this, { controller, active, ctx });
     this.contexts = new Map();
   }
-  async stopGeneration(createdAt) {
+  async stopGeneration(createdAt, incarnation) {
+    if (this.controller.stopOperationGeneration) {
+      if (!await cleanupWithin(this.controller.stopOperationGeneration(createdAt, incarnation))) throw failure('code_cleanup_unconfirmed');
+      return;
+    }
     await this.controller.serialized(async () => {
       const metadata = await this.ctx.storage.get('builderMachine');
       if (metadata && new Date(metadata.createdAt).toISOString() === createdAt && this.controller.container.running) {
@@ -66,8 +70,12 @@ export class CodeContexts {
     for (const [key, record] of await this.ctx.storage.list({ prefix: PREFIX })) {
       const metadata = await this.ctx.storage.get('builderMachine');
       if (metadata && new Date(metadata.createdAt).toISOString() === record.createdAt && this.controller.container.running) {
-        const killed = record.pid && await this.controller.signalOperationGroup(record.createdAt, record.pid, 9).catch(() => false);
-        if (!killed) await this.stopGeneration(record.createdAt);
+        // Legacy pid records contain a provider/host PID, never a trusted guest
+        // group identity. Fall back to generation cleanup instead of signaling it.
+        // A saved identity from another physical incarnation is already gone.
+        if (record.incarnation !== undefined && record.incarnation !== metadata.telemetryId) { await this.ctx.storage.delete(key); continue; }
+        const killed = record.groupId && record.incarnation !== undefined && await this.controller.signalOperationGroup(record.createdAt, record.groupId, 9, record.incarnation).catch(() => false);
+        if (!killed) await this.stopGeneration(record.createdAt, record.incarnation ?? metadata.telemetryId);
       }
       await this.ctx.storage.delete(key);
     }
@@ -83,13 +91,13 @@ export class CodeContexts {
       session.abort.abort();
       session.pending?.reject(failure(code));
       session.ready?.reject(failure(code));
-      const process = session.process ?? await session.starting?.catch(() => null);
+      const process = session.process ?? session.starting?.operationProcess ?? await session.starting?.catch(error => error.operationProcess ?? null);
       process?.kill(9);
       const confirmed = await process?.dispose().catch(() => false);
       // A failed process-group kill must not free admission capacity while the
       // old interpreter still consumes compute. Stop the generation to confirm
       // cleanup; if that also fails, retain both capacity and recovery evidence.
-      if (confirmed === false) await this.stopGeneration(session.createdAt);
+      if (confirmed === false) await this.stopGeneration(session.createdAt, session.incarnation);
       await this.ctx.storage.delete(PREFIX + session.id);
       await Promise.allSettled([session.writer?.abort(), session.reader?.cancel(), session.stderrReader?.cancel()]);
       this.contexts.delete(session.id);
@@ -156,7 +164,7 @@ export class CodeContexts {
     const metadata = await this.controller.getTerminalMetadata(createdAt, expiresAt);
     if (!metadata) return this.controller.respond({ error: 'container_not_running' }, 409);
     if (this.active.size >= MAX_EXECUTIONS) return this.controller.respond({ error: 'execution_limit' }, 429);
-    const session = { id: crypto.randomUUID(), createdAt, expiresAt: Math.min(expiresAt, this.controller.now() + MAX_CODE_CONTEXT_MS),
+    const session = { id: crypto.randomUUID(), createdAt, incarnation: metadata.telemetryId, expiresAt: Math.min(expiresAt, this.controller.now() + MAX_CODE_CONTEXT_MS),
       abort: new AbortController(), closed: false, close: () => this.close(session).catch(() => {}) };
     this.active.add(session);
     this.contexts.set(session.id, session);
@@ -165,15 +173,15 @@ export class CodeContexts {
     session.timer = setTimeout(session.close, session.expiresAt - this.controller.now());
     let startupTimer;
     try {
-      await this.ctx.storage.put(PREFIX + session.id, { createdAt });
+      await this.ctx.storage.put(PREFIX + session.id, { createdAt, incarnation: session.incarnation });
       if (session.closed) throw failure('code_context_closed');
       const starting = startOperationProcess(this.controller, createdAt, expiresAt, ['python3', '-u', '-c', PYTHON_KERNEL],
-        { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: session.abort.signal }, session.expiresAt - this.controller.now());
+        { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: session.abort.signal }, session.expiresAt - this.controller.now(), session.incarnation);
       session.starting = starting;
       startupTimer = setTimeout(() => { void this.close(session, 'code_context_unavailable').catch(() => {}); }, 10_000);
       session.process = await Promise.race([starting, ready]);
       if (session.closed || !session.process?.stdin || !session.process.stdout || !session.process.stderr) throw failure('code_context_unavailable');
-      await this.ctx.storage.put(PREFIX + session.id, { createdAt, pid: session.process.pid });
+      await this.ctx.storage.put(PREFIX + session.id, { createdAt, incarnation: session.incarnation, groupId: session.process.groupId });
       session.writer = session.process.stdin.getWriter();
       session.reader = session.process.stdout.getReader();
       session.stderrReader = session.process.stderr.getReader();

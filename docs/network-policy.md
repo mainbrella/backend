@@ -264,3 +264,71 @@ credential. Confirm default-deny behavior when relay, encryption key or runtime
 configuration is withdrawn. Disable gates after bounded qualification while any
 check remains unresolved. The historical internet-off probe does not qualify
 this new relay or customer mediation path.
+
+## October 11 local release qualification
+
+The real relay TLS suite uses a temporary local CA and HTTPS upstream. It
+verifies trusted-certificate success, untrusted-chain rejection, hostname
+mismatch rejection before HTTP credentials/body transmission, original Host
+and SNI at the pinned address, authenticated relay routing, scoped injection,
+redirect rejection, compressed-response rejection, credential reflection,
+response limits and cookie removal. All traffic in these TLS fixtures terminates
+on loopback. The fixture adapter supplies an already checked address to the
+real transport; this does not establish public DNS routing or provider isolation.
+OpenSSL is required to generate the temporary test certificates.
+
+```sh
+node --test containers/security.test.mjs scripts/egress-relay.test.mjs experiments/network-probe.test.mjs scripts/security-local-dns.test.mjs
+npx tsx --test worker/app/network-policy.test.ts
+node scripts/qualify-security-local.mjs --image mainbrella-managed-base:qualification --output .wrangler/release-security/native-report-review-fixed.json
+```
+
+The first command passed 27 tests; the API policy command passed one. The
+local-only native runner uses an already built local image, an isolated
+Miniflare Worker/DO namespace, two sequential Docker starts and no remote
+bindings, `.env` loading, product gate changes or credentials. Its explicit
+public DNS/TCP positive controls contact fixed public resolvers; “local-only”
+describes the runtime resources and excludes remote deployment/account changes. It checks real
+HTTP/HTTPS interception, the guest's provider CA trust, rejected hostnames and
+live replacement of both protocol handlers with a denial handler. It also
+compares an online control against `enableInternet:false`, using valid DNS-over-
+TCP response bytes and UDP TXT answers. TCP responses must match transaction ID,
+QR, opcode, question and response code, and contain a validated nonempty A
+answer. UDP address overlap is a separate diagnostic: a valid TCP answer with
+a different address still establishes protocol access. Malformed, partial or
+unexpected response bytes are indeterminate and never count as denial.
+Connection handshakes alone do not establish protocol access. The runner launches
+the inspected image digest rather than its mutable tag.
+
+The patched chain passed these checks on Node 22.22.2, Wrangler 4.149.0,
+Miniflare 5.20261006.1-alpha, workerd 1.20261006.1 and Docker 29.4.0, using local
+image `sha256:94ffa94457b9b933bf2e35a21f02f7fcf491bf2773ebba9e396e9c54b45f34e7`.
+The online DNS-over-TCP and UDP TXT controls succeeded; both were denied offline.
+Offline A queries returned the synthetic interception route `11.0.0.1`, while
+bare TCP handshakes were still accepted by the sidecar. Those preliminary
+observations were not bypass evidence. Raw access to the private Docker host
+remained available and is not a public-internet denial claim. IPv6 is
+indeterminate because its online control failed.
+
+The pinned [workerd local container implementation](https://github.com/cloudflare/workerd/blob/v1.20261001.1/src/workerd/server/container-client.c%2B%2B)
+checks the internet setting before passthrough and updates the sidecar setting
+on each start; the primitive is not simply absent from local development.
+[Cloudflare's outbound documentation](https://developers.cloudflare.com/containers/configuration/outbound-traffic/)
+also describes local interception through a sidecar. These sources explain why
+protocol response checks are needed alongside socket reachability.
+
+The runner writes sanitized JSON with explicit `denied`, `bypass` or
+`indeterminate` assessments. Its final cleanup removed the app and the exact
+run's proxy container; no owned containers remained. Real interruption checks
+sent SIGINT and SIGTERM to runs with an active guest. Both wrote interrupted
+reports, disposed the runtime and removed the exact app and proxy, returning
+130 and 143 respectively. The runner replaces only its Miniflare instance's
+immediate-exit signal hooks, bounds runtime disposal, and inventories its unique
+Docker namespace again after runtime shutdown. Earlier exploratory proxy
+containers were also removed by exact namespace. The report remains
+`releaseQualified:false`: production transport/isolation, provider recovery and
+generation revocation, the full alternate-protocol matrix and an IPv6 positive
+control remain outstanding. The local mediator qualifies native routing and
+handler replacement; existing account tests separately exercise secret and
+incarnation fencing. It does not turn those into a complete deployed
+control-plane qualification or authorize enabling the feature gates.

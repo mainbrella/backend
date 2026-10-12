@@ -23,6 +23,35 @@ one-day artifact expiry. Registry passwords never appear in those artifacts.
 
 ## Operator setup and qualification
 
+Before building or reconciling images, verify the Actions credential can read the
+existing container service. The custom-image workflow runs `npm run images:preflight`
+before preparation and reconciliation. Its `operation=preflight` option runs only
+that read-only check: it does not claim build inputs, acquire the image deployment
+lease, query the mutable image manifest, publish an image, or deploy a Worker.
+
+An October 11 scheduled reconciliation at backend revision `1420b8f` failed on
+`GET /accounts/…/workers/services/mainbrella-containers` with “No access to the
+specified service.” Local Wrangler authentication can read the existing service
+in the configured account, but that session does not validate the separate
+`CLOUDFLARE_API_TOKEN` stored in GitHub Actions. Check that token's account, expiry,
+IP restrictions and scope. Updating this existing Worker requires Workers
+**Editor** access scoped to `mainbrella-containers`; image registry/container
+operations have their own permissions. Do not recreate the Worker or replace
+its Durable Object bindings to work around an access error.
+[Cloudflare Workers permissions](https://developers.cloudflare.com/workers/authorization/workers/).
+
+After installing the reviewed workflow, run its read-only check with the actual
+Actions secret before retrying reconciliation:
+
+```sh
+gh workflow run custom-image.yml --repo <build-owner>/<private-build-repository> \
+  --ref main -f operation=preflight
+```
+
+A successful check proves service metadata access only. It does not prove write
+permissions, registry publication, a compatible runtime image, or a qualified
+customer build. A local `--dry-run` also does not establish those permissions.
+
 Create a dedicated private build repository and mirror the reviewed backend
 revision, including `.github/workflows/custom-image.yml`, the scripts and lockfile.
 Protect its `main` branch and restrict write access to trusted operators. Configure

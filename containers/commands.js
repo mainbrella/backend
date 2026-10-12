@@ -1,5 +1,5 @@
 import { MAX_EXECUTIONS, MAX_OUTPUT_BYTES, readCommandBody, validCommand } from './command-contract.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 
 // Foreground commands have bounded lifetime and output. A transport failure may
 // hide their result; callers must not retry commands with side effects blindly.
@@ -17,7 +17,7 @@ export async function executeCommand(controller, request, active, timers = globa
   if (active.size >= MAX_EXECUTIONS) return controller.respond({ error: 'execution_limit' }, 429);
 
   const abort = new AbortController();
-  let process;
+  let process, starting;
   let exited = false;
   let reason;
   let rejectStopped;
@@ -64,9 +64,9 @@ export async function executeCommand(controller, request, active, timers = globa
   }
   try {
     if (request.signal.aborted) disconnected();
-    const starting = startOperationProcess(controller, createdAt, expiresAt,
+    starting = startOperationProcess(controller, createdAt, expiresAt,
       ['/bin/sh', '-lc', body.command], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal },
-      Math.min(body.timeoutMs ?? 30_000, metadata.expiresAt - controller.now()));
+      Math.min(body.timeoutMs ?? 30_000, metadata.expiresAt - controller.now()), metadata.telemetryId);
     // A process returned after timeout must also be terminated.
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
@@ -79,6 +79,7 @@ export async function executeCommand(controller, request, active, timers = globa
     result.exitCode = exitCode;
     return controller.respond(result);
   } catch (error) {
+    process ??= error.operationProcess ?? starting?.operationProcess;
     if (reason === 'timed_out' || reason === 'output_limit') {
       result.timedOut = reason === 'timed_out';
       result.outputTruncated = reason === 'output_limit';
@@ -89,12 +90,11 @@ export async function executeCommand(controller, request, active, timers = globa
   } finally {
     timers.clearTimeout(timer);
     request.signal.removeEventListener('abort', disconnected);
-    active.delete(session);
     if (!exited) {
       abort.abort();
       try { process?.kill(9); } catch { /* already exited */ }
     }
     for (const reader of readers) void reader.cancel().catch(() => {});
-    await process?.dispose?.();
+    await finishOperationProcess(controller, createdAt, process, active, session);
   }
 }

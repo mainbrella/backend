@@ -13,6 +13,7 @@ const request = (path = '', method = 'GET', body, signal, generation = createdAt
 });
 function fixture(t) {
   const active = new Set(), records = new Map(), children = [], work = [];
+  const kill = child => { if (child.guestGroup) { try { process.kill(-child.pid, 9); } catch {} } child.kill('SIGKILL'); };
   records.set('builderMachine', { createdAt: Date.parse(createdAt) });
   const ctx = { waitUntil(promise) { work.push(promise); }, storage: {
     async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key); },
@@ -22,20 +23,23 @@ function fixture(t) {
     container: { running: true }, async getTerminalMetadata(generation, expiry) {
       return this.container.running && generation === createdAt && expiry === expiresAt ? { expiresAt } : null;
     }, async touchTerminalActivity() { return this.container.running; },
-    async destroy() { this.container.running = false; for (const child of children) child.kill('SIGKILL'); },
+    async destroy() { this.container.running = false; for (const child of children) kill(child); },
     async startTerminalProcess(generation, expiry, argv, options) {
       assert.equal(generation, createdAt); assert.equal(expiry, expiresAt);
-      // Production wraps in GNU timeout; host tests exercise real Python on macOS too.
+      // Linux uses the real GNU-owned group when testing supervised cleanup.
+      // Legacy Python-only adapters also run on macOS without GNU timeout.
       assert.equal(argv[0], 'timeout');
-      const child = spawn(argv[3], argv.slice(4)); children.push(child);
+      const grouped = process.platform === 'linux' && typeof this.signalOperationGroup === 'function';
+      const child = grouped ? spawn(argv[0], argv.slice(1)) : spawn(argv[3], argv.slice(4));
+      child.guestGroup = grouped; children.push(child);
       child.stdin.on('error', () => {});
-      options.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+      options.signal.addEventListener('abort', () => kill(child), { once: true });
       return { stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout), stderr: Readable.toWeb(child.stderr),
-        exitCode: new Promise(resolve => child.on('close', code => resolve(code ?? 137))), kill: () => child.kill('SIGKILL') };
+        exitCode: new Promise(resolve => child.on('close', code => resolve(code ?? 137))), kill: () => kill(child) };
     },
   };
   const manager = new CodeContexts(controller, active, ctx);
-  t.after(async () => { await Promise.all([...active].map(session => session.close())); for (const child of children) child.kill('SIGKILL'); await Promise.allSettled(work); });
+  t.after(async () => { await Promise.all([...active].map(session => session.close())); for (const child of children) kill(child); await Promise.allSettled(work); });
   return { manager, active, records, controller, ctx };
 }
 async function create(f) {
@@ -148,11 +152,12 @@ test('disconnect cancels a running context and recovery never replays Python', a
   const running = execute(f, context.id, 'while True: pass', 2000, abort.signal);
   abort.abort();
   assert.equal((await running).status, 409); assert.equal(f.active.size, 0);
-  f.records.set('code-context:orphan', { createdAt, pid: 123 });
+  f.records.set('code-context:orphan', { createdAt, groupId: 123, incarnation: 'runtime-a' });
+  f.records.get('builderMachine').telemetryId = 'runtime-a';
   let signaled;
   f.controller.signalOperationGroup = async (...args) => { signaled = args; return true; };
   await new CodeContexts(f.controller, f.active, f.ctx).recover();
-  assert.deepEqual(signaled, [createdAt, 123, 9]); assert.equal(f.records.has('code-context:orphan'), false);
+  assert.deepEqual(signaled, [createdAt, 123, 9, 'runtime-a']); assert.equal(f.records.has('code-context:orphan'), false);
   assert.equal((await f.manager.fetch(request())).status, 200);
 });
 
@@ -162,6 +167,32 @@ test('contracts reject unsupported languages, oversized code and unknown options
   assert.equal(validCodeExecution({ code: '1', timeoutMs: 60001 }), false);
   assert.equal(validCodeExecution({ code: '1', shell: true }), false);
   assert.equal(validCodeExecution({ code: '1', timeoutMs: 60000 }), true);
+});
+
+test('context recovery fences physical incarnations and distrusts legacy guest IDs without an incarnation', async t => {
+  const f = fixture(t); f.records.get('builderMachine').telemetryId = 'runtime-b';
+  f.controller.signalOperationGroup = async () => assert.fail('must not signal untrusted or obsolete group');
+  f.records.set('code-context:old', { createdAt, groupId: 123, incarnation: 'runtime-a' });
+  await f.manager.recover(); assert.equal(f.controller.container.running, true);
+  f.records.set('code-context:legacy', { createdAt, groupId: 123 });
+  await f.manager.recover(); assert.equal(f.controller.container.running, false);
+  assert.equal(f.records.has('code-context:legacy'), false);
+});
+
+test('a hung final generation fallback retains context evidence and capacity, and deletion remains retryable', async t => {
+  const f = fixture(t); t.mock.timers.enable({ apis: ['setTimeout'] });
+  f.controller.stopOperationGeneration = (_createdAt, incarnation) => { assert.equal(incarnation, 'runtime-a'); return new Promise(() => {}); };
+  const session = { id: crypto.randomUUID(), createdAt, incarnation: 'runtime-a', abort: new AbortController(),
+    process: { kill() {}, async dispose() { return false; } }, close() {} };
+  f.active.add(session); f.manager.contexts.set(session.id, session);
+  f.records.set('code-context:' + session.id, { createdAt, incarnation: 'runtime-a' });
+  const closing = assert.rejects(f.manager.close(session), /code_cleanup_unconfirmed/);
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(10_000); await closing;
+  assert.equal(f.active.size, 1); assert.equal(f.records.has('code-context:' + session.id), true);
+  assert.equal(f.manager.contexts.has(session.id), true); assert.equal(session.cleanup, undefined);
+  f.controller.stopOperationGeneration = async () => true;
+  await f.manager.close(session);
+  assert.equal(f.active.size, 0); assert.equal(f.records.has('code-context:' + session.id), false);
 });
 
 test('unconfirmed process cleanup destroys the generation before releasing admission capacity', async t => {

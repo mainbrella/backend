@@ -1,6 +1,6 @@
 import { MAX_EXECUTIONS, MAX_OUTPUT_BYTES, readCommandBody } from './command-contract.js';
 import { validIdempotencyKey } from './container-account-core.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 import { FILE_TIMEOUT_MS, readFileBytes } from './file-contract.js';
 import { MAX_MANAGED_TIMEOUT_MS, EXECUTION_RETENTION_MS, MAX_RETAINED_EXECUTIONS, MAX_EXECUTION_EVENTS,
   MAX_EXECUTION_STREAMS, EXECUTION_STREAM_MS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES,
@@ -11,7 +11,7 @@ const eventPrefix = id => `execution-event:${id}:`;
 const eventKey = (id, sequence) => eventPrefix(id) + String(sequence).padStart(8, '0');
 const encoder = new TextEncoder();
 const summary = record => {
-  const { key, fingerprint, ...publicRecord } = record;
+  const { key, fingerprint, incarnation, ...publicRecord } = record;
   return publicRecord;
 };
 
@@ -73,14 +73,17 @@ export class ManagedExecutions {
     for (const record of records.values()) {
       if (record.retainUntil <= this.controller.now() && terminalExecution(record)) { await this.erase(record); continue; }
       if (!terminalExecution(record)) {
-        if (metadata && new Date(metadata.createdAt).toISOString() === record.createdAt) interrupt = true;
+        if (metadata && new Date(metadata.createdAt).toISOString() === record.createdAt
+          && (record.incarnation === undefined || record.incarnation === metadata.telemetryId)) interrupt = true;
         record.status = 'interrupted';
         record.stdinClosed = true;
         record.finishedAt = new Date(this.controller.now()).toISOString();
         await this.save(record);
       }
     }
-    if (interrupt && this.controller.container.running) await this.controller.destroy('Managed execution interrupted by runtime restart');
+    if (interrupt && this.controller.container.running) {
+      if (!await this.controller.stopOperationGeneration(new Date(metadata.createdAt).toISOString(), metadata.telemetryId)) throw new Error('operation_cleanup_unconfirmed');
+    }
     await this.prune();
     await this.scheduleCleanup();
   }
@@ -124,7 +127,7 @@ export class ManagedExecutions {
       // Reject admission instead of evicting an unexpired idempotency identity.
       if (records.size >= MAX_RETAINED_EXECUTIONS) return this.controller.respond({ error: 'execution_history_limit' }, 429);
       const now = this.controller.now();
-      const record = { id: crypto.randomUUID(), createdAt, startedAt: new Date(now).toISOString(), status: 'starting',
+      const record = { id: crypto.randomUUID(), createdAt, incarnation: metadata.telemetryId, startedAt: new Date(now).toISOString(), status: 'starting',
         retainUntil: now + EXECUTION_RETENTION_MS, cursor: 0, outputBytes: 0, exitCode: null,
         timedOut: false, outputTruncated: false, stdinEnabled: Boolean(body.stdin), stdinClosed: !body.stdin, stdinBytes: 0,
         ...(body.pty ? { pty: body.pty } : {}), key, fingerprint };
@@ -146,7 +149,7 @@ export class ManagedExecutions {
   }
   async run(record, body, metadata, session, setStop) {
     const abort = new AbortController();
-    let process;
+    let process, starting;
     let exited = false;
     let reason;
     let outcome;
@@ -207,11 +210,11 @@ export class ManagedExecutions {
       }
     }
     try {
-      const starting = startOperationProcess(this.controller, record.createdAt, metadata.expiresAt,
+      starting = startOperationProcess(this.controller, record.createdAt, metadata.expiresAt,
         body.argv ?? ['/bin/sh', '-lc', body.command], { stdin: 'pipe', stdout: 'pipe', stderr: body.pty ? 'combined' : 'pipe', signal: abort.signal,
           ...(body.pty ? { pty: body.pty } : {}),
           ...(body.cwd !== undefined ? { cwd: body.cwd } : {}), ...(body.env !== undefined ? { env: body.env } : {}) },
-        Math.min(body.timeoutMs ?? 30_000, MAX_MANAGED_TIMEOUT_MS, metadata.expiresAt - this.controller.now()));
+        Math.min(body.timeoutMs ?? 30_000, MAX_MANAGED_TIMEOUT_MS, metadata.expiresAt - this.controller.now()), metadata.telemetryId);
       void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
       process = await Promise.race([starting, stopped]);
       session.process = process;
@@ -229,7 +232,8 @@ export class ManagedExecutions {
       const [code] = await Promise.race([Promise.all([exit, ...pumps]), stopped]);
       record.exitCode = code;
       outcome = code === 0 ? 'succeeded' : 'failed';
-    } catch {
+    } catch (error) {
+      process ??= error.operationProcess ?? starting?.operationProcess;
       outcome = reason ?? 'failed';
       record.timedOut = reason === 'timed_out';
       record.outputTruncated = reason === 'output_limit';
@@ -242,17 +246,17 @@ export class ManagedExecutions {
       if (session.writer) void session.writer.abort().catch(() => {});
       for (const reader of readers) await reader.cancel().catch(() => {});
       await Promise.allSettled(pumps);
-      await process?.dispose?.();
       // All outstanding output writes precede the final record in the same lock.
-      await this.serialized(async () => {
-        record.status = outcome;
-        record.stdinClosed = true;
-        record.finishedAt = new Date(this.controller.now()).toISOString();
-        await this.save(record);
+      await finishOperationProcess(this.controller, record.createdAt, process, this.active, session, async () => {
+        await this.serialized(async () => {
+          record.status = outcome;
+          record.stdinClosed = true;
+          record.finishedAt = new Date(this.controller.now()).toISOString();
+          await this.save(record);
+        });
+        this.sessions.delete(record.id);
+        await this.scheduleCleanup();
       });
-      this.active.delete(session);
-      this.sessions.delete(record.id);
-      await this.scheduleCleanup();
     }
   }
   async events(record, cursor = 0) {

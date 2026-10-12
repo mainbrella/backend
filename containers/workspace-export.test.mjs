@@ -8,7 +8,7 @@ function fixture(code=0){
   const controller={now:()=>Date.now(),respond:(value,status=200)=>Response.json(value,{status}),
     async getTerminalMetadata(createdAt){return createdAt==='owned'?{expiresAt:Date.now()+60000}:null;},
     async startTerminalProcess(_generation,_expiry,argv){assert.ok(argv.includes('bash'));return {stdout:new ReadableStream({start(c){if(code===0)c.enqueue(bytes);c.close();}}),stderr:new ReadableStream({start(c){c.close();}}),exitCode:Promise.resolve(code),kill(){},};},
-    async signalOperationGroup(){return true;}};
+    signalOperationGroup: undefined};
   const request=createdAt=>new Request('https://internal/workspaces/export-v1',{headers:{'x-exec-created-at':createdAt,'x-exec-expires-at':String(Date.now()+60000)}});
   return {controller,active,request};
 }
@@ -22,4 +22,18 @@ test('too-large or inconsistent archives fail without returning a partial downlo
   const large=fixture(44),changed=fixture(45);
   assert.equal((await exportWorkspace(large.controller,large.request('owned'),large.active)).status,413);
   assert.equal((await exportWorkspace(changed.controller,changed.request('owned'),changed.active)).status,503);
+});
+test('export cancellation bounds pending startup and retains admission until cleanup is confirmed',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const f=fixture(),abort=new AbortController();let resolveStart,killed=0;
+  f.controller.signalOperationGroup=async()=>false;
+  f.controller.stopOperationGeneration=async()=>false;
+  f.controller.startTerminalProcess=()=>new Promise(resolve=>{resolveStart=resolve;});
+  const req=new Request(f.request('owned'),{signal:abort.signal});
+  const pending=exportWorkspace(f.controller,req,f.active);
+  while(!resolveStart)await new Promise(resolve=>setImmediate(resolve));
+  abort.abort();t.mock.timers.tick(10_000);assert.equal((await pending).status,503);assert.equal(f.active.size,1);
+  resolveStart({kill(){killed++;}});await new Promise(resolve=>setImmediate(resolve));assert.equal(killed,1);
+  f.controller.stopOperationGeneration=async()=>true;
+  assert.equal(await [...f.active][0].close(),true);assert.equal(f.active.size,0);
 });

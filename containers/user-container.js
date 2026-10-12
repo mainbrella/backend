@@ -62,6 +62,7 @@ export class UserContainer extends DurableObject {
       for (const session of this.commands) session.close();
     };
     ctx.blockConcurrencyWhile(async () => {
+      await this.controller.recoverOperationCleanup();
       await this.executions.recover();
       await this.codeContexts.recover();
       if (ctx.container.running) {

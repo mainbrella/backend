@@ -8,9 +8,9 @@ export function registerFileRoutes(api: OpenAPIApi, handler: LegacyHandler): voi
   const transferDescription = `Streams a regular file in an owned running generation under backpressure, up to ${MAX_TRANSFER_BYTES} bytes without a file-sized Worker buffer. Shares the execution pool, renews idle activity, and ends within ${TRANSFER_TIMEOUT_MS} ms or the generation deadline. Requires Linux, /bin/sh and GNU coreutils. Files use the sandbox's existing lifecycle and persistence behavior. Transfers cannot resume; mutations are never automatically retried.`;
   register(api, 'get', '/containers/files/transfer', {
     operationId: 'downloadContainerFile', tags: ['Containers'], summary: 'Stream a file download', security: containerSecurity,
-    description: `${transferDescription} Returns Content-Length and raw bytes. A changing file is not a consistent snapshot; truncation and disconnects fail the response stream. Consumers must discard incomplete output.`,
+    description: `${transferDescription} Returns a required Content-Length backed by an exact fixed-length response stream and raw bytes. A changing file is not a consistent snapshot; truncation and disconnects fail the response stream. Consumers must discard incomplete output.`,
     request: { query: z.object(transferIdentity) },
-    responses: { 200: { description: 'Streamed file bytes.', headers: { 'Content-Length': { schema: { type: 'integer', maximum: MAX_TRANSFER_BYTES } } },
+    responses: { 200: { description: 'Streamed file bytes.', headers: { 'Content-Length': { required: true, description: 'Exact uncompressed byte length; the fixed-length response fails on truncation or overflow.', schema: { type: 'integer', minimum: 0, maximum: MAX_TRANSFER_BYTES } } },
       content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } }, ...errors(400, 401, 402, 403, 404, 409, 413, 429, 503) },
   }, handler);
   register(api, 'put', '/containers/files/transfer', {

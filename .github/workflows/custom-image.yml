@@ -13,7 +13,7 @@ on:
         required: false
         default: build
         type: choice
-        options: [build, reconcile]
+        options: [build, reconcile, preflight]
   schedule:
     - cron: '17 * * * *'
 
@@ -25,7 +25,7 @@ env:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && inputs.operation != 'preflight' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -43,7 +43,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/prepare-image-build.mjs
+        run: |
+          npm run images:preflight
+          node scripts/prepare-image-build.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: prepared
@@ -99,7 +101,7 @@ jobs:
           retention-days: 1
 
   publish:
-    if: always() && github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && github.event_name == 'workflow_dispatch'
+    if: always() && github.ref == 'refs/heads/main' && github.event.repository.private == true && inputs.operation != 'reconcile' && inputs.operation != 'preflight' && github.event_name == 'workflow_dispatch'
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -148,4 +150,25 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
           GH_TOKEN: ${{ github.token }}
-        run: npm run deploy:containers
+        run: |
+          npm run images:preflight
+          npm run deploy:containers
+
+  preflight:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'preflight'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Read existing runtime service metadata with the deployment token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 2b7a9be82bb64187230703b024e25157
+        run: npm run images:preflight

@@ -13,6 +13,7 @@ interface Env {
   BUILD_AI_GATEWAY?: string;
   BUILD_CODEX_URL?: string;
   BUILD_CODEX_TOKEN?: string;
+  STRIPE_SECRET_KEY?: string;
   STRIPE_PREPAID_PRICE_ID?: string;
   LOCAL_DEV?: string;
   LOCAL_PREVIEW_PORT?: string;

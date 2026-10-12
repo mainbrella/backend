@@ -24,13 +24,13 @@ async function fixture(t, timers = globalThis) {
   ]);
   const ctx = { storage: { async get(key) { return structuredClone(values.get(key)); },
     async put(key, value) { values.set(key, structuredClone(value)); }, async setAlarm() {} },
-  container: { running: true, async setInactivityTimeout() {}, async exec(argv, options) {
-    const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' }); children.push(child);
+  container: { running: true, async setInactivityTimeout() {}, async destroy() { this.running = false; for (const child of children) child.kill('SIGKILL'); }, async exec(argv, options) {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', options.stdout === 'ignore' ? 'ignore' : 'pipe', options.stderr === 'ignore' ? 'ignore' : 'pipe'] }); children.push(child);
     const kill = () => child.kill('SIGKILL');
-    options.signal.addEventListener('abort', kill, { once: true });
-    if (options.signal.aborted) kill();
-    return { stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout), stderr: Readable.toWeb(child.stderr), kill,
-      exitCode: new Promise(resolve => child.on('close', code => { options.signal.removeEventListener('abort', kill); resolve(code ?? 137); })) };
+    options.signal?.addEventListener('abort', kill, { once: true });
+    if (options.signal?.aborted) kill();
+    return { stdin: Writable.toWeb(child.stdin), stdout: child.stdout && Readable.toWeb(child.stdout), stderr: child.stderr && Readable.toWeb(child.stderr), kill,
+      exitCode: new Promise(resolve => child.on('close', code => { options.signal?.removeEventListener('abort', kill); resolve(code ?? 137); })) };
   } } };
   const active = new Set(), controller = new UserContainerController(ctx, () => now);
   t.after(async () => { for (const child of children) child.kill('SIGKILL'); await rm(dir, { recursive: true, force: true }); });
@@ -121,6 +121,9 @@ test('generation changes, unpaid leases, deadlines and machine stops close trans
     assert.equal(response.status, 200);
     if (mode === 'stop') for (const session of f.active) session.close();
     else await new Promise(resolve => setTimeout(resolve, 150));
-    await assert.rejects(response.arrayBuffer()); assert.equal(f.active.size, 0);
+    await assert.rejects(response.arrayBuffer());
+    // Stream failure precedes asynchronous guest-group cleanup confirmation.
+    await Promise.all([...f.active].map(session => session.close()));
+    assert.equal(f.active.size, 0);
   }
 });

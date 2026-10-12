@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { accessFilesystem } from './filesystem.js';
 import { UserContainerController } from './user-container-core.js';
+import { hostProcessGroups } from './test-process-group.js';
 import { MAX_DIRECTORY_ENTRIES, MAX_FILESYSTEM_BODY_BYTES, MAX_FILESYSTEM_OUTPUT_BYTES, decodeFilesystemEntries, validFilesystemOperation } from './filesystem-contract.js';
 
 const createdAt = '2026-10-05T12:00:00.000Z', now = Date.parse(createdAt), expiresAt = now + 120_000;
@@ -24,7 +25,7 @@ async function fixture(t, timers = globalThis) {
     ['machineEntitlement', { plan: 'builder', active: true, validUntil: expiresAt, checkedAt: now }],
   ]);
   const ctx = { storage: { async get(key) { return structuredClone(values.get(key)); }, async put(key, value) { values.set(key, structuredClone(value)); }, async setAlarm() {} },
-    container: { running: true, async setInactivityTimeout() {}, async exec(argv, options) {
+    container: { running: true, async setInactivityTimeout() {}, async destroy() { this.running = false; for (const child of children) child.kill('SIGKILL'); }, async exec(argv, options) {
       calls.push({ argv, options });
       const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' }); children.push(child);
       const kill = () => child.kill('SIGKILL');
@@ -33,7 +34,7 @@ async function fixture(t, timers = globalThis) {
       return { stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout), stderr: Readable.toWeb(child.stderr), exitCode, kill };
     } },
   };
-  const controller = new UserContainerController(ctx, () => now);
+  const controller = hostProcessGroups(new UserContainerController(ctx, () => now));
   t.after(async () => { for (const child of children) child.kill('SIGKILL'); await chmod(dir, 0o700); await rm(dir, { recursive: true, force: true }); });
   return { dir, calls, active, controller, values, ctx, run: (operation, body, headers, signal) => accessFilesystem(controller, request(operation, body, headers, signal), active, timers) };
 }
@@ -135,6 +136,7 @@ test('filesystem shares the command pool and bounds timeout/disconnect/stop, inc
   for (const mode of ['timeout', 'disconnect', 'stop']) {
     const f = await fixture(t, { setTimeout: callback => setTimeout(callback, mode === 'timeout' ? 10 : 1000), clearTimeout });
     let resolveStart;
+    f.controller.signalOperationGroup = undefined;
     f.controller.startTerminalProcess = () => new Promise(resolve => { resolveStart = resolve; });
     const abort = new AbortController();
     const pending = f.run('stat', { path: '/file' }, {}, abort.signal);
@@ -150,6 +152,7 @@ test('malformed metadata, unsupported filename bytes and oversized output fail w
   assert.throws(() => decodeFilesystemEntries(new Uint8Array([255, 0])), /unsupported_file_name/);
   assert.throws(() => decodeFilesystemEntries(new TextEncoder().encode('broken')), /files_unavailable/);
   const f = await fixture(t);
+  f.controller.signalOperationGroup = undefined;
   f.controller.startTerminalProcess = async () => ({ stdin: new WritableStream(), stdout: new Response(new Uint8Array(MAX_FILESYSTEM_OUTPUT_BYTES + 2)).body,
     stderr: new Response('').body, exitCode: Promise.resolve(0), kill() {} });
   assert.equal((await f.run('list', { path: '/' })).status, 413);

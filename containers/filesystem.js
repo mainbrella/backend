@@ -1,6 +1,6 @@
 import { MAX_EXECUTIONS } from './command-contract.js';
 import { FILE_TIMEOUT_MS, readFileBytes } from './file-contract.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 import { DEFAULT_DIRECTORY_ENTRIES, MAX_DIRECTORY_OFFSET, MAX_FILESYSTEM_OUTPUT_BYTES, decodeFilesystemEntries,
   readFilesystemBody, validFilesystemOperation } from './filesystem-contract.js';
 
@@ -95,7 +95,7 @@ export async function accessFilesystem(controller, request, active, timers = glo
     : operation === 'remove' ? [String(body.recursive ?? false)] : operation === 'move' ? [body.destination] : [body.mode];
   const argv = ['/bin/bash', '-c', script, 'mainbrella-filesystem', operation, body.path, ...options];
   const abort = new AbortController();
-  let process, reason, exited = false, rejectStopped;
+  let process, starting, reason, exited = false, rejectStopped;
   const stopped = new Promise((_, reject) => { rejectStopped = reject; });
   void stopped.catch(() => {});
   const stop = value => {
@@ -112,8 +112,8 @@ export async function accessFilesystem(controller, request, active, timers = glo
   const timer = timers.setTimeout(() => stop('files_unavailable'), Math.max(0, Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now())));
   try {
     if (request.signal.aborted) disconnected();
-    const starting = startOperationProcess(controller, createdAt, expiresAt, argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal },
-      Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now()));
+    starting = startOperationProcess(controller, createdAt, expiresAt, argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal },
+      Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now()), metadata.telemetryId);
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
     const exit = process.exitCode.then(code => { exited = true; return code; });
@@ -140,13 +140,14 @@ export async function accessFilesystem(controller, request, active, timers = glo
     }
     return controller.respond({ path: body.path, ...(operation === 'move' ? { destination: body.destination } : {}), ...(operation === 'chmod' ? { mode: body.mode } : {}), ok: true });
   } catch (error) {
+    process ??= error.operationProcess ?? starting?.operationProcess;
     const unavailable = reason === 'container_not_running' || error.message === 'Machine unavailable';
     if (error.message === 'unsupported_file_name') return controller.respond({ error: error.message }, 409);
     if (error.message === 'file_too_large') return controller.respond({ error: 'directory_too_large' }, 413);
     return controller.respond({ error: unavailable ? 'container_not_running' : 'files_unavailable' }, unavailable ? 409 : 503);
   } finally {
-    timers.clearTimeout(timer); request.signal.removeEventListener('abort', disconnected); active.delete(session);
+    timers.clearTimeout(timer); request.signal.removeEventListener('abort', disconnected);
     if (!exited) { abort.abort(); try { process?.kill(9); } catch {} }
-    await process?.dispose?.();
+    await finishOperationProcess(controller, createdAt, process, active, session);
   }
 }

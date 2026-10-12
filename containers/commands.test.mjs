@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { executeCommand } from './commands.js';
 import { MAX_OUTPUT_BYTES, readCommandBody } from './command-contract.js';
 import { UserContainerController } from './user-container-core.js';
+import { hostProcessGroups } from './test-process-group.js';
 
 const createdAt = '2026-10-05T12:00:00.000Z';
 const now = Date.parse(createdAt);
@@ -35,7 +36,7 @@ function fixture() {
     storage: { async get(key) { return structuredClone(values.get(key)); },
       async put(key, value) { values.set(key, structuredClone(value)); }, async setAlarm() {} },
     container: {
-      running: true, async setInactivityTimeout() {},
+      running: true, async setInactivityTimeout() {}, async destroy() { this.running = false; for (const child of children) child.kill('SIGKILL'); },
       async exec(argv, options) {
         calls.push({ argv, options });
         const child = spawn(argv[0], argv.slice(1), { stdio: 'pipe' });
@@ -52,7 +53,7 @@ function fixture() {
       },
     },
   };
-  const controller = new UserContainerController(ctx, () => now);
+  const controller = hostProcessGroups(new UserContainerController(ctx, () => now));
   const active = new Set();
   const run = req => executeCommand(controller, req, active);
   return { ctx, values, calls, children, controller, active, run };
@@ -119,7 +120,10 @@ test('execution capacity rejects a fifth command without launching a process', a
 test('disconnect and container stop cancel work; process startup is bounded', async () => {
   for (const mode of ['disconnect', 'stop', 'startup_timeout']) {
     const f = fixture();
-    if (mode === 'startup_timeout') f.controller.startTerminalProcess = () => new Promise(() => {});
+    if (mode === 'startup_timeout') {
+      f.controller.signalOperationGroup = undefined;
+      f.controller.startTerminalProcess = () => new Promise(() => {});
+    }
     const abort = new AbortController();
     const pending = f.run(request('exec sleep 10', mode === 'startup_timeout' ? 10 : 3000, {}, abort.signal));
     if (mode !== 'startup_timeout') {

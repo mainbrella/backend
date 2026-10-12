@@ -68,3 +68,102 @@ test('real Node transport connects to the pinned address while retaining the ori
     assert.equal(Buffer.concat(chunks).toString(), 'pinned'); assert.equal(host, target.host);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
+
+async function tlsFixture(t) {
+  const { mkdtemp, readFile, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { execFileSync } = await import('node:child_process');
+  const https = await import('node:https');
+  const directory = await mkdtemp(join(tmpdir(), 'mainbrella-egress-tls-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = name => join(directory, name);
+  const openssl = args => execFileSync('openssl', args, { stdio: 'ignore', timeout: 10_000 });
+  openssl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', file('ca.key'), '-out', file('ca.pem'),
+    '-days', '1', '-subj', '/CN=Mainbrella local relay qualification CA']);
+  openssl(['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', file('server.key'), '-out', file('server.csr'),
+    '-subj', '/CN=api.example.com']);
+  await writeFile(file('extensions'), 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:api.example.com\n');
+  openssl(['x509', '-req', '-in', file('server.csr'), '-CA', file('ca.pem'), '-CAkey', file('ca.key'), '-CAcreateserial',
+    '-out', file('server.pem'), '-days', '1', '-extfile', file('extensions')]);
+  let handler = (_request, response) => response.end('accepted');
+  const requests = [];
+  const server = https.createServer({ key: await readFile(file('server.key')), cert: await readFile(file('server.pem')) }, async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    requests.push({ host: request.headers.host, servername: request.socket.servername, headers: request.headers, body: Buffer.concat(chunks) });
+    handler(request, response);
+  });
+  server.on('tlsClientError', () => {}); // Rejected certificates are expected test traffic.
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const port = server.address().port, ca = await readFile(file('ca.pem'));
+  const address = { address: '127.0.0.1', family: 4 };
+  // The real TLS socket always terminates on this local fixture. Policy DNS
+  // remains separately checked; this adapter does not qualify public routing.
+  const transport = (target, checkedAddress, options, bytes, signal) => {
+    assert.deepEqual(checkedAddress, { address: '93.184.216.34', family: 4 });
+    const localTarget = new URL(target); localTarget.port = String(port);
+    return pinnedRequest(localTarget, address, { ...options, ca }, bytes, signal);
+  };
+  return { requests, port, ca, address, transport, respond: value => { handler = value; } };
+}
+
+test('real TLS transport verifies trust and original hostname, retaining SNI and Host at its pinned address', async t => {
+  const fixture = await tlsFixture(t);
+  const target = new URL(`https://api.example.com:${fixture.port}/`);
+  const options = { method: 'POST', headers: { authorization: 'local-synthetic-credential' } };
+  await assert.rejects(pinnedRequest(target, fixture.address, options, Buffer.from('private'), AbortSignal.timeout(2000)),
+    error => ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'SELF_SIGNED_CERT_IN_CHAIN'].includes(error.code));
+  const wrongHost = new URL(target); wrongHost.hostname = 'wrong.example.com';
+  await assert.rejects(pinnedRequest(wrongHost, fixture.address, { ...options, ca: fixture.ca }, Buffer.from('private'), AbortSignal.timeout(2000)),
+    { code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
+  assert.equal(fixture.requests.length, 0, 'TLS failures must prevent sending HTTP credentials or bodies');
+  const incoming = await pinnedRequest(target, fixture.address, { ...options, ca: fixture.ca }, Buffer.from('private'), AbortSignal.timeout(2000));
+  for await (const _chunk of incoming) {} // Consume the real response before cleanup.
+  assert.equal(fixture.requests.length, 1);
+  assert.equal(fixture.requests[0].host, target.host);
+  assert.equal(fixture.requests[0].servername, target.hostname);
+  assert.equal(fixture.requests[0].body.toString(), 'private');
+});
+
+test('authenticated local relay performs real TLS injection and rejects adversarial upstream responses', async t => {
+  const fixture = await tlsFixture(t), token = 'local-test-relay-token-'.repeat(2);
+  const server = createRelay({ token, resolver, transport: fixture.transport });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const url = `http://127.0.0.1:${server.address().port}/v1/egress`;
+  const send = (body = envelope(), authorization = `Bearer ${token}`, target = url) => fetch(target, {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(3000),
+  });
+  for (const [authorization, target] of [['wrong', url], [`Bearer ${token}`, url + '/'], [`Bearer ${token}`, url + '?bypass=1']]) {
+    assert.equal((await send(envelope(), authorization, target)).status, 403);
+  }
+  assert.equal(fixture.requests.length, 0);
+  fixture.respond((_request, response) => {
+    response.setHeader('set-cookie', 'upstream-private-cookie=ignored');
+    response.end('{"authenticated":true}');
+  });
+  const allowed = await send(), value = await allowed.json();
+  assert.equal(allowed.status, 200); assert.equal(value.status, 200);
+  assert.equal(fixture.requests[0].headers.authorization, 'Bearer super-secret-key');
+  assert.equal(fixture.requests[0].headers['accept-encoding'], 'identity');
+  assert.equal(fixture.requests[0].servername, 'api.example.com');
+  assert.equal(fixture.requests[0].body.toString(), '{"hello":true}');
+  assert.equal(value.headers.some(([name]) => name === 'set-cookie'), false);
+  assert.equal(JSON.stringify(value).includes('super-secret-key'), false);
+  const adversaries = [
+    (_request, response) => { response.writeHead(302, { location: 'https://evil.example.com/' }); response.end('redirect'); },
+    (_request, response) => { response.setHeader('content-encoding', 'gzip'); response.end('compressed'); },
+    (_request, response) => response.end('super-secret-key'),
+    (_request, response) => response.end(Buffer.from('super-secret-key').toString('base64')),
+    (_request, response) => { response.setHeader('x-reflected', 'Bearer super-secret-key'); response.end('body'); },
+    (_request, response) => response.end(Buffer.alloc(8 * 1024 * 1024 + 1)),
+  ];
+  for (const handler of adversaries) {
+    fixture.respond(handler);
+    const denied = await send();
+    assert.equal(denied.status, 403); assert.deepEqual(await denied.json(), { error: 'egress_denied' });
+  }
+  assert.equal(fixture.requests.length, adversaries.length + 1, 'redirects must never trigger a second upstream request');
+});

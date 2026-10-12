@@ -1,6 +1,6 @@
 import { MAX_EXECUTIONS } from './command-contract.js';
 import { FILE_TIMEOUT_MS, MAX_FILE_BYTES, readFileBytes, validFilePath } from './file-contract.js';
-import { startOperationProcess } from './process-supervisor.js';
+import { startOperationProcess, finishOperationProcess } from './process-supervisor.js';
 
 // Paths are positional arguments, never interpolated shell code. Reads follow
 // symlinks inside the owned guest; writes replace regular files and reject links.
@@ -39,7 +39,7 @@ export async function accessFile(controller, request, active, timers = globalThi
   if (active.size >= MAX_EXECUTIONS) return controller.respond({ error: 'execution_limit' }, 429);
 
   const abort = new AbortController();
-  let process;
+  let process, starting;
   let exited = false;
   let reason;
   let rejectStopped;
@@ -63,9 +63,9 @@ export async function accessFile(controller, request, active, timers = globalThi
   let writer;
   try {
     if (request.signal.aborted) disconnected();
-    const starting = startOperationProcess(controller, createdAt, expiresAt,
+    starting = startOperationProcess(controller, createdAt, expiresAt,
       ['/bin/sh', '-c', request.method === 'GET' ? readScript : writeScript, 'mainbrella-files', path],
-      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal }, Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now()));
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', signal: abort.signal }, Math.min(FILE_TIMEOUT_MS, metadata.expiresAt - controller.now()), metadata.telemetryId);
     void starting.then(value => { if (reason) { try { value.kill(9); } catch {} } }).catch(() => {});
     process = await Promise.race([starting, stopped]);
     const exit = process.exitCode.then(code => { exited = true; return code; });
@@ -92,17 +92,17 @@ export async function accessFile(controller, request, active, timers = globalThi
     if (request.method === 'PUT') return controller.respond({ path, size: input.byteLength });
     return new Response(bytes, { headers: { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' } });
   } catch (error) {
+    process ??= error.operationProcess ?? starting?.operationProcess;
     const unavailable = reason === 'container_not_running' || error.message === 'Machine unavailable';
     return controller.respond({ error: unavailable ? 'container_not_running' : 'files_unavailable' }, unavailable ? 409 : 503);
   } finally {
     timers.clearTimeout(timer);
     request.signal.removeEventListener('abort', disconnected);
-    active.delete(session);
     if (!exited) {
       abort.abort();
       try { process?.kill(9); } catch { /* already exited */ }
     }
     if (writer) void writer.abort().catch(() => {});
-    await process?.dispose?.();
+    await finishOperationProcess(controller, createdAt, process, active, session);
   }
 }

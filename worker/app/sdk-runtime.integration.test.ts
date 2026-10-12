@@ -25,6 +25,8 @@ import { accessFilesystem } from '../../containers/filesystem.js';
 import { ManagedExecutions } from '../../containers/executions.js';
 // @ts-expect-error Integration test exercises the shipped JavaScript runtime directly.
 import { WorkloadWebhooks } from '../../containers/webhooks.js';
+// @ts-expect-error Host subprocesses share Node's PID namespace, unlike native provider exec.
+import { hostProcessGroups } from '../../containers/test-process-group.js';
 
 const gnu = ['stat', 'find', 'sed', 'timeout'].every(command => spawnSync(command, ['--version'], { encoding: 'utf8' }).stdout?.includes('GNU'));
 
@@ -58,6 +60,7 @@ test('SDK HTTP lifecycle reaches real API handlers, filesystem and managed subpr
       } },
   };
   const controller = new UserContainerController(ctx, () => time);
+  hostProcessGroups(controller);
   const manager = new ManagedExecutions(controller, active, ctx);
   f.env.WORKLOAD_WEBHOOKS_ENABLED = 'true'; f.env.WEBHOOK_ALLOWED_HOSTS = 'relay.example.com';
   const webhookPayloads: object[] = [];

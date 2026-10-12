@@ -2,7 +2,7 @@ import { authCorsHeaders, authJson } from './auth-core';
 import { containerUser } from './container-auth';
 import { runningContainer, containerError } from '../lib/container-service';
 import { validContainerId } from '../../containers/container-account-core.js';
-import { exactByteStream, transferSize, validTransferPath } from '../../containers/file-transfer-contract.js';
+import { fixedByteStream, transferSize, validTransferPath } from '../../containers/file-transfer-contract.js';
 import { readFileBytes } from '../../containers/file-contract.js';
 
 export async function handleFileTransferRequest(request: Request, env: Env): Promise<Response> {
@@ -47,7 +47,7 @@ export async function handleFileTransferRequest(request: Request, env: Env): Pro
     if (request.method === 'PUT') return authJson({ path, size }, 200, cors);
     const length = transferSize(response.headers.get('content-length'));
     if (length === null) { await response.body?.cancel(); throw new Error('files_unavailable'); }
-    return new Response(exactByteStream(response.body, length, request.signal), { headers: { ...cors,
+    return new Response(fixedByteStream(response.body, length, request.signal), { headers: { ...cors,
       'content-type': 'application/octet-stream', 'content-length': String(length), 'content-disposition': 'attachment',
       'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
   } catch (error) {

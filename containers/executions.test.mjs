@@ -4,6 +4,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { ManagedExecutions } from './executions.js';
 import { UserContainerController } from './user-container-core.js';
+import { hostProcessGroups } from './test-process-group.js';
+import { executeCommand } from './commands.js';
 import { MAX_OUTPUT_BYTES } from './command-contract.js';
 import { MAX_RETAINED_EXECUTIONS, MAX_STDIN_CHUNK_BYTES, MAX_STDIN_BYTES, MAX_PENDING_STDIN_BYTES, MAX_EXECUTION_EVENTS, validExecution } from './execution-contract.js';
 
@@ -48,7 +50,7 @@ function fixture(t) {
         return { pid: child.pid, stdin: Writable.toWeb(child.stdin), stdout: Readable.toWeb(child.stdout), stderr: Readable.toWeb(child.stderr), exitCode, kill };
       } },
   };
-  const controller = new UserContainerController(ctx, () => time);
+  const controller = hostProcessGroups(new UserContainerController(ctx, () => time));
   const active = new Set();
   const manager = new ManagedExecutions(controller, active, ctx);
   t.after(async () => { for (const session of active) session.close(); for (const child of children) child.kill('SIGKILL'); await Promise.all(work); });
@@ -99,7 +101,7 @@ test('disconnect detaches, SSE replays by cursor, and cancellation is generation
 
 test('timeouts, output bounds, shared capacity and stale generations do not leak processes', async t => {
   const f = fixture(t);
-  const timeout = await (await f.manager.fetch(request('', 'POST', { command: 'exec sleep 10', timeoutMs: 20 }, 'timeout'))).json();
+  const timeout = await (await f.manager.fetch(request('', 'POST', { command: 'exec sleep 10', timeoutMs: 250 }, 'timeout'))).json();
   await Promise.all(f.work);
   assert.equal((await (await f.manager.fetch(request(`/${timeout.id}`))).json()).status, 'timed_out');
   const noisy = await (await f.manager.fetch(request('', 'POST', { command: 'yes x', timeoutMs: 3000 }, 'noisy'))).json();
@@ -123,6 +125,7 @@ test('many small install writes are retained without prematurely hitting the eve
       else controller.close();
     } });
   };
+  f.manager.controller.signalOperationGroup = undefined;
   t.mock.method(f.manager.controller, 'startTerminalProcess', async () => ({
     stdin: new WritableStream(), stdout: readable(stdout), stderr: readable(stderr), exitCode: Promise.resolve(0), kill() {},
   }));
@@ -144,6 +147,7 @@ test('batched small writes still obey the byte cap and retain the bounded tail o
   let index = 0;
   let exit;
   const exitCode = new Promise(resolve => { exit = resolve; });
+  f.manager.controller.signalOperationGroup = undefined;
   t.mock.method(f.manager.controller, 'startTerminalProcess', async () => ({
     stdin: new WritableStream(), stdout: new ReadableStream({ pull(controller) {
       if (index < chunks.length) controller.enqueue(chunks[index++]);
@@ -284,6 +288,7 @@ test('restart recovery interrupts only matching generations and retained keys re
   await f.manager.recover();
   assert.equal(f.ctx.container.running, false);
   assert.equal(f.values.get('execution-record:' + id).status, 'interrupted');
+  await f.manager.controller.recoverOperationCleanup();
   f.ctx.container.running = true;
   f.values.set('execution-record:' + id, { id, createdAt: '2099-01-01T00:00:00.000Z', status: 'running', cursor: 0, retainUntil: now + 3600_000 });
   await f.manager.recover();
@@ -292,6 +297,50 @@ test('restart recovery interrupts only matching generations and retained keys re
   for (let n = 0; n < MAX_RETAINED_EXECUTIONS; n++) f.values.set('execution-record:' + n, { id: String(n), key: String(n), createdAt, status: 'succeeded', retainUntil: now + 3600_000 });
   const denied = await f.manager.fetch(request('', 'POST', { command: 'echo x' }, 'new'));
   assert.equal(denied.status, 429);
+});
+
+test('startup cancellation retains capacity and a durable record until failed cleanup can be retried', async t => {
+  const f = fixture(t); f.values.get('builderMachine').telemetryId = 'runtime-a';
+  let resolveStart, killed = 0;
+  f.manager.controller.startTerminalProcess = () => new Promise(resolve => { resolveStart = resolve; });
+  const destroy = f.manager.controller.destroy.bind(f.manager.controller);
+  f.manager.controller.destroy = async () => { throw new Error('provider_unavailable'); };
+  const record = await (await f.manager.fetch(request('', 'POST', { command: 'never expose this startup', timeoutMs: 20 }, 'startup-failure'))).json();
+  assert.ok(!('incarnation' in record));
+  await Promise.all(f.work);
+  assert.equal(f.active.size, 1); assert.equal(f.manager.sessions.has(record.id), true);
+  assert.equal(f.values.get('execution-record:' + record.id).incarnation, 'runtime-a');
+  assert.equal(f.values.get('execution-record:' + record.id).status, 'starting');
+  assert.equal(f.values.get('builderMachine').operationCleanupPending, true);
+  resolveStart({ kill() { killed++; } });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(killed, 1);
+  f.manager.controller.destroy = destroy;
+  assert.equal(await [...f.active][0].close(), true);
+  assert.equal(f.active.size, 0); assert.equal(f.manager.sessions.has(record.id), false);
+  assert.equal(f.values.get('execution-record:' + record.id).status, 'timed_out');
+});
+
+test('immediate managed cancellation preserves a healthy sandbox for the next real command', async t => {
+  const f = fixture(t);
+  const record = await (await f.manager.fetch(request('', 'POST', { command: 'exec sleep 30' }, 'early-cancel'))).json();
+  // Deliberately cancel before observing "running" or any guest output.
+  assert.equal((await f.manager.fetch(request(`/${record.id}`, 'DELETE'))).status, 202);
+  const command = new Request('https://internal/exec', { method: 'POST', body: JSON.stringify({ command: 'printf still-alive' }),
+    headers: { 'x-exec-created-at': createdAt, 'x-exec-expires-at': String(expiresAt) } });
+  const response = await executeCommand(f.manager.controller, command, f.active);
+  assert.equal(response.status, 200); assert.equal((await response.json()).stdout, 'still-alive');
+  await Promise.all(f.work);
+  assert.equal(f.ctx.container.running, true); assert.equal(f.active.size, 0);
+  assert.equal(f.values.get('execution-record:' + record.id).status, 'canceled');
+});
+
+test('recovery preserves a replacement physical incarnation with the same logical generation', async t => {
+  const f = fixture(t), id = crypto.randomUUID();
+  f.values.get('builderMachine').telemetryId = 'runtime-b';
+  f.values.set('execution-record:' + id, { id, createdAt, incarnation: 'runtime-a', status: 'running', cursor: 0, retainUntil: now + 3600_000 });
+  await f.manager.recover();
+  assert.equal(f.ctx.container.running, true);
+  assert.equal(f.values.get('execution-record:' + id).status, 'interrupted');
 });
 
 test('stopping the VM preserves retained-output cleanup and maintenance erases expired output', async t => {

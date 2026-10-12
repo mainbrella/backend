@@ -4,12 +4,17 @@ Engineering status for the October 11, 2026 source changes. Source implementatio
 local tests, deployed qualification and published SDK availability are separate.
 This change does not close every P1 gap.
 
+The subsequent [October 11 release-readiness record](release-readiness-2026-10-11.md)
+tracks the CI correction, local qualification and read-only production checks.
+In particular, migrations 039 and 040 are already applied in production; the
+image credentials and live build gates remain outstanding.
+
 | P1 capability | Result in this change | Remaining work |
 | --- | --- | --- |
 | Independent persistent volumes | Provider feasibility and lifecycle requirements documented | Runtime attachment, mount supervision, isolation, storage accounting and qualification |
 | Memory-preserving pause/resume | Explicitly unavailable | Supported checkpoint primitive or a different runtime |
 | Prewarmed pools | Durable account-owned server pools, automatic replenishment, bounded TTL, retry-safe acquisition; JS/Python clients | Deploy and qualify alarm recovery, concurrent acquisition and paid cleanup; `MANAGED_POOLS_ENABLED` remains off |
-| Templates and images | Immutable IDs/digests, owner-scoped tags, SDK management, owner-scoped inline cache reuse, digest-pinned registry base imports | Migrate/configure a private build repository and registry encryption key; qualify real builds/cache hits/private imports; general declarative builder remains unavailable |
+| Templates and images | Immutable IDs/digests, owner-scoped tags, SDK management, owner-scoped inline cache reuse, digest-pinned registry base imports | Configure a private build repository and registry encryption key; verify migrations per target; qualify real builds/cache hits/private imports; general declarative builder remains unavailable |
 | Code interpreter | Stateful Python, bounded rich results, generation-scoped contexts | Deployed runtime qualification; additional languages |
 | File transfers and syncing | 64 MiB streaming, atomic file commits, directory copies, polling watches | Resumable transfers, native watching and deletion/permission synchronization |
 | Observability | OTLP JSON pull exports for lifecycle events and enabled metrics | Existing metrics/webhook live release gates; managed collector delivery |

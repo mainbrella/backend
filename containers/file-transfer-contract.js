@@ -55,3 +55,13 @@ export function exactByteStream(stream, size, signal) {
     async cancel(reason) { finished = true; await cancel(reason); },
   });
 }
+
+// Workers ignores a manually supplied Content-Length on an ordinary stream.
+// Keep the native fixed length through both the DO and public response boundary.
+export function fixedByteStream(stream, size, signal) {
+  const input = exactByteStream(stream, size, signal);
+  if (typeof FixedLengthStream === 'undefined') return input; // Node test adapters.
+  const fixed = new FixedLengthStream(size);
+  void input.pipeTo(fixed.writable, { signal }).catch(() => {});
+  return fixed.readable;
+}
