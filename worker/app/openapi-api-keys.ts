@@ -3,6 +3,12 @@ import { cookieSecurity, errors, jsonResponse, okSchema, register, requestBody, 
 
 const key = z.object({ id: z.string(), name: z.string(), prefix: z.string(), created_at: z.string(), last_used_at: z.string().nullable() });
 export function registerAPIKeyRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
+  register(api, "get", "/api-keys/me", {
+    operationId: "getAPIKeyAccount", tags: ["API Keys"], summary: "Get the account identity authenticated by an API key",
+    description: "Returns a stable account ID for recovery ownership checks, including after key rotation. Requires an API key Bearer credential; browser cookies do not authenticate this endpoint. Does not return personal details or the key secret.",
+    security: [{ apiKeyBearer: [] }],
+    responses: { 200: jsonResponse(z.object({ accountId: z.string() })), ...errors(401, 403, 503) },
+  }, handler);
   register(api, "get", "/api-keys", {
     operationId: "listAPIKeys", tags: ["API Keys"], summary: "List your API keys without secrets", security: cookieSecurity,
     responses: { 200: jsonResponse(z.object({ keys: z.array(key) })), ...errors(401, 403, 503) },

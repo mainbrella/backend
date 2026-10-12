@@ -76,3 +76,44 @@ test('validates names and enforces the per-account key limit without affecting o
   assert.equal((await handleRequest(request('POST', SESSION_ONE, { name: 'extra' }), env)).status, 429);
   assert.equal((await handleRequest(request('POST', SESSION_TWO, { name: 'other owner' }), env)).status, 201);
 });
+
+test('API key identity returns only its stable account ID across rotation and distinguishes owners', async t => {
+  const { env, sqlite } = await fixture(t);
+  const create = async (session: string) => (await (await handleRequest(request('POST', session, { name: 'identity probe' }), env)).json()) as { key: { id: string }; token: string };
+  const original = await create(SESSION_ONE);
+  const rotated = await create(SESSION_ONE);
+  const other = await create(SESSION_TWO);
+  const identity = (token: string) => handleRequest(new Request('https://api.mainbrella.com/api-keys/me', {
+    headers: { Authorization: `Bearer ${token}`, Cookie: `mainbrella_session=${SESSION_TWO}` },
+  }), env);
+  for (const [key, accountId] of [[original, USER_ONE], [rotated, USER_ONE], [other, USER_TWO]] as const) {
+    const response = await identity(key.token);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), { accountId });
+    assert.ok(sqlite.prepare('SELECT last_used_at FROM api_keys WHERE id = ?').get(key.key.id)?.last_used_at);
+  }
+  await handleRequest(request('DELETE', SESSION_ONE, undefined, `?id=${original.key.id}`), env);
+  assert.equal((await identity(original.token)).status, 401);
+  assert.equal((await identity(rotated.token)).status, 200);
+});
+
+test('API key identity requires an explicit valid key, rejects mutations and handles lookup failures', async t => {
+  const { env } = await fixture(t);
+  for (const authorization of [undefined, 'Bearer bad', `Bearer mb_${'0'.repeat(64)}`]) {
+    const headers: Record<string, string> = { Cookie: `mainbrella_session=${SESSION_ONE}` };
+    if (authorization !== undefined) headers.Authorization = authorization;
+    assert.equal((await handleRequest(new Request('https://api.mainbrella.com/api-keys/me', { headers }), env)).status, 401);
+  }
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    const response = await handleRequest(new Request('https://api.mainbrella.com/api-keys/me', { method }), env);
+    assert.equal(response.status, 405);
+    assert.equal(response.headers.get('allow'), 'GET, OPTIONS');
+  }
+  const unavailable = { ...env, DB: { prepare() { throw new Error('private database error'); } } } as unknown as Env;
+  const response = await handleRequest(new Request('https://api.mainbrella.com/api-keys/me', {
+    headers: { Authorization: `Bearer mb_${'0'.repeat(64)}` },
+  }), unavailable);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'api_keys_unavailable' });
+});

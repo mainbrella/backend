@@ -47,6 +47,7 @@ const endpointMethods: Record<string, string[]> = {
   '/containers/executions/{executionId}': ['get', 'delete'],
   '/containers/executions/{executionId}/events': ['get'],
   "/api-keys": ["get", "post", "delete"],
+  "/api-keys/me": ["get"],
   "/projects": ["get", "patch", "post"],
   '/projects/endpoint': ['get', 'put', 'delete'],
   '/projects/domains': ['get', 'post', 'delete'],

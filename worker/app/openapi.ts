@@ -53,7 +53,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   const securitySchemes = {
     cookieAuth: { type: "apiKey", in: "cookie", name: "mainbrella_session" },
     sessionBearer: { type: "http", scheme: "bearer", description: "Browser session value; container and image automation only." },
-    apiKeyBearer: { type: "http", scheme: "bearer", description: "API key (mb_ prefix); container, image and SSH automation only. Create at mainbrella.com/api-keys/." },
+    apiKeyBearer: { type: "http", scheme: "bearer", description: "API key (mb_ prefix); account identity, container, image and SSH automation. Create at mainbrella.com/api-keys/." },
     nativeBearer: { type: "http", scheme: "bearer", description: "Native app access token; native auth endpoints only." },
     sshGateway: { type: "http", scheme: "bearer", description: "Trusted SSH gateway secret." },
     imageBuild: { type: "http", scheme: "bearer", description: "Trusted image build service secret." },

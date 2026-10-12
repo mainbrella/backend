@@ -79,7 +79,7 @@ async function handleLegacyRequest(
   if (url.pathname === '/containers/executions' || url.pathname.startsWith('/containers/executions/')) return handleExecutionRequest(request, env);
   if (url.pathname === '/containers/code-contexts' || url.pathname.startsWith('/containers/code-contexts/')) return handleCodeContextRequest(request, env);
 
-  if (url.pathname === "/api-keys") return handleAPIKeysRequest(request, env);
+  if (url.pathname === "/api-keys" || url.pathname === "/api-keys/me") return handleAPIKeysRequest(request, env);
   if (url.pathname === "/projects") return handleProjectsRequest(request, env);
   if (url.pathname === '/projects/endpoint') return handleProjectEndpointRequest(request, env);
   if (url.pathname === '/projects/domains' || url.pathname === '/projects/domains/verify') return handleProjectDomainsRequest(request, env);

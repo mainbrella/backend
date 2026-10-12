@@ -16,15 +16,21 @@ export async function handleAPIKeysRequest(request: Request, env: Env): Promise<
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+  const url = new URL(request.url);
+  const identity = url.pathname === "/api-keys/me";
+  if (identity && request.method !== "GET") {
+    return authJson({ error: "method_not_allowed" }, 405, { ...cors, allow: "GET, OPTIONS" });
+  }
   if (!["GET", "POST", "DELETE"].includes(request.method)) {
     return authJson({ error: "method_not_allowed" }, 405, { ...cors, allow: "GET, POST, DELETE, OPTIONS" });
   }
   // Key management requires a browser session and a trusted Origin for mutations.
   if (request.method !== "GET" && !request.headers.get("Origin")) return authJson({ error: "origin_required" }, 403, cors);
   try {
-    const user = await currentUser(env, request);
+    const token = identity ? request.headers.get("Authorization")?.match(/^Bearer (mb_[a-f0-9]{64})$/i)?.[1] : undefined;
+    const user = identity ? (token ? await apiKeyUser(env, token) : null) : await currentUser(env, request);
     if (!user) return authJson({ error: "not_authenticated" }, 401, cors);
-    const url = new URL(request.url);
+    if (identity) return authJson({ accountId: user.id }, 200, cors);
     if (request.method === "GET") {
       const { results } = await env.DB.prepare(
         "SELECT id, name, prefix, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id DESC",
