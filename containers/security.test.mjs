@@ -7,7 +7,7 @@ import { normalizeNetworkPolicy, normalizeSecretBindings, publicAddress, targetA
 
 const now = Date.UTC(2026, 9, 11), createdAt = new Date(now).toISOString(), incarnation = '12345678-1234-1234-1234-123456789abc';
 const entitlement = { active: true, plan: 'builder', checkedAt: now, validUntil: now + 86400000 };
-const env = { EGRESS_POLICIES_ENABLED: 'true', SECRETS_VAULT_ENABLED: 'true', EGRESS_RELAY_URL: 'https://relay.example.com/v1/egress', EGRESS_RELAY_TOKEN: 't'.repeat(40), SECRETS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64') };
+const env = { SECURITY_FEATURE_ACCOUNTS: '*', EGRESS_POLICIES_ENABLED: 'true', SECRETS_VAULT_ENABLED: 'true', EGRESS_RELAY_URL: 'https://relay.example.com/v1/egress', EGRESS_RELAY_TOKEN: 't'.repeat(40), SECRETS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64') };
 class Storage {
   values = new Map();
   async get(key) { return structuredClone(this.values.get(key)); }
@@ -137,8 +137,28 @@ test('native interception precedes restricted boot and policy metadata contains 
 });
 test('runtime forwarded attestations replace guest spoofing and do not include secrets', async () => {
   let received;
-  const environment = { CONTAINER_ACCOUNT: { idFromName: name => name, get: () => ({ fetch: async request => { received = request; return new Response('ok'); } }) } };
+  const environment = { SECURITY_FEATURE_ACCOUNTS: '*', CONTAINER_ACCOUNT: { idFromName: name => name, get: () => ({ fetch: async request => { received = request; return new Response('ok'); } }) } };
   await relayContainerEgress(new Request('https://api.example.com/v1', { headers: { 'x-egress-generation': 'spoof', 'x-mainbrella-user': 'bob' } }), environment, { userId: 'alice', id: 'small', createdAt, incarnation });
   assert.equal(received.headers.get('x-mainbrella-user'), 'alice'); assert.equal(received.headers.get('x-egress-generation'), createdAt);
   assert.equal(received.headers.get('x-egress-url'), 'https://api.example.com/v1');
+});
+test('account rollout denies admission and writes while preserving owned metadata and deletion', async () => {
+  const f = fixture(), secret = await (await f.request('POST', secretInput)).json();
+  f.security.env.SECURITY_FEATURE_ACCOUNTS = 'bob';
+  assert.equal(await f.security.validateSelection({ userId: 'alice' }, { networkPolicy: { allow: ['api.example.com'] } }), 'network_policy_unavailable');
+  assert.equal((await f.request('POST', secretInput)).status, 503);
+  assert.equal((await f.request('PUT', { value: 'rotation' }, secret.id)).status, 503);
+  assert.equal((await f.request('GET')).status, 200);
+  assert.equal((await f.request('DELETE', null, secret.id)).status, 200);
+  assert.equal((await f.egress()).status, 403); assert.equal(f.calls.length, 0);
+});
+test('withdrawal during a mediated request withholds its response', async () => {
+  for (const field of ['SECURITY_FEATURE_ACCOUNTS', 'EGRESS_POLICIES_ENABLED', 'EGRESS_RELAY_TOKEN']) {
+    const f = fixture();
+    f.security.fetcher = async () => {
+      f.security.env[field] = '';
+      return Response.json({ version: 1, status: 200, headers: [], body: Buffer.from('late').toString('base64') });
+    };
+    assert.equal((await f.egress()).status, 403, field);
+  }
 });

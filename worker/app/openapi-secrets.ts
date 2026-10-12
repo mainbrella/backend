@@ -17,11 +17,11 @@ export function registerSecretRoutes(api: OpenAPIApi, handler: LegacyHandler): v
     responses: { 200: jsonResponse(z.object({ secrets: z.array(secretMetadataSchema) })), ...failures } }, handler);
   register(api, 'post', '/secrets', { operationId: 'createSecret', tags: ['Secrets'], security: containerSecurity,
     summary: 'Store an encrypted, host-scoped outbound credential',
-    description: 'Requires secrets.vault and paid access. Hostname, header and prefix are immutable. Bind the returned ID using secretBindings when creating a machine with networkPolicy. Injection happens outside the guest for HTTPS to the exact allowed hostname. Choose a trusted upstream and scoped, revocable token: an upstream can disclose or transform its credentials in responses. Secret mediation is not a guarantee against a malicious upstream. Cookie mutations require a trusted Origin.',
+    description: 'Requires secrets.vault, operator rollout access for the authenticated account, and paid access. Hostname, header and prefix are immutable. Bind the returned ID using secretBindings when creating a machine with networkPolicy. Injection happens outside the guest for HTTPS to the exact allowed hostname. Choose a trusted upstream and scoped, revocable token: an upstream can disclose or transform its credentials in responses. Secret mediation is not a guarantee against a malicious upstream. Cookie mutations require a trusted Origin.',
     request: { headers, ...requestBody(z.object({ name: z.string().trim().min(1).max(80), value, hostname: z.string().min(1).max(253), header: z.enum(['authorization', 'x-api-key', 'api-key']), prefix: z.string().max(32).optional() })) },
     responses: { 201: jsonResponse(secretMetadataSchema), ...failures } }, handler);
   register(api, 'put', '/secrets/{secretId}', { operationId: 'rotateSecret', tags: ['Secrets'], security: containerSecurity,
-    summary: 'Replace the value of an owned secret', description: 'Host/header scope is unchanged. New mediated requests use the replacement value. Already accepted upstream requests cannot be revoked.',
+    summary: 'Replace the value of an owned secret', description: 'Requires operator rollout access and paid access. Host/header scope is unchanged. New mediated requests use the replacement value. Already accepted upstream requests cannot be revoked.',
     request: { params: z.object({ secretId: secretIdSchema }), headers, ...requestBody(z.object({ value })) },
     responses: { 200: jsonResponse(secretMetadataSchema), ...failures } }, handler);
   register(api, 'delete', '/secrets/{secretId}', { operationId: 'deleteSecret', tags: ['Secrets'], security: containerSecurity,

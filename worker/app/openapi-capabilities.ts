@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { machineSizeSchema } from './openapi-containers';
-import { errors, jsonResponse, register, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
+import { containerSecurity, errors, jsonResponse, register, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
 const flags = <T extends string>(...names: T[]) => z.object(Object.fromEntries(names.map(name => [name, z.boolean()])) as Record<T, z.ZodBoolean>);
 const limit = z.number().int().nonnegative();
@@ -30,8 +30,8 @@ export const capabilitiesSchema = z.object({
 
 export function registerCapabilityRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
   register(api, 'get', '/capabilities', {
-    operationId: 'getCapabilities', tags: ['Operations'], summary: 'Discover API features and runtime limits', security: [],
-    description: 'Public, read-only deployment contract. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration. previews.supported requires explicit enablement, an isolated preview domain, routing database and runtime binding. Preview URLs use opaque bearer tokens rather than signatures, so signedUrls remains false. projects.supported requires explicit project hosting enablement and routing/runtime bindings; projects.customDomains additionally requires a configured certificate provider, except in local development. projects.localDevelopment is true only when LOCAL_DEV=true and PROJECT_DOMAIN_PROVIDER=local; it enables *.localhost aliases with simulated DNS and TLS. apexIps contains only operator-configured ingress addresses and is empty for local development.',
+    operationId: 'getCapabilities', tags: ['Operations'], summary: 'Discover API features and runtime limits', security: [...containerSecurity, {}],
+    description: 'Read-only deployment contract with optional API-key or browser-session authentication. During a private security rollout, networking.egressPolicies and secrets.vault reflect the authenticated account; anonymous and non-allowlisted callers see false. Responses are not cached and vary on Authorization and Cookie. Requires no credentials, paid access, or provisioning. No query parameters. Does not establish live component health. Obtain account allowances and deployed image catalog through authenticated GET /containers. Unsupported features are explicit; customBuilds reflects build-service configuration. previews.supported requires explicit enablement, an isolated preview domain, routing database and runtime binding. Preview URLs use opaque bearer tokens rather than signatures, so signedUrls remains false. projects.supported requires explicit project hosting enablement and routing/runtime bindings; projects.customDomains additionally requires a configured certificate provider, except in local development. projects.localDevelopment is true only when LOCAL_DEV=true and PROJECT_DOMAIN_PROVIDER=local; it enables *.localhost aliases with simulated DNS and TLS. apexIps contains only operator-configured ingress addresses and is empty for local development.',
     responses: { 200: jsonResponse(capabilitiesSchema), ...errors(400, 403, 405) },
   }, handler);
 }

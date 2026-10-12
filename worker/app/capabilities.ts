@@ -20,10 +20,13 @@ import { projectHostingCapabilities } from '../lib/project-hosting';
 import { managedPoolsConfigured } from './pools';
 import { imageBuildsConfigured, imageRegistriesConfigured } from '../lib/image-build-options';
 import { MAX_MANAGED_POOLS, MAX_POOL_SIZE, MAX_POOL_TTL_SECONDS } from '../../containers/pool-contract.js';
+import { securityAccountEnabled } from '../../containers/security-rollout.js';
+import { containerUser } from './container-auth';
 
-// This contract describes this API deployment, not account access or live health.
+// Most fields describe the deployment. Security rollout fields also reflect the
+// authenticated account; anonymous requests cannot discover private canaries.
 // The authenticated /containers response owns allowances and deployed catalog IDs.
-export function capabilities(env: Env) {
+export function capabilities(env: Env, userId?: string) {
   return {
     apiVersion: '2026-10-11',
     authentication: { apiKeys: true, browserSessions: true, browserTerminalCookieOnly: true },
@@ -50,8 +53,8 @@ export function capabilities(env: Env) {
     images: { tags: true, catalog: true, availableCatalogPath: '/containers', repositoryLaunch: Boolean(env.DB && env.CONTAINER_ACCOUNT && env.USER_CONTAINER),
       customBuilds: imageBuildsConfigured(env), crossBuildCache: imageBuildsConfigured(env), privateRegistryImports: imageBuildsConfigured(env) && imageRegistriesConfigured(env), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
-    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env)), regionSelection: false },
-    secrets: { vault: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env) && vaultConfigured(env)) },
+    networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env) && securityAccountEnabled(env, userId)), regionSelection: false },
+    secrets: { vault: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env) && vaultConfigured(env) && securityAccountEnabled(env, userId)) },
     access: ACCESS_LIMITS,
   };
 }
@@ -62,5 +65,6 @@ export async function handleCapabilitiesRequest(request: Request, env: Env): Pro
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'GET') return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, OPTIONS' });
   if (new URL(request.url).search) return authJson({ error: 'invalid_request' }, 400, cors);
-  return authJson(capabilities(env), 200, cors);
+  const user = env.SECURITY_FEATURE_ACCOUNTS?.trim() === '*' ? null : await containerUser(env, request).catch(() => null);
+  return authJson(capabilities(env, user?.id), 200, { ...cors, Vary: [cors.Vary, 'Authorization', 'Cookie'].filter(Boolean).join(', ') });
 }

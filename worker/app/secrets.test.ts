@@ -7,7 +7,7 @@ const secretId = 'sec_d688d42a-25ef-4c13-9b28-21a0fde6e163';
 test('secret management forwards only authenticated ownership and keeps revocation available during billing failure', async t => {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   const requests: Request[] = [];
-  const env = { ...f.env, SECRETS_VAULT_ENABLED: 'true', CONTAINER_ACCOUNT: {
+  const env = { ...f.env, SECURITY_FEATURE_ACCOUNTS: '*', SECRETS_VAULT_ENABLED: 'true', CONTAINER_ACCOUNT: {
     idFromName(name: string) { assert.equal(name, `account:${USER_ONE}`); return name; }, get() { return { async fetch(request: Request) {
       requests.push(request); return Response.json({ secrets: [] });
     } }; },
@@ -30,4 +30,11 @@ test('secret management forwards only authenticated ownership and keeps revocati
   assert.equal((await call('GET', '/secrets', undefined, { Authorization: 'Bearer invalid' })).status, 401);
   assert.equal((await call('GET', '/secrets?user=victim')).status, 400);
   assert.equal((await call('GET', `/secrets/${secretId}`)).status, 405);
+  f.setBillingMode('paid'); env.SECRETS_VAULT_ENABLED = 'true'; env.SECURITY_FEATURE_ACCOUNTS = 'another-account';
+  const count = requests.length;
+  assert.equal((await call('POST', '/secrets', body)).status, 503);
+  assert.equal((await call('PUT', `/secrets/${secretId}`, { value: 'rotation' })).status, 503);
+  assert.equal(requests.length, count);
+  assert.equal((await call('GET')).status, 200);
+  assert.equal((await call('DELETE', `/secrets/${secretId}`)).status, 200);
 });

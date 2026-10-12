@@ -7,7 +7,7 @@
   "compatibility_flags": ["enable_request_signal"],
   "workers_dev": false,
   "preview_urls": false,
-  "vars": { "EGRESS_POLICIES_ENABLED": "false" },
+  "vars": { "EGRESS_POLICIES_ENABLED": "false", "SECURITY_FEATURE_ACCOUNTS": "" },
   "durable_objects": {
     "bindings": [
       { "name": "ACCOUNT_ACTIVITY", "class_name": "AccountActivity", "script_name": "mainbrella-api" },

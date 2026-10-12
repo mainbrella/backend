@@ -146,6 +146,11 @@ test('P0 lifecycle and security schemas describe authenticated exact-generation 
   assert.equal(create.properties.secretBindings.maxItems, 16);
   assert.ok(components.schemas.Capabilities.properties.persistence.properties.filesystemFork);
   assert.ok(components.schemas.Capabilities.properties.secrets.properties.vault);
+  assert.match(paths['/capabilities'].get.description, /authenticated account/);
+  assert.deepEqual(paths['/capabilities'].get.security, [{ cookieAuth: [] }, { sessionBearer: [] }, { apiKeyBearer: [] }, {}]);
+  assert.match(paths['/containers'].post.description, /operator rollout access/);
+  assert.match(paths['/secrets'].post.description, /operator rollout access/);
+  assert.match(paths['/secrets/{secretId}'].put.description, /operator rollout access/);
 });
 
 test('service-owned endpoints document independent deployment and retain their public contracts', async () => {

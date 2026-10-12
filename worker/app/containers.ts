@@ -11,6 +11,7 @@ import { validWorkspaceId } from '../../containers/workspace-contract.js';
 import { normalizeNetworkPolicy, normalizeSecretBindings } from '../../containers/security-contract.js';
 import { egressConfigured, vaultConfigured } from '../../containers/account-security.js';
 import { readFileBytes } from '../../containers/file-contract.js';
+import { securityAccountEnabled } from '../../containers/security-rollout.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -69,7 +70,7 @@ export async function handleContainersRequest(request: Request, env: Env, ctx?: 
       const networkPolicy = body.networkPolicy === undefined ? undefined : normalizeNetworkPolicy(body.networkPolicy);
       const secretBindings = body.secretBindings === undefined ? undefined : normalizeSecretBindings(body.secretBindings);
       if (networkPolicy === null || secretBindings === null || networkPolicy && body.internet === true || secretBindings && !networkPolicy) return authJson({ error: 'invalid_network_policy' }, 400, cors);
-      if (networkPolicy && !egressConfigured(env)) return authJson({ error: 'network_policy_unavailable' }, 503, cors);
+      if (networkPolicy && (!egressConfigured(env) || !securityAccountEnabled(env, user.id))) return authJson({ error: 'network_policy_unavailable' }, 503, cors);
       if (secretBindings?.length && !vaultConfigured(env)) return authJson({ error: 'secrets_unavailable' }, 503, cors);
       if (body.catalogId !== undefined) {
         if (body.imageId !== undefined || typeof body.catalogId !== 'string') return authJson({ error: 'invalid_request' }, 400, cors);

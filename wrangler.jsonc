@@ -47,6 +47,7 @@
 		"WORKSPACE_LIFECYCLE_ENABLED": "true",
 		"EGRESS_POLICIES_ENABLED": "false",
 		"SECRETS_VAULT_ENABLED": "false",
+		"SECURITY_FEATURE_ACCOUNTS": "",
 		"ACQUISITION_ENABLED": "true",
 		"PREVIEW_DOMAIN": "mainbrella.dev",
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"

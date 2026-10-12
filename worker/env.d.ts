@@ -23,6 +23,7 @@ interface Env {
   MANAGED_POOLS_ENABLED?: string;
   EGRESS_POLICIES_ENABLED?: string;
   SECRETS_VAULT_ENABLED?: string;
+  SECURITY_FEATURE_ACCOUNTS?: string;
   SECRETS_ENCRYPTION_KEY?: string;
   EGRESS_RELAY_URL?: string;
   EGRESS_RELAY_TOKEN?: string;

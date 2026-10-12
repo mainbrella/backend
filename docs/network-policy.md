@@ -238,6 +238,24 @@ versioned `/container/egress-v1` route prevents a runtime downgrade from silentl
 dropping the policy. API gate withdrawal also denies ongoing public mediation.
 Metadata reads and secret deletion remain available with the vault gate off.
 
+`SECURITY_FEATURE_ACCOUNTS` restricts both features to authenticated account IDs.
+An empty, missing or malformed value denies everyone; a comma-separated list
+enables only those exact accounts. `*` explicitly selects a public rollout.
+Set the same restriction on the API and private runtime. Restricted capability
+discovery requires account authentication; anonymous and other accounts see
+false. The API and account coordinator deny writes and admission before a
+start, and mediation checks access again before releasing an upstream response.
+Removing an account also denies its existing bound guests; it cannot undo
+requests already accepted by an upstream. Owned metadata and deletion remain
+available for cleanup. Leave the flags false and the list empty in checked-in
+configuration; use deployment overrides for a bounded production canary.
+
+The shared Node relay is needed for DNS checks and IP-pinned HTTP/TLS transport.
+Encrypted vault storage uses the existing account Durable Objects. A dedicated
+Cloudflare relay Container can sleep when idle; it shares the account's included
+Container allowances and incurs usage charges beyond them.
+
+
 Local tests exercise ciphertext ownership/tamper rejection, write-only metadata,
 rotation/deletion, scope validation, native installation-before-boot, runtime
 incarnation revocation, forged guest headers, domain/CIDR denial, mixed private

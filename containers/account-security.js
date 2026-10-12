@@ -3,6 +3,7 @@ import { normalizeNetworkPolicy, normalizeSecretBindings, normalizeSecret, valid
 import { readFileBytes } from './file-contract.js';
 import { requestEntitlement, validEntitlement } from './plan-policy.js';
 import { validContainerId } from './container-account-core.js';
+import { securityAccountEnabled } from './security-rollout.js';
 
 const PREFIX = 'vault:';
 const denied = () => Response.json({ error: 'egress_denied' }, { status: 403 });
@@ -33,7 +34,7 @@ export class AccountSecurity {
   // Caller holds account serialization. No secret values enter selection or the runtime.
   async validateSelection(state, selection) {
     if (selection.networkPolicy === undefined && !(selection.secretBindings?.length)) return null;
-    if (!egressConfigured(this.env)) return 'network_policy_unavailable';
+    if (!egressConfigured(this.env) || !securityAccountEnabled(this.env, state.userId)) return 'network_policy_unavailable';
     const policy = normalizeNetworkPolicy(selection.networkPolicy), ids = normalizeSecretBindings(selection.secretBindings ?? []);
     if (!policy || !ids || selection.internet === true) return 'invalid_network_policy';
     if (ids.length && !vaultConfigured(this.env)) return 'secrets_unavailable';
@@ -55,7 +56,7 @@ export class AccountSecurity {
     if (request.method === 'POST' && id || ['PUT', 'DELETE'].includes(request.method) && !id) return account.respond({ error: 'invalid_request' }, 400);
     let body;
     if (['POST', 'PUT'].includes(request.method)) {
-      if (!vaultConfigured(this.env)) return account.respond({ error: 'secrets_unavailable' }, 503);
+      if (!vaultConfigured(this.env) || !securityAccountEnabled(this.env, userId)) return account.respond({ error: 'secrets_unavailable' }, 503);
       if (!validEntitlement(requestEntitlement(request, account.now()), account.now())) return account.respond({ error: 'subscription_required' }, 402);
       try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await readFileBytes(request.body, 8192, request.signal))); }
       catch { return account.respond({ error: 'invalid_request' }, 400); }
@@ -102,7 +103,7 @@ export class AccountSecurity {
     const userId = request.headers.get('x-mainbrella-user'), id = request.headers.get('x-egress-id'), createdAt = request.headers.get('x-egress-generation');
     const incarnation = request.headers.get('x-egress-incarnation');
     const target = egressTarget(request.headers.get('x-egress-url')), config = relayConfiguration(this.env);
-    if (!egressConfigured(this.env) || !config || !target || !validContainerId(id ?? '') || !/^[A-Za-z0-9_-]{1,128}$/.test(userId ?? '')
+    if (!egressConfigured(this.env) || !securityAccountEnabled(this.env, userId) || !config || !target || !validContainerId(id ?? '') || !/^[A-Za-z0-9_-]{1,128}$/.test(userId ?? '')
       || !createdAt || !Number.isFinite(Date.parse(createdAt)) || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(incarnation ?? '') || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(request.method)) return denied();
     if (this.active >= 2) return Response.json({ error: 'egress_limit_exceeded' }, { status: 429 });
     this.active++;
@@ -134,6 +135,8 @@ export class AccountSecurity {
       const body = unbase64(payload.body);
       if (body.byteLength > EGRESS_RESPONSE_BYTES) return denied();
       return await this.account.serialized(async () => {
+        if (!egressConfigured(this.env) || !securityAccountEnabled(this.env, userId)
+          || admission.versions.length && !vaultConfigured(this.env)) return denied();
         const current = await this.generation(userId, id, createdAt, incarnation, signal);
         if (signal.aborted || !current || JSON.stringify(current) !== JSON.stringify(admission.generation)) return denied();
         for (const [secretId, version] of admission.versions) if ((await this.account.ctx.storage.get(PREFIX + secretId))?.version !== version) return denied();

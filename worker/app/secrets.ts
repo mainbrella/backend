@@ -3,6 +3,7 @@ import { containerUser } from './container-auth';
 import { resolveEntitlement } from '../lib/entitlements';
 import { entitlementHeaders } from '../../containers/plan-policy.js';
 import { readFileBytes } from '../../containers/file-contract.js';
+import { securityAccountEnabled } from '../../containers/security-rollout.js';
 
 export async function handleSecretsRequest(request: Request, env: Env): Promise<Response> {
   const cors = authCorsHeaders(request);
@@ -18,7 +19,7 @@ export async function handleSecretsRequest(request: Request, env: Env): Promise<
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
     if (!env.CONTAINER_ACCOUNT) return authJson({ error: 'secrets_unavailable' }, 503, cors);
     const writesValue = request.method === 'POST' || request.method === 'PUT';
-    if (writesValue && env.SECRETS_VAULT_ENABLED !== 'true') return authJson({ error: 'secrets_unavailable' }, 503, cors);
+    if (writesValue && (env.SECRETS_VAULT_ENABLED !== 'true' || !securityAccountEnabled(env, user.id))) return authJson({ error: 'secrets_unavailable' }, 503, cors);
     // Revocation and metadata access remain possible after billing or issuance stops.
     const entitlement = writesValue ? await resolveEntitlement(env, user.id) : { plan: null, active: false, validUntil: null };
     let body: Uint8Array | undefined;
