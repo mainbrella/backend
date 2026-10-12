@@ -14,9 +14,14 @@ const repository = 'mainbrella/backend';
 const config = JSON.parse(readFileSync(join(root, 'wrangler.containers.jsonc'), 'utf8'));
 const dockerfileHash = createHash('sha256').update(readFileSync(join(root, 'containers/Dockerfile'))).digest('hex');
 const args = process.argv.slice(2);
+const securityArgs = args.filter(arg => arg.startsWith('--security-account='));
+if (securityArgs.length > 1 || securityArgs.some(arg => !/^[A-Za-z0-9_-]{1,128}$/.test(arg.slice('--security-account='.length)))) {
+  throw new Error('Use one exact authenticated account ID for the private security canary.');
+}
+if (securityArgs.length) config.vars = { ...config.vars, EGRESS_POLICIES_ENABLED: 'true', SECURITY_FEATURE_ACCOUNTS: securityArgs[0].slice('--security-account='.length) };
 // Keep deployment arguments from replacing the generated config or account.
-if (args.some(arg => !['--dry-run', '--without-activity'].includes(arg))) {
-  console.error('Only --dry-run and --without-activity are supported. Use npm run deploy:containers.');
+if (args.some(arg => !['--dry-run', '--without-activity'].includes(arg) && !securityArgs.includes(arg))) {
+  console.error('Only --dry-run, --without-activity and --security-account=<ID> are supported. Use npm run deploy:containers.');
   process.exit(1);
 }
 // Bootstrap the runtime before the API exports AccountActivity. Activity delivery
@@ -25,7 +30,7 @@ if (args.includes('--without-activity')) {
   config.durable_objects.bindings = config.durable_objects.bindings.filter(binding => binding.name !== 'ACCOUNT_ACTIVITY');
   console.log('Activity delivery omitted for bootstrap. Finish with API, then normal container deployment.');
 }
-const wranglerArgs = args.filter(arg => arg !== '--without-activity');
+const wranglerArgs = args.filter(arg => arg !== '--without-activity' && !securityArgs.includes(arg));
 
 const shutdown = new AbortController();
 let shutdownSignal;

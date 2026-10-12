@@ -152,6 +152,27 @@ test('P0 lifecycle and security schemas describe authenticated exact-generation 
   assert.match(paths['/secrets'].post.description, /operator rollout access/);
   assert.match(paths['/secrets/{secretId}'].put.description, /operator rollout access/);
 });
+test('dedicated relay and acknowledgment services have separate authenticated OpenAPI contracts', async () => {
+  const { createSecurityInfrastructureApp } = await import('./openapi');
+  const ids = new Set<string>();
+  for (const kind of ['relay', 'ack'] as const) {
+    const service = createSecurityInfrastructureApp(kind, async () => new Response(null, { status: 404 }));
+    const response = await service.request('http://local/openapi.json', undefined, {} as Env);
+    const schema = await response.json() as any;
+    for (const path of Object.values(schema.paths) as any[]) for (const operation of Object.values(path) as any[]) {
+      assert.ok(operation.operationId); assert.ok(!ids.has(operation.operationId)); ids.add(operation.operationId);
+    }
+    if (kind === 'relay') {
+      assert.deepEqual(schema.paths['/v1/egress'].post.security, [{ operatorBearer: [] }]);
+      assert.ok(schema.paths['/v1/egress'].post.requestBody.content['application/json'].schema.properties.injections);
+    } else {
+      assert.deepEqual(schema.paths['/control/{runId}'].post.security, [{ operatorBearer: [] }]);
+      assert.ok(schema.paths['/control/{runId}'].post.requestBody);
+      assert.ok(schema.paths['/runs/{runId}/{action}'].get.responses[302]);
+    }
+  }
+  const primary = await document(); assert.equal(primary.paths['/v1/egress'], undefined); assert.equal(primary.paths['/control/{runId}'], undefined);
+});
 
 test('service-owned endpoints document independent deployment and retain their public contracts', async () => {
   const { paths } = await document();

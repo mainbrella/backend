@@ -1,0 +1,247 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MainBrella security relay",
+    "version": "1.0.0"
+  },
+  "components": {
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Dedicated operator token; customer credentials are not accepted."
+      },
+      "upstreamBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Disposable scoped token used only by the test acknowledgment upstream."
+      }
+    },
+    "schemas": {},
+    "parameters": {}
+  },
+  "paths": {
+    "/v1/egress": {
+      "post": {
+        "operationId": "mediateSecurityEgress",
+        "tags": [
+          "Security infrastructure"
+        ],
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "summary": "Forward an authenticated control-plane egress envelope",
+        "description": "Dedicated shared relay service. Requires the operator EGRESS_RELAY_TOKEN, not a customer API key. Validates every DNS result, pins a public allowed address, preserves TLS hostname verification, and denies redirects and credential reflections. Credentials remain in trusted infrastructure. Requests are bounded and buffered; streaming/SSE and WebSockets are unsupported. Sleeps after idle timeout.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "GET",
+                      "HEAD",
+                      "POST",
+                      "PUT",
+                      "PATCH",
+                      "DELETE",
+                      "OPTIONS"
+                    ]
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "body": {
+                    "type": "string",
+                    "description": "Base64 request bytes, at most 4 MiB decoded."
+                  },
+                  "policy": {
+                    "type": "object",
+                    "properties": {
+                      "allow": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        },
+                        "maxItems": 64
+                      },
+                      "deny": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 253
+                        },
+                        "maxItems": 64
+                      }
+                    },
+                    "required": [
+                      "allow"
+                    ],
+                    "additionalProperties": false,
+                    "description": "HTTP/HTTPS egress on ports 80/443. Exact domains, *.domain, IPv4/IPv6 CIDR or *; deny wins. Hostname DNS lookup requires a matching domain allow rule; CIDR-only grants apply to literal IP requests. All resolved addresses must be public and allowed. Other protocols/ports and redirects are denied."
+                  },
+                  "injections": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "header": {
+                          "type": "string",
+                          "enum": [
+                            "authorization",
+                            "x-api-key",
+                            "api-key"
+                          ]
+                        },
+                        "prefix": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string",
+                          "maxLength": 4096
+                        }
+                      },
+                      "required": [
+                        "header",
+                        "prefix",
+                        "value"
+                      ]
+                    },
+                    "maxItems": 16
+                  }
+                },
+                "required": [
+                  "version",
+                  "url",
+                  "method",
+                  "headers",
+                  "body",
+                  "policy",
+                  "injections"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "number",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    "status": {
+                      "type": "integer"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "prefixItems": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    },
+                    "body": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "status",
+                    "headers",
+                    "body"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin or permission denied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

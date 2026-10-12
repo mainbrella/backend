@@ -38,6 +38,20 @@ import { registerPrivateServiceRoutes } from './openapi-private-services';
 import { registerAcquisitionRoutes } from './openapi-acquisition';
 import { registerBuildRoutes } from './openapi-build';
 import { forward, type LegacyHandler } from "./openapi-shared";
+import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
+
+// Independent service documents keep infrastructure routes off the customer API.
+export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: LegacyHandler) {
+  const app = new Hono<{ Bindings: Env }>();
+  const api = fromHono(app, { docs_url: null, redoc_url: null, openapi_url: '/openapi.json', schema: {
+    openapi: '3.1.0', info: { title: `MainBrella security ${kind}`, version: '1.0.0' },
+  } });
+  api.registry.registerComponent('securitySchemes', 'operatorBearer', { type: 'http', scheme: 'bearer', description: 'Dedicated operator token; customer credentials are not accepted.' });
+  api.registry.registerComponent('securitySchemes', 'upstreamBearer', { type: 'http', scheme: 'bearer', description: 'Disposable scoped token used only by the test acknowledgment upstream.' });
+  registerSecurityInfrastructureRoutes(api, kind, handler);
+  app.all('*', context => forward(context, handler));
+  return app;
+}
 
 export function createOpenAPIApp(handler: LegacyHandler) {
   const app = new Hono<{ Bindings: Env }>();

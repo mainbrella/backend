@@ -27,6 +27,9 @@ interface Env {
   SECRETS_ENCRYPTION_KEY?: string;
   EGRESS_RELAY_URL?: string;
   EGRESS_RELAY_TOKEN?: string;
+  EGRESS_RELAY?: DurableObjectNamespace;
+  SECURITY_ACK?: DurableObjectNamespace;
+  SECURITY_ACK_CONTROL_TOKEN?: string;
   NETWORK_INTERNET_CONTROL_ENABLED?: string;
   PRIVATE_SERVICES_ENABLED?: string;
   WORKLOAD_WEBHOOKS_ENABLED?: string;
