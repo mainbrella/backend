@@ -4,6 +4,7 @@ import { SandboxPool } from './pool.js';
 import { imageClient } from './images.js';
 import { managedPools } from './managed-pools.js';
 import { desktopTools } from './desktop.js';
+import { gitTools } from './git.js';
 export { SandboxPool } from './pool.js';
 export { DesktopSession } from './desktop.js';
 
@@ -245,6 +246,7 @@ export class Sandbox {
       attach: id => new CodeContext(this, id),
     };
     this.desktop = desktopTools(this, MainbrellaError);
+    this.git = gitTools(this, MainbrellaError);
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
   async configureStartup(launch) {

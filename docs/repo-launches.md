@@ -6,6 +6,33 @@ existing catalog images already contain git, bash, tmux and curl. No GitHub toke
 is needed. Unauthenticated GitHub rate limits return a retryable error before a
 container is allocated. This version does not read `mainbrella.json`.
 
+The launch options now accept an owned, ready custom `imageId` instead of
+`catalogId` when `/capabilities` advertises `images.repositoryLaunch`. This is
+independent of build admission: an existing ready image can be selected while new
+builds are disabled. Deploy the supporting API before exposing the web flow.
+This connects the existing image builder to repository launching:
+build a compatible development image once, then reuse its installed dependencies
+when checking out a repository. Image ownership and readiness are checked before
+GitHub resolution and again before allocation. The immutable image ID is part of
+the keyed launch options; retries cannot change it and unavailable images never
+fall back to a catalog runtime. A share link does not grant another account access
+to the selected private image. The image must contain `git` for checkout and
+`curl` for HTTP readiness checks, as well as the managed runtime tools.
+
+Keep the image available while allocation is uncertain. If a create response is
+lost and that image is then deleted, the existing create API rejects retries
+before recovering its keyed receipt. The launch retains its allocation attempt
+and image ID; it never allocates a fallback. Inspect the owned container inventory
+and reconcile the originally admitted generation before creating a replacement
+launch. Changing the launch key is not recovery and can create another machine.
+
+This integration uses images built through the existing managed contract. It does
+not automatically build a repository's Dockerfile, honor its original CMD/USER,
+or run a Compose stack. Custom-image builds still require one stage starting with
+`FROM mainbrella:base`; approved external/private bases are supplied through the
+existing digest-pinned `baseImage` option. Arbitrary Dockerfile adaptation and
+multi-service orchestration remain separate work.
+
 The `/run/` frontend defaults to repository URL → Copy setup prompt → Codex →
 configured launch link. Copy is local and requires no account or API request.
 The agent inspects repository source and the existing public launch reference,

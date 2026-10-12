@@ -145,3 +145,20 @@ test('repo command makes an encoded share link without credentials, allocation, 
     assert.equal(JSON.parse(invalid.result.stderr).error, 'invalid_cli_arguments');
   }
 });
+
+test('repository URLs retain owned image selection and readiness path without contacting the API', async () => {
+  const imageId = '5537d3b3-3311-42cc-9e2b-c45ebf3c943d';
+  const out = output();
+  assert.equal(await main(['repo', 'acme/demo', '--image-id', imageId, '--start', 'npm start', '--port', '3000', '--readiness-path', '/health?ready=1'], {
+    ...out, env: {}, fetch: async () => { throw new Error('No network expected'); },
+  }), 0);
+  const url = new URL(out.result.stdout.trim());
+  assert.equal(url.searchParams.get('imageId'), imageId); assert.equal(url.searchParams.get('catalogId'), null);
+  assert.equal(url.searchParams.get('readinessPath'), '/health?ready=1');
+  for (const flags of [['--image-id', imageId, '--runtime', 'node'], ['--image-id', 'invalid'],
+    ['--readiness-path', '/health'], ['--start', 'npm start', '--port', '3000', '--readiness-path', '//elsewhere.example']]) {
+    const invalid = output();
+    assert.equal(await main(['repo', 'acme/demo', ...flags], { ...invalid, env: {} }), 1);
+    assert.equal(JSON.parse(invalid.result.stderr).error, 'invalid_cli_arguments');
+  }
+});

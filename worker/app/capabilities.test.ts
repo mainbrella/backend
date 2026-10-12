@@ -22,6 +22,7 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
   assert.equal(value.persistence.startupConfiguration, false);
   assert.equal(value.files.maxFileBytes, MAX_FILE_BYTES);
   assert.equal(value.images.customBuilds, false);
+  assert.equal(value.images.repositoryLaunch, false);
   assert.equal(value.images.crossBuildCache, false);
   assert.equal(value.images.privateRegistryImports, false);
   assert.equal(value.pools.managed, false);
@@ -78,4 +79,17 @@ test('restore launch discovery requires all saved-workspace deployment bindings'
   assert.equal((await read()).persistence.startupConfiguration, false);
   env.CONTAINER_ACCOUNT = {} as Env['CONTAINER_ACCOUNT']; delete (env as Partial<Env>).USER_CONTAINER;
   assert.equal((await read()).persistence.startupConfiguration, false);
+});
+
+test('repository custom image discovery is independent of build admission', async () => {
+  const env = { DB: {}, USER_CONTAINER: {}, CONTAINER_ACCOUNT: {} } as unknown as Env;
+  const read = async () => capabilitiesSchema.parse(await (await handleRequest(new Request('https://api.mainbrella.com/capabilities'), env)).json());
+  assert.equal((await read()).images.repositoryLaunch, true);
+  assert.equal((await read()).images.customBuilds, false);
+  delete (env as Partial<Env>).DB;
+  assert.equal((await read()).images.repositoryLaunch, false);
+  env.DB = {} as Env['DB']; delete (env as Partial<Env>).CONTAINER_ACCOUNT;
+  assert.equal((await read()).images.repositoryLaunch, false);
+  env.CONTAINER_ACCOUNT = {} as Env['CONTAINER_ACCOUNT']; delete (env as Partial<Env>).USER_CONTAINER;
+  assert.equal((await read()).images.repositoryLaunch, false);
 });

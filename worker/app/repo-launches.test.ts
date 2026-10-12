@@ -17,7 +17,7 @@ const api = (path: string, method = 'GET', body?: unknown, key = 'launch-one', s
 async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t, { [USER_ONE]: [], [USER_TWO]: [] });
   t.after(() => f.close());
-  for (const migration of ['013_repo_launches.sql', '021_acquisition.sql', '022_acquisition_sources.sql', '028_github_import.sql'])
+  for (const migration of ['006_custom_images.sql', '013_repo_launches.sql', '021_acquisition.sql', '022_acquisition_sources.sql', '028_github_import.sql'])
     f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   Object.assign(f.env, { GITHUB_IMPORT_CLIENT_ID: 'test-client', GITHUB_IMPORT_CLIENT_SECRET: 'test-secret',
     GITHUB_IMPORT_APP_SLUG: 'mainbrella-import', GITHUB_IMPORT_ENCRYPTION_KEY: 'e'.repeat(64) });
@@ -88,7 +88,7 @@ async function fixture(t: TestContext) {
       return Response.json(data);
     } };
   }) as typeof f.env.CONTAINER_ACCOUNT.get;
-  const create = async (options = defaultOptions, key = 'launch-one', session = SESSION_ONE) => {
+  const create = async (options: { repo: string; [key: string]: unknown } = defaultOptions, key = 'launch-one', session = SESSION_ONE) => {
     const response = await handleRequest(api('/repo-launches', 'POST', options, key, session), f.env);
     assert.ok(response.ok, JSON.stringify(await response.clone().json()));
     return response.json() as Promise<RepoLaunch>;
@@ -100,7 +100,13 @@ async function fixture(t: TestContext) {
   };
   const complete = (state: RepoLaunch, phase: 'cloning' | 'setup' | 'starting', status = 'succeeded') => { executions.get(state.executions[phase]!)!.status = status; };
   const mutate = (state: RepoLaunch) => f.sqlite.prepare('UPDATE repo_launches SET state_json = ? WHERE id = ?').run(JSON.stringify(state), state.id);
-  return { ...f, create, step, complete, mutate, githubCalls, executions, executionKeys, executionCalls, creations, uploadedFiles, startupCalls, loseStartup() { loseStartup = true; },
+  const image = (owner = USER_ONE, status = 'ready') => {
+    const id = crypto.randomUUID(), now = new Date().toISOString();
+    f.sqlite.prepare('INSERT INTO container_images (id,user_id,name,status,dockerfile,image_key,image_ref,created_at,updated_at,deadline,month) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, owner, 'Repository tools', status, 'FROM mainbrella:base', `custom_${id.replaceAll('-', '')}`, `registry/image@sha256:${'c'.repeat(64)}`, now, now, now, now.slice(0, 7));
+    return id;
+  };
+  return { ...f, create, step, complete, mutate, image, githubCalls, executions, executionKeys, executionCalls, creations, uploadedFiles, startupCalls, loseStartup() { loseStartup = true; },
     githubMode(value: string) { githubMode = value; }, manifests(value: string[]) { manifests = value; }, loseAllocation() { loseAllocation = true; }, loseExecution() { loseExecution = true; } };
 }
 
@@ -120,6 +126,61 @@ test('missing launch migration logs the database error and failing stage without
   assert.match(details.error.message, /no such table: repo_launches/);
   assert.ok(details.error.stack);
   assert.ok(!JSON.stringify(logs).includes(SESSION_ONE));
+});
+
+test('repository custom-image selection is owner-scoped and ready before any GitHub work or allocation', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  const foreign = f.image(USER_TWO), building = f.image(USER_ONE, 'building');
+  for (const [imageId, status, code] of [[foreign, 404, 'image_not_found'], [building, 409, 'image_not_ready'], [crypto.randomUUID(), 404, 'image_not_found']] as const) {
+    const response = await handleRequest(api('/repo-launches', 'POST', { ...defaultOptions, imageId }, imageId), f.env);
+    assert.equal(response.status, status); assert.deepEqual(await response.json(), { error: code });
+  }
+  assert.equal((await handleRequest(api('/repo-launches', 'POST', { ...defaultOptions, imageId: foreign, catalogId: 'node' }), f.env)).status, 400);
+  assert.equal(f.githubCalls.length, 0); assert.equal(f.accountCalls.length, 0);
+  assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS n FROM repo_launches').get() as any).n, 0);
+});
+
+test('repository launch retains its custom image on retries and rejects changed or deleted image selections', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  const imageId = f.image(), otherImage = f.image();
+  const options = { ...defaultOptions, imageId };
+  let state = await f.create(options, 'custom-image-launch');
+  assert.equal(state.options.imageId, imageId); assert.equal(state.options.catalogId, undefined);
+  assert.equal((await f.create(options, 'custom-image-launch')).id, state.id);
+  const changed = await handleRequest(api('/repo-launches', 'POST', { ...options, imageId: otherImage }, 'custom-image-launch'), f.env);
+  assert.equal(changed.status, 409); assert.deepEqual(await changed.json(), { error: 'idempotency_key_conflict' });
+  f.loseAllocation();
+  assert.equal((await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env)).status, 503);
+  state = await f.step(state); assert.equal(state.phase, 'cloning'); assert.equal(f.creations.size, 1);
+  const allocation = f.accountCalls.find(call => call.request.method === 'POST')!;
+  const selected = await allocation.request.json() as any;
+  assert.equal(selected.imageId, imageId); assert.equal(selected.imageKey, `custom_${imageId.replaceAll('-', '')}`);
+  assert.equal(selected.catalogId, undefined);
+  const pending = await f.create({ ...defaultOptions, imageId: otherImage }, 'delete-before-allocate');
+  f.sqlite.prepare("UPDATE container_images SET status='deleted' WHERE id=?").run(otherImage);
+  const callsBefore = f.accountCalls.length, githubBefore = f.githubCalls.length;
+  const denied = await handleRequest(api(`/repo-launches/${pending.id}/advance`, 'POST'), f.env);
+  assert.equal(denied.status, 404); assert.deepEqual(await denied.json(), { error: 'image_not_found' });
+  assert.equal(f.accountCalls.length, callsBefore); assert.equal(f.githubCalls.length, githubBefore);
+});
+
+test('deleting an image after an ambiguous allocation never launches a fallback or duplicate', async t => {
+  const f = await fixture(t); t.mock.method(console, 'error', () => {});
+  const imageId = f.image(), state = await f.create({ ...defaultOptions, imageId }, 'ambiguous-custom-image');
+  f.loseAllocation();
+  assert.equal((await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env)).status, 503);
+  assert.equal(f.creations.size, 1); assert.equal(f.containers.get(USER_ONE)!.length, 1);
+  f.sqlite.prepare("UPDATE container_images SET status='deleted' WHERE id=?").run(imageId);
+  const before = f.accountCalls.length;
+  for (let retry = 0; retry < 2; retry++) {
+    const response = await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env);
+    assert.equal(response.status, 404); assert.deepEqual(await response.json(), { error: 'image_not_found' });
+  }
+  assert.equal(f.accountCalls.length, before); assert.equal(f.creations.size, 1);
+  assert.equal(f.containers.get(USER_ONE)!.length, 1);
+  const retained = await (await handleRequest(api(`/repo-launches/${state.id}`), f.env)).json() as RepoLaunch;
+  assert.equal(retained.phase, 'allocating'); assert.equal(retained.options.imageId, imageId);
+  assert.ok(retained.attempts.allocating); assert.equal(retained.container, null);
 });
 
 test('GitHub failures log upstream status, message, request ID and rate limit headers', async t => {

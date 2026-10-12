@@ -229,6 +229,7 @@ The next CLI release includes a browser launcher:
 ```sh
 mainbrella repo acme/demo --ref main --open
 mainbrella repo acme/web --setup 'npm ci' --start 'npm run dev -- --host 0.0.0.0' --port 3000 --open
+mainbrella repo acme/web --image-id YOUR_READY_IMAGE_UUID --start 'npm start' --port 3000 --readiness-path /health --open
 ```
 
 It prints a shareable `https://mainbrella.com/run/` URL and optionally opens it

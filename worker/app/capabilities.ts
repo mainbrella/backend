@@ -47,7 +47,7 @@ export function capabilities(env: Env) {
       eventRetentionMs: OBSERVATION_RETENTION_MS, maxLifecycleEvents: MAX_LIFECYCLE_EVENTS, maxMetricRangeMs: MAX_METRIC_RANGE_MS, metricBucketMs: METRIC_BUCKET_MS },
     previews: { supported: previewsConfigured(env), signedUrls: false },
     projects: projectHostingCapabilities(env),
-    images: { tags: true, catalog: true, availableCatalogPath: '/containers',
+    images: { tags: true, catalog: true, availableCatalogPath: '/containers', repositoryLaunch: Boolean(env.DB && env.CONTAINER_ACCOUNT && env.USER_CONTAINER),
       customBuilds: imageBuildsConfigured(env), crossBuildCache: imageBuildsConfigured(env), privateRegistryImports: imageBuildsConfigured(env) && imageRegistriesConfigured(env), limits: IMAGE_LIMITS },
     resources: MACHINE_SIZES,
     networking: { outboundInternet: true, internetControl: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && env.NETWORK_INTERNET_CONTROL_ENABLED === 'true'), privateServices: privateServicesConfigured(env), egressPolicies: Boolean(env.USER_CONTAINER && env.CONTAINER_ACCOUNT && egressConfigured(env)), regionSelection: false },

@@ -8,12 +8,13 @@ export const repoCwd = z.string().max(200).refine(value => value === '.' ||
   /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) && value.split('/').every(part => part !== '.' && part !== '..'));
 const command = z.string().trim().min(1).max(4096).refine(value => !value.includes('\0'));
 export const launchOptionsSchema = z.object({
-  repo: repoName, ref: repoRef.optional(), catalogId: z.enum(['node', 'python', 'rust', 'go', 'devops']).optional(),
+  repo: repoName, ref: repoRef.optional(), catalogId: z.enum(['node', 'python', 'rust', 'go', 'devops']).optional(), imageId: z.string().uuid().optional(),
   size: z.enum(['lite', 'small', 'medium', 'large', 'xl']).default('small'), cwd: repoCwd.default('.'),
   setupCommand: command.optional(), startCommand: command.optional(), port: z.number().int().min(1024).max(65535).optional(),
   readinessPath: z.string().min(1).max(1024).refine(path => Boolean(normalizeRestoreLaunch({ command: 'true', readiness: { port: 1024, path } }))).optional(),
 }).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' })
-  .refine(value => value.readinessPath === undefined || Boolean(value.startCommand), { message: 'readinessPath requires startCommand and port' });
+  .refine(value => value.readinessPath === undefined || Boolean(value.startCommand), { message: 'readinessPath requires startCommand and port' })
+  .refine(value => value.imageId === undefined || value.catalogId === undefined, { message: 'imageId and catalogId are mutually exclusive' });
 export type LaunchOptions = z.infer<typeof launchOptionsSchema>;
 export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[]; private?: boolean }
 interface GithubDiagnostic {

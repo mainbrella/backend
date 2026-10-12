@@ -20,7 +20,7 @@ export const capabilitiesSchema = z.object({
   observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   projects: flags('supported', 'customDomains', 'localDevelopment').extend({ apexIps: z.array(z.string()) }),
-  images: z.object({ tags: z.boolean(), catalog: z.boolean(), availableCatalogPath: z.string(), customBuilds: z.boolean(), crossBuildCache: z.boolean(), privateRegistryImports: z.boolean(), limits: z.object({
+  images: z.object({ tags: z.boolean(), catalog: z.boolean(), availableCatalogPath: z.string(), repositoryLaunch: z.boolean(), customBuilds: z.boolean(), crossBuildCache: z.boolean(), privateRegistryImports: z.boolean(), limits: z.object({
     maxBuildsPerMonth: limit, maxSavedImages: limit, maxContextBytes: limit, maxDockerfileBytes: limit, maxBuildSeconds: limit, maxTags: limit }) }),
   resources: z.array(machineSizeSchema),
   networking: flags('outboundInternet', 'internetControl', 'privateServices', 'egressPolicies', 'regionSelection'),

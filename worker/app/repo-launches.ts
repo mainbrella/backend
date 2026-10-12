@@ -3,6 +3,7 @@ import { containerUser } from './container-auth';
 import { handleContainersRequest } from './containers';
 import { handleExecutionRequest } from './executions';
 import { handleContainerStartupRequest } from './container-startup';
+import { ownedImage } from './images';
 import { downloadGitPack, githubUserToken, resolveUserRepository, suggestedPrivateSetup } from '../lib/github-import';
 import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 import { resolveEntitlement } from '../lib/entitlements';
@@ -42,6 +43,13 @@ async function responseData(response: Response): Promise<any> {
   return data;
 }
 
+async function validateRepositoryImage(env: Env, owner: string, options: LaunchOptions): Promise<void> {
+  if (!options.imageId) return;
+  const image = await ownedImage(env, owner, options.imageId);
+  if (!image) throw new LaunchError('image_not_found', 404);
+  if (image.status !== 'ready') throw new LaunchError('image_not_ready', 409);
+}
+
 async function advance(request: Request, env: Env, owner: string, id: string, diagnostics: LaunchDiagnosticContext, redactions: string[], ctx?: ExecutionContext): Promise<RepoLaunch> {
   diagnostics.launchId = id;
   diagnostics.stage = 'acquire_launch_lock';
@@ -79,6 +87,8 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
     }
     if (terminalPhases.includes(state.phase)) return state;
     if (state.phase === 'allocating') {
+      diagnostics.stage = 'verify_repository_image';
+      await validateRepositoryImage(env, owner, state.options);
       if (state.repository.private) {
         diagnostics.stage = 'verify_private_repository_access';
         await resolveRepository(state.repository.repo, state.repository.commit, state.options.cwd, await githubUserToken(env, owner), true);
@@ -90,9 +100,9 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
       state.attempts.allocating ??= Date.now();
       await save();
       diagnostics.stage = 'allocate_container';
-      const catalogId = state.options.catalogId ?? state.repository.suggestedCatalogId;
+      const image = state.options.imageId ? { imageId: state.options.imageId } : { catalogId: state.options.catalogId ?? state.repository.suggestedCatalogId };
       const data = await responseData(await handleContainersRequest(internalRequest(request, '/containers', 'POST',
-        { catalogId, size: state.options.size, name: state.repository.repo.slice(0, 80) }, `repo-${id}`), env, ctx));
+        { ...image, size: state.options.size, name: state.repository.repo.slice(0, 80) }, `repo-${id}`), env, ctx));
       const container = data.containers?.find((item: any) => item.id === data.creation?.containerId && item.createdAt === data.creation?.createdAt);
       if (!container) throw new LaunchError('launch_unavailable');
       if (container.status !== 'running') return state;
@@ -245,6 +255,8 @@ export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: 
       : authJson({ error: 'idempotency_key_conflict' }, 409, cors);
     diagnostics.stage = 'check_entitlement';
     if (!(await resolveEntitlement(env, user.id)).active) return authJson({ error: 'subscription_required' }, 402, cors);
+    diagnostics.stage = 'verify_repository_image';
+    await validateRepositoryImage(env, user.id, options.data);
     diagnostics.stage = 'resolve_repository';
     const repository = await resolveUserRepository(env, user.id, options.data.repo, options.data.ref, options.data.cwd);
     const state: RepoLaunch = { id: crypto.randomUUID(), phase: 'allocating', options: options.data, repository, container: null,

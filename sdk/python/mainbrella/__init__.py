@@ -17,6 +17,7 @@ from ._images import Images
 from ._managed_pools import ManagedPools
 from ._desktop import DesktopTools, DesktopSession
 from ._version import __version__
+from ._git import GitTools
 
 _USER_AGENT = "mainbrella-python/" + __version__
 
@@ -577,6 +578,7 @@ class Sandbox:
         self.id = container_id
         self.created_at = created_at
         self.files = _Files(self)
+        self.git = GitTools(self)
         self.commands = _Commands(self)
         self.code = _CodeContexts(self)
         self.desktop = DesktopTools(self)

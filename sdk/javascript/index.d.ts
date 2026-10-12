@@ -20,6 +20,17 @@ export interface Workspace {id:string;name:string;createdAt:string;expiresAt:num
 export interface FileEntry { name: string; path: string; type: 'file' | 'directory' | 'symlink' | 'fifo' | 'socket' | 'character' | 'block' | 'other'; size: number; mode: string; uid: number; gid: number; modifiedAt: string; linkTarget?: string }
 export interface DirectoryPage { path: string; entries: FileEntry[]; nextOffset: number | null }
 export interface ExecutionOptions { timeoutMs?: number; idempotencyKey?: string; stdin?: boolean; cwd?: string; env?: Record<string, string>; pty?: { cols: number; rows: number } }
+export interface GitOptions { cwd: string; timeoutMs?: number; idempotencyKey?: string }
+export interface GitOperation { executionId: string; idempotencyKey: string }
+export interface GitEntry { indexStatus: string; worktreeStatus: string; path: string; originalPath?: string }
+export interface GitBranch { name: string; commit: string; current: boolean }
+export interface GitTools {
+  status(options: GitOptions): Promise<GitOperation & { entries: GitEntry[] }>;
+  branches(options: GitOptions): Promise<GitOperation & { branches: GitBranch[] }>;
+  diff(options: GitOptions & { staged?: boolean; paths?: string[] }): Promise<GitOperation & { patch: string }>;
+  commit(options: GitOptions & { message: string; author: { name: string; email: string }; idempotencyKey: string }): Promise<GitOperation & { committed: true }>;
+  checkout(options: GitOptions & { branch: string; create?: boolean; idempotencyKey: string }): Promise<GitOperation & { branch: string }>;
+}
 export interface Preview { id: string; port: number; createdAt: string; expiresAt: number }
 export interface PreviewLink extends Preview { url: string }
 export interface CommandResult { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; outputTruncated: boolean }
@@ -46,7 +57,7 @@ export interface Capabilities {
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };
   resources: Size[];
-  images: { tags: boolean; catalog: boolean; customBuilds: boolean; crossBuildCache: boolean; privateRegistryImports: boolean; availableCatalogPath: string; limits: Record<string, number> };
+  images: { tags: boolean; catalog: boolean; repositoryLaunch: boolean; customBuilds: boolean; crossBuildCache: boolean; privateRegistryImports: boolean; availableCatalogPath: string; limits: Record<string, number> };
   secrets: { vault: boolean };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
@@ -77,6 +88,7 @@ export interface NativeFileWatch {
   close(): Promise<{ closed: true }>;
 }
 export class Sandbox implements ContainerIdentity {
+  git: GitTools;
   internet?: boolean;
   constructor(client: Mainbrella, value: ContainerIdentity);
   client: Mainbrella; id: string; createdAt: string; creationId?: string; imageDigest?: string; instance?: string;

@@ -8,7 +8,7 @@ const { version } = JSON.parse(await readFile(new URL('./package.json', import.m
 const help = `Mainbrella ${version} — generation-bound container automation
 Set MAINBRELLA_API_KEY in your environment. Optional MAINBRELLA_API_URL.
 
-mainbrella repo OWNER/REPO [--ref REF] [--runtime node|python|rust|go|devops] [--size SIZE] [--cwd DIR] [--setup COMMAND] [--start COMMAND --port N] [--open]
+mainbrella repo OWNER/REPO [--ref REF] [--runtime node|python|rust|go|devops | --image-id UUID] [--size SIZE] [--cwd DIR] [--setup COMMAND] [--start COMMAND --port N --readiness-path /health] [--open]
 mainbrella capabilities | list
 mainbrella create --idempotency-key KEY [--size lite|small|medium|large|xl] [--internet true|false] [--catalog-id ID | --image-id ID]
 mainbrella kill --id ID --created-at ISO
@@ -118,7 +118,7 @@ export function repositoryUrl(argv) {
   const remaining = [...argv];
   const repo = remaining.shift()?.replace(/^https:\/\/github\.com\//i, '').replace(/\/$/, '').replace(/\.git$/, '');
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(repo ?? '') || ['.', '..'].includes(repo.split('/')[1])) fail();
-  const names = { ref: 'ref', runtime: 'catalogId', size: 'size', cwd: 'cwd', setup: 'setupCommand', start: 'startCommand', port: 'port' };
+  const names = { ref: 'ref', runtime: 'catalogId', 'image-id': 'imageId', size: 'size', cwd: 'cwd', setup: 'setupCommand', start: 'startCommand', port: 'port', 'readiness-path': 'readinessPath' };
   const options = {};
   while (remaining.length) {
     const flag = remaining.shift();
@@ -129,11 +129,13 @@ export function repositoryUrl(argv) {
     else { const value = remaining.shift(); if (!value || value.startsWith('--')) fail(); options[name] = value; }
   }
   if (options.runtime && !['node', 'python', 'rust', 'go', 'devops'].includes(options.runtime)) fail();
+  if (options['image-id'] && (options.runtime || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(options['image-id']))) fail();
   if (options.size && !['lite', 'small', 'medium', 'large', 'xl'].includes(options.size)) fail();
   if (options.ref && (options.ref.length > 200 || /[\x00-\x20\x7f]/.test(options.ref))) fail();
   if (options.cwd && (options.cwd.length > 200 || options.cwd !== '.' && (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(options.cwd) || options.cwd.split('/').some(part => ['.', '..'].includes(part))))) fail();
   for (const name of ['setup', 'start']) if (options[name] && (!options[name].trim() || options[name].length > 4096 || options[name].includes('\0'))) fail();
   if (Boolean(options.start) !== Boolean(options.port) || options.port && (!/^\d+$/.test(options.port) || Number(options.port) < 1024 || Number(options.port) > 65535)) fail();
+  if (options['readiness-path'] && (!options.start || options['readiness-path'].length > 1024 || !options['readiness-path'].startsWith('/') || options['readiness-path'].startsWith('//') || /[\s\\#\x00-\x1f\x7f]/.test(options['readiness-path']))) fail();
   const url = new URL('https://mainbrella.com/run/');
   url.searchParams.set('repo', repo);
   for (const [name, key] of Object.entries(names)) if (options[name]) url.searchParams.set(key, options[name]);

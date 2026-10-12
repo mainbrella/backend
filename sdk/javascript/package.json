@@ -28,6 +28,7 @@
     "desktop.js",
     "desktop-guest.js",
     "images.js",
+    "git.js",
     "index.d.ts",
     "README.md",
     "LICENSE",

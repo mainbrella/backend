@@ -1078,12 +1078,24 @@ starts the application once in each restored generation:
 }
 ```
 
-The recipe runs a user-authored shell command; review it before saving. Working
+The recipe runs a user-authored shell command of up to 4,096 characters, including
+multiline scripts; review it before saving. Working
 directory defaults to `/workspace`, health path to `/`, and readiness timeout to
 30 seconds (allowed range 1–60 seconds). Readiness checks use a local application
 port (1024–65535), require HTTP 2xx, and do not follow redirects. Existing outbound
 policy and vault bindings keep their normal behavior; the recipe does not accept
 raw environment secrets. Saving the recipe does not run it in the source.
+
+When `persistence.startupConfiguration` is true, configure an ordinary running
+source with `PATCH /containers/startup` and `{id, createdAt, launch}`. The response
+contains that exact identity and the canonical recipe. This changes only future
+startup: it does not start or restart the current app. Stop/Resume and Fork
+inherit it; `launch:null` clears it. Existing saved snapshots remain immutable,
+and explicit `POST /workspaces` still needs its own `launch` field. Production
+containers use their separate `startupCommand` instead. Paid access, ownership
+and the exact running generation are required; cookie mutations need a trusted
+Origin. An older runtime fails with `workspace_launch_unavailable` rather than
+silently omitting the recipe.
 
 The container and creation response include `readiness.status` (`starting`,
 `ready`, or `failed`) separately from the machine's lifecycle `status`. A running
@@ -1092,6 +1104,8 @@ exact generation. Failed startup leaves the restored machine accessible, with
 `readiness.error`, `logPath`, and an optional bounded `logTail` for inspection.
 Status polling and same-key creation recovery never rerun the launch command.
 This is a fresh process and does not preserve the source's memory or nonce.
+The SDK's `waitUntilReady()` / `wait_until_ready()` waits for this application
+state, rejects replaced or stopped generations, and retains failure diagnostics.
 
 | Plan | Saved workspaces | Reserved capacity | Retention | Saves/month | Capture capacity/month | Retained capture capacity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -1124,8 +1138,12 @@ result is a shell in `/workspace/repo` on a Small machine. Each recipient gets a
 separate container. GitHub login is unnecessary for public repositories.
 
 Optional query/body fields are `ref`, `catalogId` (`node`, `python`, `rust`, `go`,
-`devops`), `size`, `cwd` (relative to the checkout), `setupCommand`, `startCommand`,
-and `port` (1024–65535). Start command and port must be supplied together. Runtime
+`devops`) or an owned ready custom `imageId` (mutually exclusive), `size`, `cwd`
+(relative to the checkout), `setupCommand`, `startCommand`, `port` (1024–65535),
+and `readinessPath` (local HTTP path, default `/`). Start command and port must be
+supplied together; readinessPath requires them. Initial and restored readiness
+both require HTTP 2xx without following redirects. Use `/health` or another direct
+2xx endpoint when the application's root redirects. Runtime
 suggestions use manifests in the working directory; ambiguous projects default
 to Node and allow an override. Commands from share links are visible before Run.
 
@@ -1139,9 +1157,21 @@ Debian this is `apt-get update` followed by
 `apt-get install -y --no-install-recommends python3 make g++`. Do not skip required
 lifecycle scripts or regenerate the lockfile to bypass this failure. Repair failed
 installs in the retained container, preserving its checkout and completed work.
-Repository Dockerfiles are evidence for prerequisites, not automatically compatible
-custom images: this launch contract accepts `catalogId`, not `imageId`, and custom
-images require one stage starting with `FROM mainbrella:base`.
+When `/capabilities` advertises `images.repositoryLaunch`, ready custom images can
+be reused through `imageId`; their ownership and readiness
+are checked before repository resolution and again before allocation. The selected
+immutable image ID is part of the keyed request: changed selections conflict and
+an unavailable image never falls back to a catalog runtime. Other accounts cannot
+use an image merely by receiving its launch link. Custom images need `git` for
+checkout and `curl` for preview readiness, alongside the managed runtime tools.
+The launch does not build an arbitrary repository Dockerfile or run Compose.
+Custom-image builds still require one stage starting with `FROM mainbrella:base`;
+the existing `baseImage` option can supply an approved digest-pinned external base.
+Keep the selected image available until allocation is confirmed. If an allocation
+reply is lost and the image is deleted, retry rejects before the existing create
+API can recover its receipt. Preserve the launch/key and reconcile the exact
+admitted generation in the owned container inventory; creating a new launch is
+not a substitute for resolving that uncertain allocation.
 
 Authenticated endpoints accept session cookies or existing session/API Bearer
 credentials. Cookie mutations require a trusted Origin:
