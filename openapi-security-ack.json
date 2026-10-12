@@ -65,7 +65,48 @@
         ],
         "responses": {
           "200": {
-            "description": "Fixed JSON acknowledgment, or a deliberately reflected disposable credential for an adversarial action."
+            "description": "Fixed JSON acknowledgment, or a deliberately reflected disposable credential for an adversarial action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fixture": {
+                      "type": "string",
+                      "enum": [
+                        "rodeo-security"
+                      ]
+                    },
+                    "runId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "version": {
+                      "type": "integer"
+                    },
+                    "internalHeaders": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "fixture",
+                    "runId",
+                    "authenticated",
+                    "version",
+                    "internalHeaders"
+                  ]
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "description": "Only reflection actions return a raw or base64 disposable test credential; the relay must withhold it."
+                }
+              }
+            }
           },
           "302": {
             "description": "Deliberate redirect to an owned denied destination."

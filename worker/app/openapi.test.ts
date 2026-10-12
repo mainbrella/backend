@@ -169,6 +169,8 @@ test('dedicated relay and acknowledgment services have separate authenticated Op
       assert.deepEqual(schema.paths['/control/{runId}'].post.security, [{ operatorBearer: [] }]);
       assert.ok(schema.paths['/control/{runId}'].post.requestBody);
       assert.ok(schema.paths['/runs/{runId}/{action}'].get.responses[302]);
+      assert.ok(schema.paths['/runs/{runId}/{action}'].get.responses[200].content['application/json'].schema.properties.authenticated);
+      assert.ok(schema.paths['/runs/{runId}/{action}'].get.responses[200].content['text/plain']);
     }
   }
   const primary = await document(); assert.equal(primary.paths['/v1/egress'], undefined); assert.equal(primary.paths['/control/{runId}'], undefined);

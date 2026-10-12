@@ -18,7 +18,10 @@ export function registerSecurityInfrastructureRoutes(api: OpenAPIApi, kind: 'rel
   register(api, 'get', '/runs/{runId}/{action}', { operationId: 'acknowledgeSecurityProbe', tags: ['Security infrastructure'], security: [{ upstreamBearer: [] }, {}],
     summary: 'Disposable qualification upstream acknowledgment and adversaries', description: 'Test fixture only. Never returns a credential in an ordinary acknowledgment. Reflection actions deliberately return disposable test credentials to verify relay rejection. Tokens and runs expire after 15 minutes.',
     request: { params: params.extend({ action: z.enum(['public', 'auth', 'slow', 'redirect', 'reflect', 'reflect-base64', 'reflect-header']) }) },
-    responses: { 200: { description: 'Fixed JSON acknowledgment, or a deliberately reflected disposable credential for an adversarial action.' }, 302: { description: 'Deliberate redirect to an owned denied destination.' }, ...errors(404, 409) } }, handler);
+    responses: { 200: { description: 'Fixed JSON acknowledgment, or a deliberately reflected disposable credential for an adversarial action.', content: {
+      'application/json': { schema: z.object({ fixture: z.literal('rodeo-security'), runId: z.string().uuid(), authenticated: z.boolean(), version: z.number().int(), internalHeaders: z.boolean() }) },
+      'text/plain': { schema: z.string().describe('Only reflection actions return a raw or base64 disposable test credential; the relay must withhold it.') },
+    } }, 302: { description: 'Deliberate redirect to an owned denied destination.' }, ...errors(404, 409) } }, handler);
   for (const [method, operationId] of [['post', 'configureSecurityProbe'], ['put', 'rotateSecurityProbe']] as const) register(api, method, '/control/{runId}', {
     operationId, tags: ['Security infrastructure'], security: operator, summary: 'Set a disposable upstream token for a qualification run',
     request: { params, ...requestBody(z.object({ value: z.string().regex(/^[a-f0-9]{64}$/) })) }, responses: { 200: jsonResponse(z.object({ configured: z.literal(true), version: z.number().int() })), ...errors(400, 403, 404, 409) },

@@ -21,6 +21,9 @@ test('real acknowledgment Worker keeps control credentials separate and fences s
   assert.equal((await request(`/control/${id}`, 'POST', control, { value: first })).status, 200);
   const publicResponse = await request(`/runs/${id}/auth`); assert.equal((await publicResponse.json()).authenticated, false);
   const ack = await (await request(`/runs/${id}/auth`, 'GET', first)).json(); assert.equal(ack.authenticated, true); assert.equal(ack.version, 1);
+  assert.equal((await (await request(`/runs/${id}/reflect`, 'GET', first)).text()).includes(first), true);
+  assert.equal((await (await request(`/runs/${id}/reflect-base64`, 'GET', first)).text()).includes(Buffer.from(first).toString('base64')), true);
+  assert.equal((await request(`/runs/${id}/reflect-header`, 'GET', first)).headers.get('x-reflection') === first, true);
   const pending = request(`/runs/${id}/slow`, 'GET', first);
   for (let i = 0; i < 100; i++) {
     if ((await (await request(`/control/${id}`, 'GET', control)).json()).pending) break;

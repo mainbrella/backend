@@ -290,6 +290,27 @@ authenticated and anonymous discovery, then run `npm run deploy:containers`
 to withdraw runtime mediation. Leave service secrets installed for repeatable
 qualification; the relay sleeps idle and the disposable upstream state is deleted.
 
+### October 12 restricted production evidence
+
+The sibling Repo Rodeo qualification passed 33 local checks and 29 production
+canary checks. Production consumed six guest starts across the recorded control
+and continuations, plus two filesystem captures; the excluded account consumed
+no starts. All run-owned API containers, secrets and workspaces and disposable
+upstream state were removed. The production relay successfully used real
+DNS/TLS transport and later reported zero running instances. Both API flags and
+runtime mediation were withdrawn after the bounded run; authenticated and
+anonymous capability discovery report false. See
+[the qualification notes](../../repo-rodeo/notes/2026-10-12-production-security.md)
+and [result](../../repo-rodeo/examples/mainbrella-production-security/result.json).
+
+This establishes account-restricted mediation, rotation/deletion fencing,
+native protocol denial, preview HTTP/WebSockets and fork/resume in the tested
+path. IPv6/full bypass coverage, complete image/snapshot scans, expiry/provider
+recovery, SSH/browser terminal and deployed downgrade/withdrawal remain open.
+Workspace deletion revokes API restoration handles; it does not prove immediate
+provider snapshot erasure. Cloudflare documents a 30-day snapshot lifetime that
+refreshes on restore in the [native snapshot API](https://developers.cloudflare.com/containers/api/durable-object-container/#snapshotcontainer).
+
 
 Local tests exercise ciphertext ownership/tamper rejection, write-only metadata,
 rotation/deletion, scope validation, native installation-before-boot, runtime
