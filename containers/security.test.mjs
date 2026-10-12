@@ -89,6 +89,22 @@ test('egress injects only in authenticated relay envelope and withholds stopped-
   f.security.fetcher = async () => { f.setGeneration(null); return Response.json({ version: 1, status: 200, headers: [], body: Buffer.from('late response').toString('base64') }); };
   assert.equal((await f.egress()).status, 403);
 });
+test('default relay fetch retains the global receiver required by Workers', async () => {
+  const f = fixture(), original = globalThis.fetch;
+  let calls = 0, security;
+  globalThis.fetch = async function () {
+    assert.equal(this, globalThis, 'Workers fetch rejects another receiver');
+    calls++;
+    return Response.json({ version: 1, status: 200, headers: [], body: Buffer.from('acknowledged').toString('base64') });
+  };
+  try { security = new AccountSecurity(f.security.account, { ...env }); }
+  finally { globalThis.fetch = original; }
+  const response = await security.fetch(new Request('https://internal/security/egress', { headers: {
+    'x-mainbrella-user': 'alice', 'x-egress-id': 'small', 'x-egress-generation': createdAt,
+    'x-egress-incarnation': incarnation, 'x-egress-url': 'https://api.example.com/v1',
+  } }));
+  assert.equal(response.status, 200); assert.equal(await response.text(), 'acknowledged'); assert.equal(calls, 1);
+});
 test('secret deletion or rotation during egress fences the old response and missing secrets block later requests', async () => {
   const f = fixture(), secret = await (await f.request('POST', secretInput)).json();
   f.setGeneration({ networkPolicy: { allow: ['api.example.com'], deny: [] }, secretBindings: [secret.id], incarnation });

@@ -12,7 +12,7 @@ export const vaultConfigured = env => env.SECRETS_VAULT_ENABLED === 'true' && ty
 export const egressConfigured = env => env.EGRESS_POLICIES_ENABLED === 'true' && Boolean(relayConfiguration(env));
 
 export class AccountSecurity {
-  constructor(account, env, fetcher = fetch) { Object.assign(this, { account, env, fetcher }); this.active = 0; }
+  constructor(account, env, fetcher = fetch.bind(globalThis)) { Object.assign(this, { account, env, fetcher }); this.active = 0; }
   async key() { return crypto.subtle.importKey('raw', unbase64(this.env.SECRETS_ENCRYPTION_KEY), 'AES-GCM', false, ['encrypt', 'decrypt']); }
   async encrypt(owner, id, value) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
