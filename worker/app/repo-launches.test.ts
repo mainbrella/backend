@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
-import { cloneCommand, launchOptionsSchema, previewCommand, setupCommand } from '../lib/repo-launch';
+import { cloneCommand, launchOptionsSchema, previewCommand, setupCommand, repositoryRestoreLaunch } from '../lib/repo-launch';
 import type { RepoLaunch } from './repo-launches';
 import { sealGithubCredentials } from '../lib/github-import';
 const commit = 'a'.repeat(40), tree = 'b'.repeat(40);
@@ -61,10 +61,17 @@ async function fixture(t: TestContext) {
   } as unknown as Env['USER_CONTAINER'];
   const accountGet = f.env.CONTAINER_ACCOUNT.get.bind(f.env.CONTAINER_ACCOUNT);
   const creations = new Map<string, any>();
+  const startupCalls: any[] = [];
+  let loseStartup = false;
   let loseAllocation = false;
   f.env.CONTAINER_ACCOUNT.get = ((name: DurableObjectId) => {
     const original = accountGet(name);
     return { async fetch(request: Request) {
+      if (new URL(request.url).pathname === '/containers/startup' && request.method === 'PATCH') {
+        const body = await request.json(); startupCalls.push(body);
+        if (loseStartup) { loseStartup = false; throw new Error('lost_response'); }
+        return Response.json(body);
+      }
       if (request.method !== 'POST') return original.fetch(request);
       const key = request.headers.get('Idempotency-Key')!;
       let data = creations.get(key);
@@ -92,7 +99,7 @@ async function fixture(t: TestContext) {
   };
   const complete = (state: RepoLaunch, phase: 'cloning' | 'setup' | 'starting', status = 'succeeded') => { executions.get(state.executions[phase]!)!.status = status; };
   const mutate = (state: RepoLaunch) => f.sqlite.prepare('UPDATE repo_launches SET state_json = ? WHERE id = ?').run(JSON.stringify(state), state.id);
-  return { ...f, create, step, complete, mutate, githubCalls, executions, executionKeys, executionCalls, creations, uploadedFiles,
+  return { ...f, create, step, complete, mutate, githubCalls, executions, executionKeys, executionCalls, creations, uploadedFiles, startupCalls, loseStartup() { loseStartup = true; },
     githubMode(value: string) { githubMode = value; }, manifests(value: string[]) { manifests = value; }, loseAllocation() { loseAllocation = true; }, loseExecution() { loseExecution = true; } };
 }
 
@@ -389,6 +396,32 @@ test('preview workflow persists clone/install/start IDs, readiness and separate 
   const startBody = await startRequest.json() as { command: string; timeoutMs: number };
   assert.match(startBody.command, /tmux new-session -d -s mainbrella-preview/); assert.match(startBody.command, /http:\/\/127\.0\.0\.1:3000/);
   assert.equal(startBody.timeoutMs, 240000);
+});
+
+test('repository startup recipe is registered once before launch and response loss does not repeat setup or start', async t => {
+  const f = await fixture(t); f.env.WORKSPACE_PERSISTENCE_ENABLED = 'true';
+  t.mock.method(console, 'error', () => {});
+  let state = await f.create({ ...defaultOptions, startCommand: 'npm run dev -- --host 0.0.0.0', port: 3000 } as typeof defaultOptions);
+  state = await f.step(state); state = await f.step(state); f.complete(state, 'cloning'); state = await f.step(state);
+  assert.equal(state.phase, 'starting'); f.loseStartup();
+  const failed = await handleRequest(api(`/repo-launches/${state.id}/advance`, 'POST'), f.env);
+  assert.equal(failed.status, 503); assert.equal(f.executionKeys.size, 1);
+  state = await f.step(state); assert.equal(state.restoreLaunchConfigured, true);
+  assert.equal(f.startupCalls.length, 2); assert.deepEqual(f.startupCalls[0], f.startupCalls[1]);
+  assert.deepEqual(f.startupCalls[0], { id: state.container!.id, createdAt: state.container!.createdAt, launch: {
+    command: "exec /bin/bash -lc 'npm run dev -- --host 0.0.0.0'", cwd: '/workspace/repo', readiness: { port: 3000, path: '/', timeoutMs: 60000 },
+  } });
+  f.complete(state, 'starting'); state = await f.step(state); state = await f.step(state);
+  assert.equal(state.phase, 'ready'); assert.equal(f.startupCalls.length, 2); assert.equal(f.executionKeys.size, 2);
+  const options = launchOptionsSchema.parse({ ...defaultOptions, startCommand: 'echo ready\nnode server.mjs', port: 3000 });
+  assert.equal(repositoryRestoreLaunch(options), null);
+  assert.equal(repositoryRestoreLaunch({ ...options, startCommand: 'a'.repeat(4096) }), null);
+  assert.equal(repositoryRestoreLaunch({ ...options, cwd: 'packages/web', startCommand: 'npm start' })?.cwd, '/workspace/repo/packages/web');
+  const healthy = { ...options, startCommand: 'npm start', readinessPath: '/health?check=1' };
+  assert.equal(repositoryRestoreLaunch(healthy)?.readiness.path, '/health?check=1');
+  assert.match(previewCommand(healthy), /http:\/\/127\.0\.0\.1:3000\/health\?check=1/);
+  assert.match(previewCommand(healthy), /\[ "\$status" -ge 200 \] && \[ "\$status" -lt 300 \]/);
+  for (const readinessPath of ['//other.example/', '/health#fragment', '/health bad']) assert.equal(launchOptionsSchema.safeParse({ ...healthy, readinessPath }).success, false);
 });
 
 test('setup failure preserves shell and retained logs and cannot silently rerun setup', async t => {

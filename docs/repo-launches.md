@@ -32,6 +32,25 @@ commands already admitted continue after a tab closes. The next phase waits unti
 the owner reopens the private run URL and resumes polling. GET endpoints never
 allocate. Reloaded preview URLs require explicit creation/renewal.
 
+When workspace persistence is configured, a new preview launch registers its
+foreground start command, repository working directory and HTTP port before
+starting the source server. Stop/Resume and Fork can then launch a fresh server
+automatically from the copied files, without rerunning clone or setup. The saved
+command retains Bash semantics and a 60-second initial HTTP check. Registration
+is generation-fenced; a lost response retries the metadata update before any
+start command is admitted. Persisted `restoreLaunchConfigured` records the result.
+Terminal-only launches have no server recipe. Multiline commands and commands
+whose quoted Bash form exceeds the single-line 4096-character recipe limit retain
+their existing launch behavior with `restoreLaunchConfigured:false`; configure a
+short foreground wrapper through startup settings for those applications. This
+does not preserve RAM or the source process. Existing completed launch records
+are not modified automatically.
+
+Repository startup and restored startup both require HTTP 2xx. Optional
+`readinessPath` defaults to `/` and is shared by both checks; redirects are never
+followed or accepted. For a root page that redirects to login or a locale, select
+a local endpoint such as `/health` that returns 2xx directly.
+
 For failed API requests, look for `repo_launch_request_failed` in Wrangler or
 Worker logs. It includes a request ID, failing `stage`, elapsed time, HTTP status,
 and the underlying error stack and nested causes. Advance failures also include

@@ -16,7 +16,7 @@ export const capabilitiesSchema = z.object({
   pools: flags('managed', 'sdkPrewarming').extend({ maxPools: limit, maxPoolSize: limit, maxTtlSeconds: limit }),
   files: flags('streamingTransfers', 'read', 'write', 'binary', 'atomicReplacement', 'list', 'stat', 'mkdir', 'delete', 'move', 'chmod', 'watch', 'sharedExecutionPool')
     .extend({ maxTransferBytes: limit, transferTimeoutMs: limit, maxFileBytes: limit, maxPathBytes: limit, timeoutMs: limit, maxDirectoryEntries: limit, maxDirectoryOffset: limit, maxMetadataBytes: limit }),
-  persistence: flags('restoreLaunch', 'filesystemAfterStop', 'filesystemFork', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
+  persistence: flags('startupConfiguration', 'restoreLaunch', 'filesystemAfterStop', 'filesystemFork', 'snapshots', 'workspaces', 'exports', 'memory', 'volumes'),
   observability: flags('lifecycleEvents', 'metrics', 'webhooks', 'otlp', 'activityWebSocket').extend({ eventRetentionMs: limit, maxLifecycleEvents: limit, maxMetricRangeMs: limit, metricBucketMs: limit }),
   previews: flags('supported', 'signedUrls'),
   projects: flags('supported', 'customDomains', 'localDevelopment').extend({ apexIps: z.array(z.string()) }),

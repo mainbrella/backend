@@ -1,3 +1,5 @@
+import { watchNative } from './file-watch.js';
+
 const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_ENTRIES = 10_000;
 
@@ -56,6 +58,7 @@ export function fileTransfers(sandbox, ErrorType) {
   }
   return {
     upload, download,
+    watchNative(path, options) { remotePath(path, ErrorType); return watchNative(sandbox, path, options, ErrorType); },
     async uploadDirectory(local, remote, { signal } = {}) {
       remotePath(remote, ErrorType);
       const fs = await import('node:fs/promises'), { Readable } = await import('node:stream'), { join } = await import('node:path');

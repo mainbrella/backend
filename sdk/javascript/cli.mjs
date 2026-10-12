@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { open, realpath, writeFile } from 'node:fs/promises';
+import { open, readFile, realpath, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Mainbrella, MainbrellaError } from './index.js';
 
-const help = `Mainbrella 0.1.0 — generation-bound container automation
+const { version } = JSON.parse(await readFile(new URL('./package.json', import.meta.url), 'utf8'));
+const help = `Mainbrella ${version} — generation-bound container automation
 Set MAINBRELLA_API_KEY in your environment. Optional MAINBRELLA_API_URL.
 
 mainbrella repo OWNER/REPO [--ref REF] [--runtime node|python|rust|go|devops] [--size SIZE] [--cwd DIR] [--setup COMMAND] [--start COMMAND --port N] [--open]
@@ -143,7 +144,7 @@ export async function main(argv = process.argv.slice(2), { env = process.env, st
   const print = value => stdout.write(JSON.stringify(value) + '\n');
   try {
     if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { stdout.write(help); return 0; }
-    if (argv.length === 1 && argv[0] === '--version') { stdout.write('0.1.0\n'); return 0; }
+    if (argv.length === 1 && argv[0] === '--version') { stdout.write(`${version}\n`); return 0; }
     if (argv[0] === 'repo') {
       const result = repositoryUrl(argv.slice(1));
       stdout.write(result.url + '\n');

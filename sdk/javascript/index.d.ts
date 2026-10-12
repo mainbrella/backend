@@ -27,7 +27,7 @@ export interface CodeContextRecord { id: string; language: 'python'; createdAt: 
 export interface CodeResult { stdout: string; stderr: string; outputTruncated: boolean;
   results: { mimeType: 'text/plain' | 'application/json' | 'text/html' | 'image/png'; data: string }[];
   error: { name: string; message: string; traceback: string } | null }
-export interface Container extends ContainerIdentity { internet?: boolean; status: 'starting' | 'running' | 'stopped'; name?: string; lifecycle?: 'ad_hoc' | 'production'; workspaceId?: string; readiness?: RestoreReadiness; persistenceExpiresAt?: number; networkPolicy?: NetworkPolicy; secretBindings?: string[]; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
+export interface Container extends ContainerIdentity { internet?: boolean; status: 'starting' | 'running' | 'stopped'; name?: string; lifecycle?: 'ad_hoc' | 'production'; workspaceId?: string; readiness?: RestoreReadiness; launch?: RestoreLaunch; persistenceExpiresAt?: number; networkPolicy?: NetworkPolicy; secretBindings?: string[]; expiresAt: string; imageName?: string; catalogId?: string; imageId?: string; imageDigest?: string; instance?: string; size?: MachineSize; computeUnits?: number }
 export interface AccountState { plan: 'builder' | 'pro' | 'scale' | 'usage' | null; active: boolean; containers: Container[];
   sizes: Size[]; imageCatalog: { id: string; name: string }[]; limits: { maxComputeUnitHours: number; maxConcurrentComputeUnits: number; maxContainers: number; maxStartsPerMonth: number; maxSessionMs: number; idleTimeoutMs: number };
   usage: { month: string; starts: number; computeUnitHours: number; reservedComputeUnitHours: number; availableComputeUnitHours: number; concurrentComputeUnits: number } }
@@ -41,7 +41,7 @@ export interface Capabilities {
     maxCommandBytes: number; maxTimeoutMs: number; maxOutputBytes: number; maxConcurrentOperations: number;
     maxManagedTimeoutMs: number; retentionMs: number; maxRetainedExecutions: number; maxRetainedOutputBytes: number; maxRetainedEvents: number; retentionScope: 'container-slot' };
   files: { read: boolean; write: boolean; binary: boolean; maxFileBytes: number; maxPathBytes: number; timeoutMs: number; [key: string]: boolean | number };
-  persistence: { restoreLaunch: boolean; filesystemAfterStop: boolean; filesystemFork: boolean; snapshots: boolean; workspaces?:boolean; exports?:boolean; memory: boolean; volumes: boolean };
+  persistence: { restoreLaunch: boolean; startupConfiguration: boolean; filesystemAfterStop: boolean; filesystemFork: boolean; snapshots: boolean; workspaces?:boolean; exports?:boolean; memory: boolean; volumes: boolean };
   observability: { lifecycleEvents: boolean; metrics: boolean; webhooks: boolean; otlp: boolean; eventRetentionMs: number; maxLifecycleEvents: number; maxMetricRangeMs: number; metricBucketMs: number };
   previews: { supported: boolean; signedUrls: boolean };
   containers: { idempotentCreate: boolean; creationRetentionMs: number; generationRequired: boolean; accountLimitsPath: string; configurableDeadline: boolean };
@@ -50,7 +50,7 @@ export interface Capabilities {
   secrets: { vault: boolean };
   authentication: Record<string, boolean>; networking: Record<string, boolean>; access: Record<string, number>;
 }
-export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; retryAfterSeconds?: number; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; constructor(code: string, status?: number, details?: Record<string, unknown>) }
+export class MainbrellaError extends Error { code: string; status: number; idempotencyKey?: string; retryAfterSeconds?: number; cursor?: number; previewId?: string; contextId?: string; cleanupUnconfirmed?: boolean; readiness?: RestoreReadiness; constructor(code: string, status?: number, details?: Record<string, unknown>) }
 export class Mainbrella {
   constructor(options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number });
   baseUrl: string; timeoutMs: number;
@@ -70,6 +70,12 @@ export class Mainbrella {
   capabilities(): Promise<Capabilities>; list(): Promise<AccountState>; connect(value: ContainerIdentity): Sandbox;
   create(options?: CreateOptions): Promise<Sandbox>;
 }
+export interface NativeFileWatch {
+  execution: Execution;
+  idempotencyKey: string;
+  events(options?: { signal?: AbortSignal }): AsyncGenerator<{ type: 'ready'; path: string; recursive: boolean } | { type: 'rename' | 'change'; filename: string | null }>;
+  close(): Promise<{ closed: true }>;
+}
 export class Sandbox implements ContainerIdentity {
   internet?: boolean;
   constructor(client: Mainbrella, value: ContainerIdentity);
@@ -80,6 +86,7 @@ export class Sandbox implements ContainerIdentity {
     uploadDirectory(local: string, remote: string, options?: { signal?: AbortSignal }): Promise<{ entries: number }>;
     downloadDirectory(remote: string, local: string, options?: { signal?: AbortSignal }): Promise<{ entries: number }>;
     watch(path: string, options?: { intervalMs?: number; recursive?: boolean; signal?: AbortSignal }): AsyncGenerator<{ type: 'create' | 'modify' | 'remove'; entry: FileEntry }>;
+    watchNative(path: string, options?: { recursive?: boolean; timeoutMs?: number; idempotencyKey?: string }): Promise<NativeFileWatch>;
     list(path: string, options?: { limit?: number; offset?: number }): Promise<DirectoryPage>;
     stat(path: string, options?: { followSymlinks?: boolean }): Promise<FileEntry>;
     mkdir(path: string, options?: { recursive?: boolean; mode?: string }): Promise<{ path: string; ok: true }>;
@@ -101,6 +108,9 @@ export class Sandbox implements ContainerIdentity {
   networkPolicy?: NetworkPolicy; secretBindings?: string[];
   workspaceId?:string;
   readiness?:RestoreReadiness;
+  launch?:RestoreLaunch;
+  configureStartup(launch: RestoreLaunch | null): Promise<ContainerIdentity & { launch: RestoreLaunch | null }>;
+  waitUntilReady(options?: { waitTimeoutMs?: number; pollIntervalMs?: number }): Promise<RestoreReadiness>;
   saveWorkspace(name:string,options?:{stop?:boolean;launch?:RestoreLaunch;idempotencyKey?:string}):Promise<Workspace>;
   exportWorkspace():Promise<Uint8Array>;
   webhook: { get(): Promise<{webhook: WebhookConfig | null}>; configure(url: string, options?: {replayFromCursor?: number}): Promise<{webhook: WebhookConfig; signingSecret: string}>;

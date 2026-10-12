@@ -3,7 +3,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
-from mainbrella import Mainbrella, MainbrellaError, verify_webhook_signature
+from mainbrella import Mainbrella, MainbrellaError, verify_webhook_signature, __version__
 
 KEY = "mb_" + "a" * 64
 GENERATION = "2026-10-05T12:00:00.000Z"
@@ -221,7 +221,7 @@ class ClientTests(unittest.TestCase):
                     query = parse_qs(url.query)
                     body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                     owner.assertEqual(self.headers["Authorization"], "Bearer " + KEY)
-                    owner.assertEqual(self.headers["User-Agent"], "mainbrella-python/0.1.0")
+                    owner.assertEqual(self.headers["User-Agent"], "mainbrella-python/" + __version__)
                     result = None
                     content_type = "application/json"
                     if url.path == "/capabilities":

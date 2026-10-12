@@ -17,6 +17,7 @@ import { forwardServiceRequest } from "../shared/service-proxy";
 import { serviceForPath } from "../shared/service-routing";
 import { handleContainersRequest } from "./containers";
 import { handleContainerLifecycleRequest } from './container-lifecycle';
+import { handleContainerStartupRequest } from './container-startup';
 import { handleSecretsRequest } from './secrets';
 import { handlePoolsRequest } from './pools';
 import { handleSSHRequest } from "./ssh";
@@ -66,6 +67,7 @@ async function handleLegacyRequest(
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);
   if (url.pathname.startsWith('/private-services/')) return handlePrivateServicesRequest(request, env);
   if(url.pathname==='/containers/export')return handleWorkspaceExportRequest(request,env);
+  if (url.pathname === '/containers/startup') return handleContainerStartupRequest(request, env);
   if (['/containers/stop', '/containers/resume', '/containers/fork'].includes(url.pathname)) return handleContainerLifecycleRequest(request, env);
   if(url.pathname==='/workspaces' || url.pathname.startsWith('/workspaces/'))return handleWorkspacesRequest(request,env);
 

@@ -8,6 +8,7 @@ const endpointMethods: Record<string, string[]> = {
   '/pools': ['get', 'post'], '/pools/{poolId}': ['get', 'patch', 'delete'], '/pools/{poolId}/acquire': ['post'],
   '/secrets': ['get', 'post'], '/secrets/{secretId}': ['put', 'delete'],
   '/containers/stop': ['post'], '/containers/resume': ['post'], '/containers/fork': ['post'],
+  '/containers/startup': ['patch'],
   '/domains/config': ['get'], '/domains': ['get'], '/domains/search': ['post'], '/domains/quote': ['post'],
   '/domains/checkout': ['post'], '/domains/order': ['get'], '/domains/detail': ['get'], '/domains/settings': ['patch'],
   '/domains/verification': ['post'], '/domains/records': ['post', 'delete'], '/domains/auth-code': ['post'],

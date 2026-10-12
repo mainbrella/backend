@@ -4,12 +4,17 @@ import os
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
+from ._file_watch import watch_native
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 10_000
 
 
 class FileTransfers:
+    def watch_native(self, path, recursive=True, timeout_ms=900000, idempotency_key=None):
+        self._remote(path)
+        return watch_native(self.sandbox, path, recursive, timeout_ms, idempotency_key)
+
     def _error(self, code):
         from . import MainbrellaError
         return MainbrellaError(code)

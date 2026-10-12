@@ -102,6 +102,25 @@ source generation's saved recipe, including after its original workspace has
 been deleted. Explicit Save without `launch` still creates a filesystem-only
 workspace.
 
+An ordinary running ad hoc source can now register the same recipe using
+`PATCH /containers/startup` with `{id, createdAt, launch}`. This requires
+`persistence.startupConfiguration`. It only changes generation-scoped metadata:
+it neither starts nor restarts the source. Both the account lock and runtime
+generation check fence stale requests. Repeating an identical update is safe;
+`launch:null` clears future automatic startup. `GET /containers` exposes the
+canonical recipe as `launch`; stopped descriptors retain its summary. Existing
+saved workspaces remain immutable. Production containers retain their separate
+`startupCommand` supervisor and reject this setting. An older container runtime
+returns `workspace_launch_unavailable`, so deploy the runtime before the API.
+
+The JavaScript SDK exposes `sandbox.configureStartup(recipe)` and
+`sandbox.waitUntilReady()`; Python exposes `configure_startup(recipe)` and
+`wait_until_ready()`. The readiness helpers only poll the exact generation and
+reject stopped/replaced machines, missing readiness, launch failures and timeout.
+Their successful return establishes the saved initial HTTP check, not continuous
+uptime. These additions have local regression coverage; they require deployment
+and SDK publication before customer use, followed by production qualification.
+
 The command is a single line of at most 4096 characters. `cwd` is an absolute
 directory without dot segments, defaults to `/workspace`, and is limited to
 1024 characters. Readiness uses an application port from 1024–65535 and a local

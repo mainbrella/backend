@@ -6,7 +6,8 @@ import { captureWorkspace } from './workspaces.js';
 import { validWorkspaceId } from './workspace-contract.js';
 import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
 import { EGRESS_CA_ENV } from './security-runtime.js';
-import { normalizeRestoreLaunch, restoreEntrypoint, publicRestoreReadiness, observeRestoreReadiness } from './restore-launch.js';
+import { normalizeRestoreLaunch, restoreEntrypoint, publicRestoreReadiness, observeRestoreReadiness, MAX_WORKSPACE_REQUEST_BYTES } from './restore-launch.js';
+import { readFileBytes } from './file-contract.js';
 export const BUILDER_LIMITS = PLAN_LIMITS.builder;
 
 const METADATA_KEY = "builderMachine";
@@ -45,6 +46,23 @@ export class UserContainerController {
     if(path==='/workspaces/snapshot-v1') return captureWorkspace(this,request);
     return this.serialized(async () => {
       const url = new URL(request.url);
+      if (path === '/workspaces/startup-v1') {
+        if (request.method !== 'PATCH') return this.respond({ error: 'method_not_allowed' }, 405);
+        let body;
+        try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await readFileBytes(request.body, MAX_WORKSPACE_REQUEST_BYTES, request.signal))); }
+        catch { return this.respond({ error: 'invalid_request' }, 400); }
+        const launch = body?.launch === null ? null : normalizeRestoreLaunch(body?.launch);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['createdAt', 'launch'].includes(key)) ||
+            !Object.hasOwn(body, 'launch') || body.launch !== null && !launch) return this.respond({ error: 'invalid_launch_recipe' }, 400);
+        const metadata = await this.ctx.storage.get(METADATA_KEY);
+        if (!this.container.running || !metadata || new Date(metadata.createdAt).toISOString() !== body.createdAt || this.now() >= this.deadline(metadata)) return this.respond({ error: 'container_not_running' }, 409);
+        if (!validEntitlement(requestEntitlement(request, this.now()), this.now()) || !await this.hasPaidAccess()) return this.respond({ error: 'subscription_required' }, 402);
+        if (metadata.lifecycle === 'production') return this.respond({ error: 'invalid_lifecycle' }, 400);
+        if (launch) metadata.restoreLaunch = launch;
+        else delete metadata.restoreLaunch;
+        await this.ctx.storage.put(METADATA_KEY, metadata);
+        return this.respond({ createdAt: body.createdAt, launch });
+      }
       if (url.pathname === '/features' && request.method === 'GET') return this.respond({ protocol: 1, internetControl: true, workspaceSnapshots:1, workspaceRestoreLaunch: 1, production: 1, ...(this.security?.available() ? { egressPolicies: 1 } : {}) });
       if(path==='/workspaces/restore-preflight-v1' && request.method==='POST') {
         let body;try{body=await request.json();}catch{return this.respond({error:'invalid_request'},400);}

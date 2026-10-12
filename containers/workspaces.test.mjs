@@ -245,6 +245,65 @@ test('retained workspace receipts are stored in bounded chunks and legacy indexe
 
 const lifecycle = (f, action, source, key=crypto.randomUUID(), extra={}) => f.call(`/containers/${action}`, 'POST', {id:source.id,createdAt:source.createdAt,...extra}, {'Idempotency-Key':key});
 
+test('ordinary source startup configuration survives stop/resume/fork without launching the source or changing old saves',async()=>{
+  const f=fixture('pro'),source=(await f.start()).data.containers[0],machine=f.machineFor('owner',source.id);
+  machine.runtime.files={app:'prepared'};
+  const before=(await f.save(source)).data;
+  const recipe={command:'node server.mjs',cwd:'/workspace/app',readiness:{port:3000}};
+  const configure=(value,identity=source,user='owner')=>f.call('/containers/startup','PATCH',{id:identity.id,createdAt:identity.createdAt,launch:value},{},user);
+  const configured=await configure(recipe);assert.equal(configured.status,200);
+  assert.deepEqual(configured.data,{id:source.id,createdAt:source.createdAt,launch:{...recipe,readiness:{port:3000,path:'/',timeoutMs:30000}}});
+  assert.deepEqual((await configure(recipe)).data,configured.data);
+  assert.equal(machine.runtime.starts.length,1);assert.equal(machine.runtime.execCalls.length,1);
+  assert.deepEqual((await f.call('/containers')).data.containers[0].launch,configured.data.launch);
+  assert.equal((await f.call('/workspaces?workspaceId='+before.id)).data.launch,undefined);
+  assert.equal((await f.save(source)).data.launch,undefined);
+  assert.equal((await configure(recipe,source,'other')).status,409);
+  assert.equal((await configure(recipe,{...source,createdAt:new Date(f.now()+1).toISOString()})).status,409);
+  assert.equal((await configure({...recipe,readiness:{port:22}})).status,400);
+  assert.equal((await f.call('/containers/startup','PATCH',{id:source.id,createdAt:source.createdAt})).status,400);
+  const clone=f.machineFor('owner','c1');clone.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  const forked=await lifecycle(f,'fork',source,'configured-fork');assert.equal(forked.status,200);
+  await Promise.all([...clone.controller.restoreReadinessTasks.values()]);
+  assert.equal(clone.runtime.starts[0].entrypoint[4],recipe.command);
+  assert.equal((await lifecycle(f,'fork',source,'configured-fork')).data.creation.readiness.status,'ready');
+  assert.equal(clone.runtime.starts.length,1);
+  const stopped=await lifecycle(f,'stop',source,'configured-stop');assert.equal(stopped.status,200);
+  assert.deepEqual(stopped.data.containers.find(c=>c.id===source.id).launch,configured.data.launch);
+  assert.equal((await configure(recipe)).status,409);
+  machine.runtime.getTcpPort=()=>({fetch:async()=>new Response('healthy')});
+  const resumed=await lifecycle(f,'resume',source,'configured-resume');assert.equal(resumed.status,200);
+  await Promise.all([...machine.controller.restoreReadinessTasks.values()]);
+  assert.equal(machine.runtime.starts.at(-1).entrypoint[4],recipe.command);assert.equal(machine.runtime.starts.length,2);
+  const current=resumed.data.containers.find(c=>c.id===source.id);
+  assert.equal((await configure(null,source)).status,409);
+  assert.equal((await configure(null,current)).data.launch,null);
+  assert.equal((await f.call('/containers')).data.containers.find(c=>c.id===source.id).launch,undefined);
+  assert.equal(machine.runtime.running,true);assert.equal(machine.runtime.starts.length,2);
+  assert.equal((await f.call('/containers')).data.containers.find(c=>c.id===source.id).readiness.status,'ready');
+  await f.call(`/containers?id=${forked.data.creation.containerId}`,'DELETE');
+  const noStartup=await lifecycle(f,'fork',current,'cleared-fork');assert.equal(noStartup.status,200);
+  assert.deepEqual(clone.runtime.starts.at(-1).entrypoint,['sleep','infinity']);
+});
+
+test('startup configuration rejects stale runtime generations, incompatible runtime, and production supervision',async()=>{
+  const f=fixture(),source=(await f.start()).data.containers[0],machine=f.machineFor('owner',source.id);
+  const body={id:source.id,createdAt:source.createdAt,launch:{command:'npm start',readiness:{port:3000}}};
+  const delegate=machine.fetch;
+  machine.fetch=async request=>new URL(request.url).pathname==='/workspaces/startup-v1'?new Response('Not found',{status:404}):delegate(request);
+  assert.equal((await f.call('/containers/startup','PATCH',body)).data.error,'workspace_launch_unavailable');
+  machine.fetch=async request=>{
+    if(new URL(request.url).pathname==='/workspaces/startup-v1'){
+      const metadata=await machine.ctx.storage.get('builderMachine');metadata.createdAt++;await machine.ctx.storage.put('builderMachine',metadata);
+    }
+    return delegate(request);
+  };
+  assert.equal((await f.call('/containers/startup','PATCH',body)).status,409);
+  assert.equal((await machine.ctx.storage.get('builderMachine')).restoreLaunch,undefined);
+  const production=fixture('usage'),service=(await production.start({lifecycle:'production',startupCommand:'node server.mjs'})).data.containers[0];
+  assert.equal((await production.call('/containers/startup','PATCH',{...body,id:service.id,createdAt:service.createdAt})).data.error,'invalid_lifecycle');
+});
+
 test('stop, resume and fork inherit the launch recipe after the original workspace is deleted',async()=>{
   const f=fixture(),source=(await f.start()).data.containers[0];
   const saved=(await f.save(source,{stop:true,launch:{command:'npm start',readiness:{port:3000}}})).data;

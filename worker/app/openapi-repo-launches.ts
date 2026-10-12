@@ -7,6 +7,7 @@ const launch = z.object({ id: z.uuid(), phase: z.enum(['allocating', 'cloning', 
   options: launchOptionsSchema, repository, container: z.object({ id: z.string(), createdAt: z.iso.datetime(), expiresAt: z.iso.datetime() }).nullable(),
   executions: z.object({ cloning: z.uuid().optional(), setup: z.uuid().optional(), starting: z.uuid().optional() }),
   attempts: z.record(z.string(), z.number()), createdAt: z.number(), shellReadyAt: z.number().nullable(), previewReadyAt: z.number().nullable(), error: z.string().nullable(), importParts: z.number().int().optional(),
+  restoreLaunchConfigured: z.boolean().optional().describe('Whether a replayable foreground command was registered for future filesystem Stop/Resume and Fork.'),
 }).openapi('RepositoryLaunch');
 const headers = z.object({ Origin: z.string().optional() });
 const params = z.object({ launchId: z.uuid() });
@@ -19,7 +20,7 @@ export function registerRepoLaunchRoutes(api: OpenAPIApi, handler: LegacyHandler
   }, handler);
   register(api, 'post', '/repo-launches', {
     operationId: 'createRepositoryLaunch', tags: ['Containers'], summary: 'Create an owner-scoped repository launch', security: containerSecurity,
-    description: 'Requires paid or trial access and a stable Idempotency-Key. Validates and resolves the public GitHub repository before recording a launch, using an optional server-side GitHub token. No allocation until advance. Small is the default size; cwd is relative to /workspace/repo. Setup and start commands execute only after explicit launch. Supply startCommand and port together. Each recipient creates a private launch in their own account. Repeated keys return the original launch; conflicting options return 409. Server-side repo_launch_request_failed logs include the failing stage and dependency diagnostics; HTTP errors contain only the error code.',
+    description: 'Requires paid or trial access and a stable Idempotency-Key. Validates and resolves the public GitHub repository before recording a launch, using an optional server-side GitHub token. No allocation until advance. Small is the default size; cwd is relative to /workspace/repo. Setup and start commands execute only after explicit launch. Supply startCommand and port together. Optional readinessPath is a local HTTP path, defaults to /, and must return 2xx; redirects are not followed or accepted. Use /health or another 2xx endpoint for an app whose root redirects. Each recipient creates a private launch in their own account. Repeated keys return the original launch; conflicting options return 409. Server-side repo_launch_request_failed logs include the failing stage and dependency diagnostics; HTTP errors contain only the error code.',
     request: { headers: headers.extend({ 'Idempotency-Key': z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }), ...requestBody(launchOptionsSchema) },
     responses: { 200: jsonResponse(launch), 201: jsonResponse(launch), ...errors(400, 401, 402, 403, 409, 413, 429, 503) },
   }, handler);
@@ -30,7 +31,7 @@ export function registerRepoLaunchRoutes(api: OpenAPIApi, handler: LegacyHandler
   }, handler);
   register(api, 'post', '/repo-launches/{launchId}/advance', {
     operationId: 'advanceRepositoryLaunch', tags: ['Containers'], summary: 'Advance or reconcile an owned repository launch', security: containerSecurity,
-    description: 'Repeat to resume after refresh. Uses a durable lease and stable allocation/execution keys, pins the exact container generation, and inspects retained executions before advancing. Never silently reruns failed setup. After idempotency retention expires, uncertain operations require manual reconciliation. Creates the main tmux shell in /workspace/repo before setup. Preview servers run in a separate tmux session under existing idle/hard deadlines; readiness checks HTTP for up to three minutes. Failed setup/start preserves the shell. Active plan required to advance; GET remains available without paid access.',
+    description: 'Repeat to resume after refresh. Uses a durable lease and stable allocation/execution keys, pins the exact container generation, and inspects retained executions before advancing. Never silently reruns failed setup. After idempotency retention expires, uncertain operations require manual reconciliation. Creates the main tmux shell in /workspace/repo before setup. Preview servers run in a separate tmux session under existing idle/hard deadlines; readiness checks HTTP for up to three minutes. Before starting, deployments with workspace persistence register a replayable foreground start command, cwd and port for future Stop/Resume and Fork. restoreLaunchConfigured is false for deployments without persistence or commands that cannot fit the single-line 4096-character recipe contract. Restores start a fresh process; setup is not rerun and RAM is not copied. Failed setup/start preserves the shell. Active plan required to advance; GET remains available without paid access.',
     request: { params, headers }, responses: { 200: jsonResponse(launch), ...errors(400, 401, 402, 403, 404, 409, 429, 503) },
   }, handler);
 }

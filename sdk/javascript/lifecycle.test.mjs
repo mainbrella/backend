@@ -5,6 +5,54 @@ const { Mainbrella } = await import(process.env.MAINBRELLA_SDK_MODULE || './inde
 const apiKey = `mb_${'a'.repeat(64)}`, createdAt = '2026-10-11T00:00:00.000Z';
 const resumedAt = '2026-10-11T00:01:00.000Z';
 const secretId = 'sec_d688d42a-25ef-4c13-9b28-21a0fde6e163';
+test('startup configuration changes only the exact source settings and readiness waits for application HTTP state', async () => {
+  const calls = []; let status = 'starting', polls = 0, replacement = false;
+  const recipe = { command: 'node server.mjs', cwd: '/workspace', readiness: { port: 3000, path: '/', timeoutMs: 30000 } };
+  const client = new Mainbrella({ apiKey, fetch: async (url, options) => {
+    calls.push({ path: url.pathname, method: options.method, body: options.body && JSON.parse(options.body) });
+    if (url.pathname === '/capabilities') return Response.json({ persistence: { startupConfiguration: true } });
+    if (options.method === 'PATCH') return Response.json(JSON.parse(options.body));
+    if (status === 'starting' && ++polls > 1) status = 'ready';
+    return Response.json({ containers: [{ id: 'small', createdAt: replacement ? resumedAt : createdAt, status: 'running', readiness: status === 'none' ? undefined : {
+      status, port: 3000, path: '/', logPath: '/tmp/startup.log', ...(status === 'failed' ? { error: 'launch_exited', logTail: 'module missing' } : {}),
+    } }] });
+  } });
+  const source = client.connect({ id: 'small', createdAt });
+  await source.configureStartup(recipe); assert.deepEqual(source.launch, recipe);
+  assert.deepEqual(calls.at(-1), { path: '/containers/startup', method: 'PATCH', body: { id: 'small', createdAt, launch: recipe } });
+  await source.configureStartup(null); assert.equal(source.launch, undefined);
+  assert.equal((await source.waitUntilReady({ pollIntervalMs: 1 })).status, 'ready'); assert.equal(polls, 2);
+  status = 'failed'; await assert.rejects(source.waitUntilReady(), error => error.code === 'launch_exited' && error.readiness.logTail === 'module missing');
+  status = 'none'; await assert.rejects(source.waitUntilReady(), { code: 'readiness_unavailable' });
+  status = 'ready'; replacement = true; await assert.rejects(source.waitUntilReady(), { code: 'container_not_running' });
+  assert.ok(calls.every(call => call.method === 'GET' || call.method === 'PATCH'));
+  await assert.rejects(source.waitUntilReady({ waitTimeoutMs: Infinity }), { code: 'invalid_readiness_options' });
+});
+test('startup settings fail closed on older deployments and readiness timeout does not relaunch', async () => {
+  const calls = [];
+  const client = new Mainbrella({ apiKey, fetch: async (url, options) => {
+    calls.push(options.method);
+    return Response.json(url.pathname === '/capabilities' ? { persistence: { restoreLaunch: true } } : { containers: [{ id: 'small', createdAt, status: 'running', readiness: { status: 'starting' } }] });
+  } });
+  const source = client.connect({ id: 'small', createdAt });
+  await assert.rejects(source.configureStartup(null), { code: 'workspace_launch_unavailable' });
+  await assert.rejects(source.waitUntilReady({ waitTimeoutMs: 5, pollIntervalMs: 1 }), { code: 'readiness_wait_timeout' });
+  assert.ok(calls.every(method => method === 'GET'));
+});
+test('readiness deadline bounds an in-flight poll and preserves prior diagnostics', async () => {
+  const readiness = { status: 'starting', port: 3000, path: '/', logPath: '/tmp/startup.log' };
+  let calls = 0;
+  const client = new Mainbrella({ apiKey, fetch: async (_url, options) => {
+    if (++calls === 1) return Response.json({ containers: [{ id: 'small', createdAt, status: 'running', readiness }] });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    if (options.signal.aborted) throw new Error('aborted');
+    throw new Error('transport');
+  } });
+  const sandbox = client.connect({ id: 'small', createdAt });
+  await assert.rejects(sandbox.waitUntilReady({ waitTimeoutMs: 15, pollIntervalMs: 1 }), error => error.code === 'readiness_wait_timeout' && error.readiness.logPath === readiness.logPath);
+  const offline = new Mainbrella({ apiKey, fetch: async () => { throw new Error('offline'); } }).connect({ id: 'small', createdAt });
+  await assert.rejects(offline.waitUntilReady({ waitTimeoutMs: 100 }), { code: 'transport_unavailable' });
+});
 test('stop preserves identity, resume replaces generation, and uncertain fork retries retain one key', async () => {
   const calls = []; let forkAttempts = 0;
   const client = new Mainbrella({ apiKey, fetch: async (url, options) => {

@@ -338,7 +338,7 @@ export class ContainerAccountController {
         computeUnitHours: prepaid ? (prepaid.monthly - prepaid.monthlyInference) / 3600000 : Math.max(0, committedUnitMs - reservedUnitMs) / 3600000,
         reservedComputeUnitHours: (prepaid ? prepaid.monthReserved - prepaid.inferenceReserved - prepaid.storageReserved : reservedUnitMs) / 3600000,
         availableComputeUnitHours: state.entitlement.plan === 'usage' ? this.billing.remainingUnitMs(state) / 3600000 : Math.max(0, limits.maxComputeUnitHours - committedUnitMs / 3600000),
-        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers: [...containers, ...this.lifecycle.descriptors(state)].map(({ _restoreLaunch, ...container }) => container), imageCatalog: state.imageCatalog ?? [] };
+        concurrentComputeUnits: state.slots.reduce((sum, id) => sum + machineSize(state.leases[id]?.size ?? state.production?.[id]?.selection.size ?? 'lite').computeUnits, 0) }, containers: [...containers, ...this.lifecycle.descriptors(state)].map(({ _restoreLaunch, ...container }) => ({ ...container, ...(_restoreLaunch ? { launch: _restoreLaunch } : {}) })), imageCatalog: state.imageCatalog ?? [] };
   }
   prepaidEntitlement(state) {
     const active = Boolean(state.wallet && !state.wallet.fundingRevoked && this.billing.wallet.metrics(state).balance > 0);
@@ -432,6 +432,7 @@ export class ContainerAccountController {
     }
     if (url.pathname === '/workspaces') return this.workspaces.fetch(request);
     if (url.pathname === '/containers/stop') return this.lifecycle.stop(request);
+    if (url.pathname === '/containers/startup') return this.lifecycle.configureStartup(request);
     const lifecycleAction = url.pathname === '/containers/resume' ? 'resume' : url.pathname === '/containers/fork' ? 'fork' : null;
     if (lifecycleAction && request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
     const billingRequest = url.pathname === '/billing';

@@ -16,8 +16,9 @@ from ._pool import SandboxPool
 from ._images import Images
 from ._managed_pools import ManagedPools
 from ._desktop import DesktopTools, DesktopSession
+from ._version import __version__
 
-_USER_AGENT = "mainbrella-python/0.1.0"
+_USER_AGENT = "mainbrella-python/" + __version__
 
 
 def verify_webhook_signature(body, signature, signing_secret, now=None, tolerance=300):
@@ -228,6 +229,7 @@ class Mainbrella:
                     sandbox.network_policy = selected.get('networkPolicy')
                     sandbox.secret_bindings = selected.get('secretBindings')
                     sandbox.readiness = selected.get('readiness')
+                    sandbox.launch = selected.get('launch')
                     return sandbox
             except MainbrellaError as error:
                 if error.code in ('network_policy_unavailable', 'persistence_unavailable', 'workspace_launch_unavailable', 'secrets_unavailable') or error.status not in (0, 503) or error.status == 0 and error.code != "transport_unavailable":
@@ -647,6 +649,51 @@ class Sandbox:
         except MainbrellaError as error:
             error.idempotency_key = key
             raise
+
+    def configure_startup(self, launch):
+        if launch is not None and not isinstance(launch, dict):
+            raise MainbrellaError('invalid_launch_recipe')
+        if self.client.capabilities().get('persistence', {}).get('startupConfiguration') is not True:
+            raise MainbrellaError('workspace_launch_unavailable', 503)
+        result = self.client.request('/containers/startup', 'PATCH', {'id': self.id, 'createdAt': self.created_at, 'launch': launch})
+        if ('launch' not in result or result.get('id') != self.id or result.get('createdAt') != self.created_at
+                or (result.get('launch') is not None if launch is None else not isinstance(result.get('launch'), dict))):
+            raise MainbrellaError('startup_configuration_unconfirmed')
+        self.launch = result['launch']
+        return result
+
+    def wait_until_ready(self, wait_timeout=120, poll_interval=1):
+        if (type(wait_timeout) not in (int, float) or not 0 < wait_timeout < float('inf')
+                or type(poll_interval) not in (int, float) or not 0 < poll_interval < float('inf')):
+            raise MainbrellaError('invalid_readiness_options')
+        deadline = time.monotonic() + wait_timeout
+        while time.monotonic() < deadline:
+            try:
+                result = self.client.request('/containers', timeout=min(self.client.timeout, max(0.001, deadline - time.monotonic())))
+            except MainbrellaError:
+                if time.monotonic() >= deadline:
+                    break
+                raise
+            if time.monotonic() >= deadline:
+                break
+            current = next((c for c in result.get('containers', []) if c.get('id') == self.id
+                            and c.get('createdAt') == self.created_at and c.get('status') == 'running'), None)
+            if current is None:
+                raise MainbrellaError('container_not_running', 409)
+            self.readiness = current.get('readiness')
+            status = self.readiness.get('status') if isinstance(self.readiness, dict) else None
+            if status == 'ready':
+                return self.readiness
+            if status == 'failed':
+                error = MainbrellaError(self.readiness.get('error', 'restore_launch_failed'), 409)
+                error.readiness = self.readiness
+                raise error
+            if status != 'starting':
+                raise MainbrellaError('readiness_unavailable', 409)
+            time.sleep(max(0, min(poll_interval, deadline - time.monotonic())))
+        error = MainbrellaError('readiness_wait_timeout')
+        error.readiness = getattr(self, 'readiness', None)
+        raise error
 
     def save_workspace(self, name, stop=False, idempotency_key=None, launch=None):
         key = idempotency_key or str(uuid.uuid4())

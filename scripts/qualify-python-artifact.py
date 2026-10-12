@@ -1,5 +1,6 @@
 """Check built Python archives without importing the working tree."""
 import email
+import ast
 import pathlib
 import sys
 import tarfile
@@ -28,6 +29,11 @@ for artifact in pathlib.Path(output).iterdir():
     metadata = email.message_from_bytes(files[metadata_name])
     assert metadata["Name"] == "mainbrella"
     assert metadata["Version"] == version
+    version_name = next(name for name in files if name.endswith('mainbrella/_version.py'))
+    assignments = ast.parse(files[version_name]).body
+    identity = next(node.value for node in assignments if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == '__version__' for target in node.targets))
+    assert ast.literal_eval(identity) == version, 'Python runtime and distribution versions differ'
     assert metadata["License-Expression"] == "GPL-3.0-only"
     assert not metadata.get_all("Requires-Dist")
     assert any(name.endswith("/LICENSE") and data == license_bytes for name, data in files.items())

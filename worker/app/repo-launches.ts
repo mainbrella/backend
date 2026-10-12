@@ -2,6 +2,7 @@ import { authCorsHeaders, authJson } from './auth-core';
 import { containerUser } from './container-auth';
 import { handleContainersRequest } from './containers';
 import { handleExecutionRequest } from './executions';
+import { handleContainerStartupRequest } from './container-startup';
 import { downloadGitPack, githubUserToken, resolveUserRepository, suggestedPrivateSetup } from '../lib/github-import';
 import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 import { resolveEntitlement } from '../lib/entitlements';
@@ -10,7 +11,7 @@ import { validIdempotencyKey } from '../../containers/container-account-core.js'
 import { readCommandBody } from '../../containers/command-contract.js';
 import { validExecutionId } from '../../containers/execution-contract.js';
 import { cloneCommand, launchErrorDetails, launchOptionsSchema, LaunchError, previewCommand, repoCwd, repoName, repoRef,
-  importPartPath, privateCloneCommand, resolveRepository, setupCommand, type LaunchOptions, type ResolvedRepo } from '../lib/repo-launch';
+  importPartPath, privateCloneCommand, resolveRepository, setupCommand, repositoryRestoreLaunch, type LaunchOptions, type ResolvedRepo } from '../lib/repo-launch';
 
 export type LaunchPhase = 'allocating' | 'cloning' | 'setup' | 'starting' | 'ready' | 'failed' | 'stopped';
 export interface RepoLaunch {
@@ -20,6 +21,7 @@ export interface RepoLaunch {
   attempts: Partial<Record<LaunchPhase, number>>;
   createdAt: number; shellReadyAt: number | null; previewReadyAt: number | null; error: string | null;
   importParts?: number;
+  restoreLaunchConfigured?: boolean;
 }
 interface Row { state_json: string; request_json: string }
 interface LaunchDiagnosticContext {
@@ -103,6 +105,17 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
     const identity = new URLSearchParams({ id: state.container!.id, createdAt: state.container!.createdAt });
     let executionId = state.executions[phase];
     if (!executionId) {
+      if (phase === 'starting' && state.restoreLaunchConfigured === undefined) {
+        const launch = repositoryRestoreLaunch(state.options);
+        if (launch && env.WORKSPACE_PERSISTENCE_ENABLED === 'true') {
+          diagnostics.stage = 'configure_restore_startup';
+          await responseData(await handleContainerStartupRequest(internalRequest(request, '/containers/startup', 'PATCH', {
+            id: state.container!.id, createdAt: state.container!.createdAt, launch,
+          }), env));
+          state.restoreLaunchConfigured = true;
+        } else state.restoreLaunchConfigured = false;
+        await save();
+      }
       // Execution keys expire after an hour. An uncertain start is only replayed
       // within that retention window, with the same key AND command body.
       if (state.attempts[phase] && Date.now() - state.attempts[phase]! > 55 * 60_000) {

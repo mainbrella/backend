@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
+import { readFile } from 'node:fs/promises';
 const { createMcpServer, serveMcp } = await import(process.env.MAINBRELLA_SDK_MCP || './mcp.mjs');
 const { Mainbrella } = await import(process.env.MAINBRELLA_SDK_MODULE || './index.js');
 
@@ -28,6 +29,12 @@ test('MCP negotiates initialization, publishes schemas, rejects invalid tools an
   assert.equal(calls, 0);
   assert.equal((await handle(rpc(4, 'unknown'))).error.code, -32601);
   assert.equal((await handle([init])).error.code, -32600);
+});
+
+test('MCP reports the installed package version during initialization', async () => {
+  const metadata = JSON.parse(await readFile(new URL('./package.json', process.env.MAINBRELLA_SDK_MCP || import.meta.url), 'utf8'));
+  const handle = createMcpServer(new Mainbrella({ apiKey: key, fetch: () => assert.fail('Initialization must not contact the API') }));
+  assert.deepEqual((await handle(init)).result.serverInfo, { name: 'mainbrella', version: metadata.version });
 });
 
 test('MCP binds operations to generations, preserves reconciliation keys and sanitizes transport failures', async () => {

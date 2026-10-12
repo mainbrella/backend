@@ -2,7 +2,7 @@
 
 Published as `@mainbrella/sdk` 0.1.0 on npm. Requires Node 22+; no runtime dependencies.
 
-The source additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+This checkout prepares the unreleased 0.2.0 SDK. The source additions below need artifact and deployed qualification before publication, and matching API/runtime capabilities. They are not included in the published 0.1.0 artifacts. Install a locally qualified 0.2.0 tarball to use this checkout's features; the registry command below installs 0.1.0.
 
 ```sh
 npm install @mainbrella/sdk@0.1.0
@@ -183,7 +183,7 @@ The CLI also supports generation-bound `file list/stat/mkdir/remove/move/chmod`.
 
 ## Saved workspaces
 
-Check `(await client.capabilities()).persistence.snapshots` before using save/restore. Save explicitly; ordinary stop discards changes.
+Check `(await client.capabilities()).persistence.snapshots` before using save/restore. `kill()` and `delete()` discard changes; `stop()` preserves the filesystem when filesystem lifecycle support is enabled.
 
 ```js
 const saveKey = crypto.randomUUID(); // Persist this key and body before sending.
@@ -200,10 +200,27 @@ The unreleased SDK also accepts a launch recipe when the deployment advertises
 `persistence.restoreLaunch`. Pass `launch: {command: 'node server.mjs',
 cwd: '/workspace/app', readiness: {port: 3000, path: '/health'}}` to
 `saveWorkspace`. Each restore starts that command once in the new generation.
-Restore returns when the machine is running; inspect its `readiness` field and
-refresh the exact container through `client.list()` until it is `ready` or
-`failed`. Failure diagnostics include a log path and bounded tail. A successful
+Restore returns when the machine is running; `await restored.waitUntilReady()`
+then waits for its application HTTP check. Failure diagnostics are available on
+`error.readiness` and include a log path and bounded tail. A successful
 health check does not imply that the original process memory was restored.
+
+For an already running app, configure the command once before Stop/Resume or Fork:
+
+```js
+await sandbox.configureStartup({ command: 'node server.mjs', cwd: '/workspace/app',
+  readiness: { port: 3000, path: '/health' } });
+const branch = await sandbox.fork({ idempotencyKey: crypto.randomUUID() });
+await branch.waitUntilReady({ waitTimeoutMs: 90_000 });
+```
+
+`configureStartup` requires `persistence.startupConfiguration`; it saves settings
+for future restores without running or restarting the current app. Pass `null`
+to clear them. The source recipe follows Stop/Resume and Fork. Explicit
+`saveWorkspace` still requires its own `launch` option. Readiness polling fences
+the exact generation, never launches a process, and rejects stopped/replaced
+machines, failed launches, missing readiness and timeout. A previously successful
+readiness check is not continuous health monitoring.
 
 ## Run a public GitHub repository
 

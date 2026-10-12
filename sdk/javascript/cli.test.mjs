@@ -11,6 +11,16 @@ function output() { const result = { stdout: '', stderr: '' }; return { result,
   stdout: { write(text) { result.stdout += text; } }, stderr: { write(text) { result.stderr += text; } } }; }
 const identity = ['--id', 'small', '--created-at', createdAt];
 
+test('CLI reports the installed distribution version without an API key', async () => {
+  const metadata = JSON.parse(await readFile(new URL('./package.json', process.env.MAINBRELLA_SDK_CLI || import.meta.url), 'utf8'));
+  const out = output();
+  assert.equal(await main(['--version'], { ...out, env: {} }), 0);
+  assert.equal(out.result.stdout, `${metadata.version}\n`);
+  const help = output();
+  assert.equal(await main(['--help'], { ...help, env: {} }), 0);
+  assert.ok(help.result.stdout.startsWith(`Mainbrella ${metadata.version} `));
+});
+
 test('CLI validates explicit identities/options and never emits credentials or raw transport errors', async () => {
   let calls = 0;
   const fetch = async () => { calls++; throw new Error(key + ' private stack'); };

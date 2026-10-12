@@ -19,7 +19,7 @@ export const containerStatusSchema = z.object({ plan: planSchema.nullable(), act
   lifecycle: z.enum(['ad_hoc', 'production']).optional(), stopReason: z.string().optional(), internet: z.boolean().optional().describe("Immutable outbound internet selection; true for legacy generations."), createdAt: z.string(), expiresAt: z.string(), imageId: z.string().optional(), imageName: z.string().optional(), catalogId: z.string().optional(),
   networkPolicy: networkPolicySchema.optional(), secretBindings: secretBindingsSchema.optional(),
   workspaceId: z.string().uuid().optional(), persistenceExpiresAt: z.number().int().optional().describe('Saved filesystem expiry in Unix milliseconds for a stopped machine.'), imageDigest: z.string().optional().describe('Deployment-resolved immutable image reference for this generation; absent on older generations.'),
-  readiness: restoreReadinessSchema.optional(),
+  readiness: restoreReadinessSchema.optional(), launch: restoreLaunchSchema.optional().describe('Recipe for future filesystem restores. Setting this does not launch or restart the current application.'),
 })), billing: usageBillingSchema.nullable(), limits: limitsSchema, usage: z.object({ month: z.string(), starts: z.number(), computeUnitHours: z.number(), reservedComputeUnitHours: z.number(), availableComputeUnitHours: z.number(), concurrentComputeUnits: z.number() }), sizes: z.array(machineSizeSchema), imageCatalog: z.array(z.object({ id: z.string(), name: z.string() })) }).openapi("ContainerStatus");
 const selection = z.object({ id: z.string().optional(), createdAt: z.string().optional() });
 const status = containerStatusSchema;

@@ -175,6 +175,7 @@ export class Sandbox {
     if (value.networkPolicy) this.networkPolicy = value.networkPolicy;
     if (value.secretBindings) this.secretBindings = value.secretBindings;
     if (value.readiness) this.readiness = value.readiness;
+    if (value.launch) this.launch = value.launch;
     for (const name of ['imageDigest', 'catalogId', 'imageId', 'instance','workspaceId']) if (typeof value[name] === 'string') this[name] = value[name];
     this.files = {
       ...fileTransfers(this, MainbrellaError),
@@ -246,6 +247,33 @@ export class Sandbox {
     this.desktop = desktopTools(this, MainbrellaError);
   }
   path(path, extra = {}) { return `${path}?${new URLSearchParams({ ...extra, id: this.id, createdAt: this.createdAt })}`; }
+  async configureStartup(launch) {
+    if (launch !== null && (!launch || typeof launch !== 'object' || Array.isArray(launch))) throw new MainbrellaError('invalid_launch_recipe');
+    if ((await this.client.capabilities())?.persistence?.startupConfiguration !== true) throw new MainbrellaError('workspace_launch_unavailable', 503);
+    const result = await this.client.request('/containers/startup', { method: 'PATCH', body: { ...identity(this), launch } });
+    if (result.id !== this.id || result.createdAt !== this.createdAt || (launch === null ? result.launch !== null : !result.launch?.command)) throw new MainbrellaError('startup_configuration_unconfirmed');
+    this.launch = result.launch ?? undefined;
+    return result;
+  }
+  async waitUntilReady({ waitTimeoutMs = 120_000, pollIntervalMs = 1000 } = {}) {
+    if (!Number.isSafeInteger(waitTimeoutMs) || waitTimeoutMs < 1 || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) throw new MainbrellaError('invalid_readiness_options');
+    const deadline = Date.now() + waitTimeoutMs;
+    while (Date.now() < deadline) {
+      let result;
+      try { result = await this.client.request('/containers', { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) }); }
+      catch (error) { if (Date.now() >= deadline) break; throw error; }
+      if (Date.now() >= deadline) break;
+      const current = result.containers?.find(c => c.id === this.id && c.createdAt === this.createdAt && c.status === 'running');
+      if (!current) throw new MainbrellaError('container_not_running', 409);
+      this.readiness = current.readiness;
+      if (this.readiness?.status === 'ready') return this.readiness;
+      if (this.readiness?.status === 'failed') throw new MainbrellaError(this.readiness.error ?? 'restore_launch_failed', 409, { readiness: this.readiness });
+      if (this.readiness?.status !== 'starting') throw new MainbrellaError('readiness_unavailable', 409);
+      const remaining = deadline - Date.now();
+      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
+    }
+    throw new MainbrellaError('readiness_wait_timeout', 0, { readiness: this.readiness });
+  }
   async saveWorkspace(name,{stop=false,launch,idempotencyKey=crypto.randomUUID()}={}) {
     if(typeof name!=='string'||!name.length||name.length>80||typeof stop!=='boolean'||!/^[A-Za-z0-9_-]{1,128}$/.test(idempotencyKey))throw new MainbrellaError('invalid_workspace_options');
     try{return await this.client.request('/workspaces',{method:'POST',body:{id:this.id,createdAt:this.createdAt,name,stop,...(launch===undefined?{}:{launch})},headers:{'Idempotency-Key':idempotencyKey}});}

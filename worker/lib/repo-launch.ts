@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeRestoreLaunch } from '../../containers/restore-launch.js';
 
 export const repoName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/)
   .refine(value => !['.', '..'].includes(value.split('/')[1]));
@@ -10,6 +11,7 @@ export const launchOptionsSchema = z.object({
   repo: repoName, ref: repoRef.optional(), catalogId: z.enum(['node', 'python', 'rust', 'go', 'devops']).optional(),
   size: z.enum(['lite', 'small', 'medium', 'large', 'xl']).default('small'), cwd: repoCwd.default('.'),
   setupCommand: command.optional(), startCommand: command.optional(), port: z.number().int().min(1024).max(65535).optional(),
+  readinessPath: z.string().min(1).max(1024).refine(path => Boolean(normalizeRestoreLaunch({ command: 'true', readiness: { port: 1024, path } }))).optional(),
 }).strict().refine(value => Boolean(value.startCommand) === (value.port !== undefined), { message: 'startCommand and port must be supplied together' });
 export type LaunchOptions = z.infer<typeof launchOptionsSchema>;
 export interface ResolvedRepo { repo: string; ref: string; commit: string; suggestedCatalogId: string; manifests: string[]; private?: boolean }
@@ -147,6 +149,11 @@ tmux new-session -d -s main -c /workspace/repo /bin/bash
 printf 'Repository ready at %s\\n' ${shellQuote(repo.commit)}`;
 }
 const directory = (options: LaunchOptions) => `/workspace/repo${options.cwd === '.' ? '' : '/' + options.cwd}`;
+export function repositoryRestoreLaunch(options: LaunchOptions) {
+  if (!options.startCommand || options.port === undefined) return null;
+  return normalizeRestoreLaunch({ command: `exec /bin/bash -lc ${shellQuote(options.startCommand)}`, cwd: directory(options),
+    readiness: { port: options.port, path: options.readinessPath ?? '/', timeoutMs: 60_000 } });
+}
 const inDirectory = (options: LaunchOptions) => `set -eu\ncd ${shellQuote(directory(options))}\ncase "$(pwd -P)" in /workspace/repo|/workspace/repo/*) ;; *) exit 1 ;; esac\n`;
 export function setupCommand(options: LaunchOptions): string {
   return inDirectory(options) + `exec /bin/bash -lc ${shellQuote(options.setupCommand!)}`;
@@ -155,7 +162,8 @@ export function previewCommand(options: LaunchOptions): string {
   const server = `/bin/bash -lc ${shellQuote(options.startCommand!)} >> /workspace/.mainbrella-preview.log 2>&1`;
   return inDirectory(options) + `tmux new-session -d -s mainbrella-preview -c ${shellQuote(directory(options))} /bin/bash -lc ${shellQuote(server)}
 for attempt in $(seq 1 60); do
-  if curl --fail --silent --output /dev/null --max-time 2 http://127.0.0.1:${options.port}/; then
+  status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 ${shellQuote(`http://127.0.0.1:${options.port}${options.readinessPath ?? '/'}`)}) || status=000
+  if [ "$status" -ge 200 ] && [ "$status" -lt 300 ]; then
     printf 'Preview ready on port ${options.port}\\n'
     exit 0
   fi

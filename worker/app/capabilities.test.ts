@@ -19,6 +19,7 @@ test('public discovery needs no bindings, matches runtime limits and parses agai
   assert.equal(value.execution.maxRetainedEvents, MAX_RETAINED_EXECUTION_EVENTS);
   assert.equal(value.execution.retentionScope, 'container-slot');
   assert.equal(value.persistence.restoreLaunch, false);
+  assert.equal(value.persistence.startupConfiguration, false);
   assert.equal(value.files.maxFileBytes, MAX_FILE_BYTES);
   assert.equal(value.images.customBuilds, false);
   assert.equal(value.images.crossBuildCache, false);
@@ -68,7 +69,13 @@ test('restore launch discovery requires all saved-workspace deployment bindings'
   const env = { USER_CONTAINER: {}, CONTAINER_ACCOUNT: {}, WORKSPACE_PERSISTENCE_ENABLED: 'true' } as unknown as Env;
   const read = async () => capabilitiesSchema.parse(await (await handleRequest(new Request('https://api.mainbrella.com/capabilities'), env)).json());
   assert.equal((await read()).persistence.restoreLaunch, true);
+  assert.equal((await read()).persistence.startupConfiguration, true);
+  assert.equal((await read()).persistence.memory, false);
   env.WORKSPACE_PERSISTENCE_ENABLED = 'false'; assert.equal((await read()).persistence.restoreLaunch, false);
+  assert.equal((await read()).persistence.startupConfiguration, false);
   env.WORKSPACE_PERSISTENCE_ENABLED = 'true'; delete (env as Partial<Env>).CONTAINER_ACCOUNT;
   assert.equal((await read()).persistence.restoreLaunch, false);
+  assert.equal((await read()).persistence.startupConfiguration, false);
+  env.CONTAINER_ACCOUNT = {} as Env['CONTAINER_ACCOUNT']; delete (env as Partial<Env>).USER_CONTAINER;
+  assert.equal((await read()).persistence.startupConfiguration, false);
 });

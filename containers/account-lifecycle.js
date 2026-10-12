@@ -1,7 +1,8 @@
-import { requestEntitlement, validEntitlement, machineSize } from './plan-policy.js';
+import { requestEntitlement, validEntitlement, machineSize, entitlementHeaders } from './plan-policy.js';
 import { validContainerId, validIdempotencyKey } from './container-account-core.js';
 import { validGeneration, WORKSPACE_OPERATION_RETENTION_MS } from './workspace-contract.js';
 import { readFileBytes } from './file-contract.js';
+import { normalizeRestoreLaunch, MAX_WORKSPACE_REQUEST_BYTES } from './restore-launch.js';
 
 // Stop is a durable capture followed by a fenced compute stop. The suspended
 // identity is committed before contacting the runtime and survives lost replies.
@@ -18,8 +19,36 @@ export class AccountLifecycle {
         workspaceId: record.workspaceId, persistenceExpiresAt: record.persistenceExpiresAt,
         imageDigest: record.imageDigest, ...(record.imageId ? { imageId: record.imageId } : {}),
         ...(record.imageName ? { imageName: record.imageName } : {}),
+        ...(record.launch ? { launch: record.launch } : {}),
         stopReason: record.persistenceExpiresAt <= this.account.now() ? 'workspace_expired' : 'requested' };
     });
+  }
+  async configureStartup(request) {
+    const a = this.account, userId = request.headers.get('x-mainbrella-user');
+    if (request.method !== 'PATCH') return a.respond({ error: 'method_not_allowed' }, 405);
+    if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return a.respond({ error: 'not_authenticated' }, 401);
+    let body;
+    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await readFileBytes(request.body, MAX_WORKSPACE_REQUEST_BYTES, request.signal))); }
+    catch { return a.respond({ error: 'invalid_request' }, 400); }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['id', 'createdAt', 'launch'].includes(key)) ||
+        !validContainerId(body.id) || !validGeneration(body.createdAt) || !Object.hasOwn(body, 'launch')) return a.respond({ error: 'invalid_request' }, 400);
+    const launch = body.launch === null ? null : normalizeRestoreLaunch(body.launch);
+    if (body.launch !== null && !launch) return a.respond({ error: 'invalid_launch_recipe' }, 400);
+    try { return await a.serialized(async () => {
+      const entitlement = requestEntitlement(request, a.now());
+      const state = await a.initialize(userId, entitlement);
+      const containers = await a.reconcile(state, entitlement, false);
+      if (!validEntitlement(state.entitlement, a.now())) return a.respond({ error: 'subscription_required' }, 402);
+      const source = containers.find(c => c.id === body.id && c.createdAt === body.createdAt && c.status === 'running');
+      if (!source) return a.respond({ error: 'container_not_running' }, 409);
+      if (source.lifecycle === 'production') return a.respond({ error: 'invalid_lifecycle' }, 400);
+      const response = await a.machineFor(userId, body.id).fetch(new Request('https://internal/workspaces/startup-v1', {
+        method: 'PATCH', headers: { ...entitlementHeaders(state.entitlement), 'Content-Type': 'application/json' }, body: JSON.stringify({ createdAt: body.createdAt, launch }),
+      }));
+      if (response.status === 404) return a.respond({ error: 'workspace_launch_unavailable' }, 503);
+      const result = await response.json();
+      return a.respond(response.ok ? { id: body.id, ...result } : result, response.status);
+    }); } catch { return a.respond({ error: 'containers_unavailable' }, 503); }
   }
   async discard(state, id) {
     const suspended = state.suspended?.[id];
@@ -81,7 +110,7 @@ export class AccountLifecycle {
       state.suspended ??= {};
       state.suspended[body.id] = { createdAt: source.createdAt, name: source.name, size: source.size, internet: source.internet,
         imageDigest: source.imageDigest, imageId: source.imageId, imageName: source.imageName,
-        workspaceId: capture.record.id, persistenceExpiresAt: capture.record.expiresAt, selection };
+        workspaceId: capture.record.id, persistenceExpiresAt: capture.record.expiresAt, selection, ...(capture.record.launch ? { launch: capture.record.launch } : {}) };
       delete state.production?.[body.id];
       const intent = { fingerprint, completed: false, expiresAt: a.now() + WORKSPACE_OPERATION_RETENTION_MS };
       state.nextCreationExpiry = Math.min(state.nextCreationExpiry ?? Infinity, intent.expiresAt);

@@ -7,6 +7,21 @@ GPL v3 license in both distributions; changing the SDK license is a separate
 owner decision. The backend SDK directories own their code, declarations and
 README instructions; the web SDK references are generated copies.
 
+The current source candidate is **0.2.0, unpublished**. It includes the subsequent
+filesystem lifecycle and restore readiness helpers, Python contexts, managed pools,
+image tooling, transfers, desktop helpers and MCP server. Optional features remain
+subject to the deployed `/capabilities` response. The CLI and MCP handshake read
+their installed package metadata; Python exports `__version__`, uses it for its
+HTTP User-Agent, and checks it against both archives and installed distribution
+metadata during qualification. These identities must never claim the published
+0.1.0 version for different source bytes.
+
+Build a fresh candidate only after the working tree stops changing, then run the
+deployed gate against those exact archives. Publication, registry verification,
+and updating the staging workflow's pinned tag/hash remain release steps. The
+existing workflow deliberately stays pinned to the historical 0.1.0 archive and
+refuses to publish that already released version.
+
 ## Local qualification
 
 From the backend checkout, with Node 22+, Python 3.10+, GNU timeout/stat/find/sed on PATH and npm dependencies installed. Linux CI supplies these utilities; on macOS prepend the Homebrew coreutils/findutils/gnu-sed gnubin directories:

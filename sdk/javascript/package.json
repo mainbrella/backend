@@ -1,6 +1,6 @@
 {
   "name": "@mainbrella/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Mainbrella container automation client",
   "license": "GPL-3.0-only",
@@ -21,6 +21,8 @@
     "index.js",
     "network-policy.js",
     "file-transfers.js",
+    "file-watch.js",
+    "watch-guest.js",
     "pool.js",
     "managed-pools.js",
     "desktop.js",

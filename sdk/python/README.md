@@ -2,7 +2,7 @@
 
 Published on PyPI as `mainbrella` 0.1.0. Python 3.10+; standard-library runtime.
 
-The source additions documented below are available in this source checkout and need a new SDK release and matching API/runtime deployment. They are not included in the already-published 0.1.0 artifacts.
+This checkout prepares the unreleased 0.2.0 SDK. The source additions below need artifact and deployed qualification before publication, and matching API/runtime capabilities. They are not included in the published 0.1.0 artifacts. Install a locally qualified 0.2.0 wheel to use this checkout's features; the registry command below installs 0.1.0.
 
 ```sh
 pip install mainbrella==0.1.0
@@ -146,7 +146,7 @@ offline = client.create(internet=False, idempotency_key="offline-workspace")
 
 ## Saved workspaces
 
-Check `client.capabilities()["persistence"]["snapshots"]` before save/restore. Ordinary stop discards changes; save explicitly.
+Check `client.capabilities()["persistence"]["snapshots"]` before save/restore. `kill()` and `delete()` discard changes; `stop()` preserves the filesystem when filesystem lifecycle support is enabled.
 
 ```python
 import uuid
@@ -164,10 +164,27 @@ The unreleased SDK accepts `launch={"command": "node server.mjs",
 "cwd": "/workspace/app", "readiness": {"port": 3000, "path": "/health"}}`
 in `save_workspace` when the deployment advertises `persistence.restoreLaunch`.
 Each restore starts that command once. Restore returns when the machine is
-running; inspect `restored.readiness` and refresh the exact container through
-`client.list()` until its readiness status is `ready` or `failed`. Failure
-diagnostics include a log path and bounded tail. This starts a new process;
+running; call `restored.wait_until_ready()` to wait for the application HTTP
+check. Failure diagnostics on `error.readiness` include a log path and bounded
+tail. This starts a new process;
 it does not preserve the original application's memory.
+
+For an already running app, configure the command once before Stop/Resume or Fork:
+
+```python
+sandbox.configure_startup({"command": "node server.mjs", "cwd": "/workspace/app",
+                           "readiness": {"port": 3000, "path": "/health"}})
+branch = sandbox.fork(idempotency_key=str(uuid.uuid4()))
+branch.wait_until_ready(wait_timeout=90)
+```
+
+`configure_startup` requires `persistence.startupConfiguration`. It records settings
+for future restores without running or restarting the current app; pass `None`
+to clear them. Stop/Resume and Fork inherit the settings, while explicit
+`save_workspace` still requires its own `launch` argument. Readiness polling
+checks the exact generation, never launches a process, and rejects replaced or
+stopped machines, failed launches, missing readiness and timeout. A successful
+initial check does not provide continuous health monitoring.
 
 ## Unreleased stateful Python interpreter
 

@@ -135,6 +135,7 @@ try {
     // Install the sdist with known build tools, then forbid runtime dependency downloads.
     if (artifact.endsWith('.tar.gz')) run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', 'setuptools>=77.0.3', 'wheel']);
     run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-index', '--no-deps', '--no-build-isolation', join(output, artifact)]);
+    run(executable, ['-I', '-c', 'import importlib.metadata, mainbrella; assert mainbrella.__version__ == importlib.metadata.version("mainbrella")']);
     run(executable, ['-I', '-m', 'unittest', 'discover', '-s', tests, '-p', 'test_*.py']);
     run(process.execPath, ['--import', join(root, 'node_modules/tsx/dist/loader.mjs'), '--test', runtimeTest],
       { cwd: root, env: { MAINBRELLA_SDK_MODULE: installedModule, MAINBRELLA_SDK_PYTHON: executable } });
