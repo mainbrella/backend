@@ -169,6 +169,12 @@ tracked container config directly: it contains build recipes rather than the
 assembled immutable map. Gateway publication follows container success, admin
 and marketing publication follow gateway success, and API publication follows
 both service publications.
+Container deployment logs each manifest fetch and lease acquisition. A busy lease
+is retried every 10 seconds for up to 13 minutes, allowing an abandoned 12-minute
+lease to expire. Wrangler prepares each published image on Cloudflare before
+publication; a `Preparing <image>` message is remote preparation, not a local
+Docker build. The script reports elapsed time every 30 seconds while Wrangler
+runs. GitHub manifest requests have a 60-second timeout each.
 Keep the current images and generations; publication does not upgrade running
 guest images. Do not mass-stop customer containers as a deployment step.
 
@@ -249,8 +255,10 @@ an arbitrary legacy deployment.
 
 - **Preflight or container deployment fails:** the combined command does not
   publish API. Confirm the actual container deployment version after an ambiguous
-  timeout. The deploy script attempts lease release in `finally`; if the client
-  died, wait for the recorded lease's expiry before retrying. Never delete another
+  timeout. Ctrl-C and SIGTERM stop Wrangler and its child processes before the
+  deploy script releases its lease in `finally`. If the client was force-killed
+  or lease release failed, retrying waits for the recorded lease's expiry and
+  reports progress. Never delete another
   deployment's lease or replace the image map with an empty snapshot.
 - **API publication fails after containers succeed:** keep admission closed and
   confirm the active API version. Prefer retrying the same API release after
