@@ -439,6 +439,10 @@ test("marketing email schema describes admin access, input, and acceptance", asy
   assert.equal(body.properties.subj.maxLength, 998);
   assert.equal(body.properties.from.maxLength, 512);
   assert.equal(body.properties.message.maxLength, 100_000);
+  assert.equal(body.properties.fancy.type, "boolean");
+  assert.equal(body.properties.fancy.default, true);
+  assert.match(operation.description, /fancy=false/);
+  assert.match(operation.description, /white background with a normal font/);
   for (const status of [202, 400, 401, 403, 405, 409, 413, 429, 502, 503]) assert.ok(operation.responses[status]);
   assert.ok(operation.responses[202].content["application/json"].schema.properties.messageId);
   assert.match(operation.description, /marketing_email_unsubscribed/);

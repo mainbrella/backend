@@ -159,6 +159,7 @@ await fetch(`${API_ORIGIN}/api/send-marketing-email`, {
     subj: 'New idea',
     from: 'Bob Smith <bob.smith@mainbrella.com>',
     message: 'hey everyone just want to say hi',
+    fancy: true,
   }),
 });
 ```
@@ -169,7 +170,11 @@ domain must be onboarded to Email Sending. Bare sender addresses and display
 names are supported. Edit the HTML header and footer in
 `worker/templates/marketing-email.ts`; the plain-text message is escaped and
 inserted between them, preserving line breaks. A plain-text email part is also
-sent. Subjects are limited to 998 characters, messages to 100,000 characters,
+sent. The optional `fancy` boolean defaults to `true`, preserving the branded
+template. Set `fancy: false` to send only the supplied message on a white background
+with a normal font, without a visible subject heading, header, footer, buttons,
+or images. The plain-text part also contains only the message in this mode.
+Subjects are limited to 998 characters, messages to 100,000 characters,
 and JSON request bodies to 1 MiB.
 
 The endpoint awaits acceptance and returns HTTP 202 with
@@ -178,7 +183,7 @@ Invalid requests return 400, oversized bodies 413, provider rate/quota limits
 429, send failures 502, and an unavailable binding 503. No automatic retries
 are performed. Local Wrangler development simulates sending.
 
-Both email parts include `https://mainbrella.com/unsubscribe?email=<encoded address>`.
+With `fancy: true`, both email parts include `https://mainbrella.com/unsubscribe?email=<encoded address>`.
 The public page automatically calls `POST /api/unsubscribe` with `{ "email": "..." }`,
 without signing in. It sets matching users' `marketing_email_unsubscribed` flag
 and permanently saves the address opt-out, including recipients without accounts.

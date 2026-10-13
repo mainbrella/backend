@@ -139,6 +139,32 @@ test("marketing email sends named sender, text and escaped HTML inside the templ
   assert.equal(f.emails[1].from, "bob.smith@mainbrella.com");
 });
 
+test("explicit fancy=true preserves the default marketing template", async t => {
+  const f = await fixture(t);
+  assert.equal((await f.call()).status, 202);
+  assert.equal((await f.call({ body: JSON.stringify({ ...input, fancy: true }) })).status, 202);
+  assert.deepEqual(f.emails[1], f.emails[0]);
+  await sendMarketingEmail(f.env, input);
+  assert.deepEqual(f.emails[2], f.emails[0]);
+});
+
+test("fancy=false sends only the escaped message with plain HTML styling", async t => {
+  const f = await fixture(t);
+  const email = { ...input, fancy: false, message: "Hi <everyone> & 'friends'\r\n\r\n<img src=\"https://example.com/image.png\">\rKeep dry!\nBye" };
+  const response = await f.call({ body: JSON.stringify(email) });
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { ok: true, messageId: "marketing-123" });
+  const sent = f.emails[0];
+  assert.equal(sent.subject, email.subj);
+  assert.equal(sent.text, email.message);
+  assert.match(sent.html!, /background-color:#ffffff;color:#000000;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;font-weight:400/);
+  const body = /<body[^>]*>\n([\s\S]*?)\n<\/body>/.exec(sent.html!)![1];
+  assert.equal(body, "Hi &lt;everyone&gt; &amp; &#39;friends&#39;<br>\n<br>\n&lt;img src=&quot;https://example.com/image.png&quot;&gt;<br>\nKeep dry!<br>\nBye");
+  assert.doesNotMatch(sent.html!, /<(?:img|table|h1|header|footer|a)\b|Unsubscribe|Start building|mainbrella|#0d1014|#10151b/);
+  await sendMarketingEmail(f.env, email);
+  assert.deepEqual(f.emails[1], sent);
+});
+
 test("sender parsing allows a single named mailbox and rejects header injection or multiple senders", () => {
   assert.deepEqual(marketingSender('"Smith, Bob" <bob@mainbrella.com>'), { email: "bob@mainbrella.com", name: "Smith, Bob" });
   assert.deepEqual(marketingSender("José Smith <jose@mainbrella.com>"), { email: "jose@mainbrella.com", name: "José Smith" });
@@ -153,7 +179,8 @@ test("invalid marketing email bodies and fields are rejected without sending", a
   const invalid = [null, [], {}, { ...input, extra: true }, { ...input, to: [input.to] }, { ...input, to: "not-an-email" },
     { ...input, subj: "" }, { ...input, subj: "   " }, { ...input, subj: "x".repeat(999) }, { ...input, subj: "Hi\r\nBcc: injected@example.com" },
     { ...input, from: "Bob <bad>" }, { ...input, from: "Bob <bob@example.com>\n" }, { ...input, from: "x".repeat(513) },
-    { ...input, message: "" }, { ...input, message: " \n\t " }, { ...input, message: 123 }, { ...input, message: "x".repeat(100_001) }];
+    { ...input, message: "" }, { ...input, message: " \n\t " }, { ...input, message: 123 }, { ...input, message: "x".repeat(100_001) },
+    ...[null, "false", "true", 0, 1, {}, []].map(fancy => ({ ...input, fancy }))];
   for (const body of ["{", "", ...invalid.map(value => JSON.stringify(value))]) {
     const response = await f.call({ body });
     assert.equal(response.status, 400, body.slice(0, 100));
@@ -255,6 +282,7 @@ test("unregistered recipients stay unsubscribed after account creation", async t
   assert.equal((await f.call()).status, 409);
   f.sqlite.prepare("INSERT INTO users (id, email) VALUES (?, 'foo@bar.com')").run(crypto.randomUUID());
   assert.equal((await f.call()).status, 409);
+  assert.equal((await f.call({ body: JSON.stringify({ ...input, fancy: false }) })).status, 409);
   assert.equal(f.emails.length, 0);
 });
 

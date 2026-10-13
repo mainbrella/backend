@@ -17,9 +17,22 @@ export function marketingUnsubscribeUrl(email: string): string {
   return `https://mainbrella.com/unsubscribe?email=${encodeURIComponent(email)}`;
 }
 
-export function renderMarketingEmail(subject: string, message: string, recipientEmail: string): string {
+export function renderMarketingEmail(subject: string, message: string, recipientEmail: string, fancy = true): string {
   const title = escapeHtml(subject);
   const content = escapeHtml(message).replace(/\r\n?|\n/g, "<br>\n");
+  if (!fancy) return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>${title}</title>
+</head>
+<body style="margin:0;padding:16px;background-color:#ffffff;color:#000000;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;font-weight:400;overflow-wrap:anywhere;word-break:break-word;-webkit-text-size-adjust:100%;">
+${content}
+</body>
+</html>`;
   const unsubscribeUrl = escapeHtml(marketingUnsubscribeUrl(recipientEmail));
   const footerColumns = footerGroups.map(([heading, links]) => `
     <td width="50%" valign="top" style="width:50%;padding-right:12px;">
