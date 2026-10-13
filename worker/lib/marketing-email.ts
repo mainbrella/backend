@@ -28,7 +28,7 @@ export async function sendMarketingEmail(env: Pick<Env, "DB" | "MARKETING_EMAIL"
     from: sender,
     to: email.to,
     subject: email.subj,
-    text: email.fancy === false ? email.message : `${email.message}\n\nUnsubscribe: ${marketingUnsubscribeUrl(email.to)}`,
+    text: `${email.message}\n\nUnsubscribe: ${marketingUnsubscribeUrl(email.to)}`,
     html: renderMarketingEmail(email.subj, email.message, email.to, email.fancy),
   });
 }

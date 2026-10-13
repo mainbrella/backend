@@ -171,9 +171,9 @@ names are supported. Edit the HTML header and footer in
 `worker/templates/marketing-email.ts`; the plain-text message is escaped and
 inserted between them, preserving line breaks. A plain-text email part is also
 sent. The optional `fancy` boolean defaults to `true`, preserving the branded
-template. Set `fancy: false` to send only the supplied message on a white background
-with a normal font, without a visible subject heading, header, footer, buttons,
-or images. The plain-text part also contains only the message in this mode.
+template. Set `fancy: false` to send the supplied message on a white background
+with a normal font and a simple unsubscribe link below the message, without a
+visible subject heading, branded header or footer, buttons, or images.
 Subjects are limited to 998 characters, messages to 100,000 characters,
 and JSON request bodies to 1 MiB.
 
@@ -183,7 +183,7 @@ Invalid requests return 400, oversized bodies 413, provider rate/quota limits
 429, send failures 502, and an unavailable binding 503. No automatic retries
 are performed. Local Wrangler development simulates sending.
 
-With `fancy: true`, both email parts include `https://mainbrella.com/unsubscribe?email=<encoded address>`.
+In both modes, both email parts include `https://mainbrella.com/unsubscribe?email=<encoded address>`.
 The public page automatically calls `POST /api/unsubscribe` with `{ "email": "..." }`,
 without signing in. It sets matching users' `marketing_email_unsubscribed` flag
 and permanently saves the address opt-out, including recipients without accounts.

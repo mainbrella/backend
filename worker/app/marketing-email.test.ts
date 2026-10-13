@@ -148,7 +148,7 @@ test("explicit fancy=true preserves the default marketing template", async t => 
   assert.deepEqual(f.emails[2], f.emails[0]);
 });
 
-test("fancy=false sends only the escaped message with plain HTML styling", async t => {
+test("fancy=false sends the escaped message with plain HTML styling and an unsubscribe footer", async t => {
   const f = await fixture(t);
   const email = { ...input, fancy: false, message: "Hi <everyone> & 'friends'\r\n\r\n<img src=\"https://example.com/image.png\">\rKeep dry!\nBye" };
   const response = await f.call({ body: JSON.stringify(email) });
@@ -156,11 +156,14 @@ test("fancy=false sends only the escaped message with plain HTML styling", async
   assert.deepEqual(await response.json(), { ok: true, messageId: "marketing-123" });
   const sent = f.emails[0];
   assert.equal(sent.subject, email.subj);
-  assert.equal(sent.text, email.message);
+  const unsubscribeUrl = `https://mainbrella.com/unsubscribe?email=${encodeURIComponent(email.to)}`;
+  assert.equal(sent.text, `${email.message}\n\nUnsubscribe: ${unsubscribeUrl}`);
   assert.match(sent.html!, /background-color:#ffffff;color:#000000;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;font-weight:400/);
-  const body = /<body[^>]*>\n([\s\S]*?)\n<\/body>/.exec(sent.html!)![1];
+  const body = /<body[^>]*>\n([\s\S]*?)\n<p/.exec(sent.html!)![1];
   assert.equal(body, "Hi &lt;everyone&gt; &amp; &#39;friends&#39;<br>\n<br>\n&lt;img src=&quot;https://example.com/image.png&quot;&gt;<br>\nKeep dry!<br>\nBye");
-  assert.doesNotMatch(sent.html!, /<(?:img|table|h1|header|footer|a)\b|Unsubscribe|Start building|mainbrella|#0d1014|#10151b/);
+  assert.match(sent.html!, /<p[^>]*><a href="https:\/\/mainbrella\.com\/unsubscribe\?email=foo%40bar.com"[^>]*>Unsubscribe<\/a><\/p>\n<\/body>/);
+  assert.equal((sent.html!.match(/<a\b/g) ?? []).length, 1);
+  assert.doesNotMatch(sent.html!, /<(?:img|table|h1|header|footer)\b|Start building|Cloud computers for AI agents|#0d1014|#10151b/);
   await sendMarketingEmail(f.env, email);
   assert.deepEqual(f.emails[1], sent);
 });
@@ -249,11 +252,14 @@ test("marketing email failures return safe errors and never report acceptance", 
 test("unsubscribe links encode the recipient, including plus addresses", async t => {
   const f = await fixture(t);
   const to = "Member+news@example.com";
-  const response = await f.call({ body: JSON.stringify({ ...input, to }) });
-  assert.equal(response.status, 202);
   const url = `https://mainbrella.com/unsubscribe?email=${encodeURIComponent(to)}`;
-  assert.ok(f.emails[0].html!.includes(`href="${url}"`));
-  assert.ok(f.emails[0].text!.endsWith(`Unsubscribe: ${url}`));
+  for (const fancy of [true, false]) {
+    const response = await f.call({ body: JSON.stringify({ ...input, to, fancy }) });
+    assert.equal(response.status, 202);
+    const sent = f.emails.at(-1)!;
+    assert.ok(sent.html!.includes(`href="${url}"`));
+    assert.ok(sent.text!.endsWith(`Unsubscribe: ${url}`));
+  }
   assert.equal(new URL(url).searchParams.get("email"), to);
 });
 

@@ -24,7 +24,7 @@ export const marketingEmailSchema = z.object({
   from: z.string().min(1).max(512).refine(value => marketingSender(value) !== null,
     "Expected one email address, optionally with a display name."),
   message: z.string().min(1).max(100_000).refine(value => Boolean(value.trim())),
-  fancy: z.boolean().default(true).describe("Use the branded template; false sends only the message on a white background with a normal font."),
+  fancy: z.boolean().default(true).describe("Use the branded template; false sends the message on a white background with a normal font and a simple unsubscribe footer."),
 }).strict();
 
 export type MarketingEmail = z.input<typeof marketingEmailSchema>;

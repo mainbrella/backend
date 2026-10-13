@@ -20,6 +20,7 @@ export function marketingUnsubscribeUrl(email: string): string {
 export function renderMarketingEmail(subject: string, message: string, recipientEmail: string, fancy = true): string {
   const title = escapeHtml(subject);
   const content = escapeHtml(message).replace(/\r\n?|\n/g, "<br>\n");
+  const unsubscribeUrl = escapeHtml(marketingUnsubscribeUrl(recipientEmail));
   if (!fancy) return `<!doctype html>
 <html lang="en">
 <head>
@@ -31,9 +32,9 @@ export function renderMarketingEmail(subject: string, message: string, recipient
 </head>
 <body style="margin:0;padding:16px;background-color:#ffffff;color:#000000;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;font-weight:400;overflow-wrap:anywhere;word-break:break-word;-webkit-text-size-adjust:100%;">
 ${content}
+<p style="margin:24px 0 0;font-size:12px;line-height:1.5;"><a href="${unsubscribeUrl}" style="color:#595959;text-decoration:underline;">Unsubscribe</a></p>
 </body>
 </html>`;
-  const unsubscribeUrl = escapeHtml(marketingUnsubscribeUrl(recipientEmail));
   const footerColumns = footerGroups.map(([heading, links]) => `
     <td width="50%" valign="top" style="width:50%;padding-right:12px;">
       <h2 style="margin:0 0 8px;color:#f2f4f7;font-size:13px;line-height:24px;font-weight:700;">${heading}</h2>
