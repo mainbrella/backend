@@ -24,6 +24,28 @@ function adminUserArgs() {
   return [Date.now() / 1000, Date.now()] as const;
 }
 
+async function readUserBalances(env: Env, users: { id: string }[]) {
+  const balances: { id: string; balanceCents: number | null }[] = new Array(users.length);
+  let next = 0;
+  // Keep reads bounded without waiting for a whole batch before starting another.
+  await Promise.all(Array.from({ length: Math.min(5, users.length) }, async () => {
+    while (next < users.length) {
+      const index = next++;
+      const { id } = users[index];
+      try {
+        const { balance } = await accountBillingRequest(env, id, "/billing/balance");
+        if (balance.currency !== "usd" || !Number.isSafeInteger(balance.balanceCents)) {
+          throw new Error("invalid_balance");
+        }
+        balances[index] = { id, balanceCents: balance.balanceCents };
+      } catch {
+        balances[index] = { id, balanceCents: null };
+      }
+    }
+  }));
+  return balances;
+}
+
 type TableDefinition = {
   id: string;
   label: string;
@@ -93,26 +115,30 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       return authJson({ users: rows.results || [], total: count?.total || 0, offset, limit }, 200, corsHeaders);
     }
     if (url.pathname === "/admin/users") {
+      const includeBalances = url.searchParams.get("includeBalances") ?? "true";
+      if (includeBalances !== "true" && includeBalances !== "false") {
+        return authJson({ error: "invalid_request" }, 400, corsHeaders);
+      }
       const rows = await env.DB.prepare(
         `${adminUserQuery} ORDER BY users.created_at DESC, users.id DESC`,
       ).bind(...adminUserArgs()).all<AdminUser>();
-      const users: (AdminUser & { balanceCents: number | null })[] = [];
-      // Limit concurrent account reads and preserve the database's newest-first order.
-      const results = rows.results || [];
-      for (let offset = 0; offset < results.length; offset += 5) {
-        users.push(...await Promise.all(results.slice(offset, offset + 5).map(async row => {
-          try {
-            const { balance } = await accountBillingRequest(env, row.id, "/billing/balance");
-            if (balance.currency !== "usd" || !Number.isSafeInteger(balance.balanceCents)) {
-              throw new Error("invalid_balance");
-            }
-            return { ...row, balanceCents: balance.balanceCents };
-          } catch {
-            return { ...row, balanceCents: null };
-          }
-        })));
+      const users = rows.results || [];
+      if (includeBalances === "false") return authJson({ users }, 200, corsHeaders);
+      // Retain the previous response for older clients during deployment.
+      const balances = await readUserBalances(env, users);
+      return authJson({ users: users.map((user, index) => ({ ...user, balanceCents: balances[index].balanceCents })) }, 200, corsHeaders);
+    }
+    if (url.pathname === "/admin/user-balances") {
+      const ids = url.searchParams.getAll("id");
+      if ([...url.searchParams.keys()].some(key => key !== "id") || ids.length < 1 || ids.length > 30
+        || ids.some(id => !id || id.length > 200) || new Set(ids).size !== ids.length) {
+        return authJson({ error: "invalid_request" }, 400, corsHeaders);
       }
-      return authJson({ users }, 200, corsHeaders);
+      // The primary-key lookup checks only the requested users, not the entire list.
+      const rows = await env.DB.prepare(`SELECT id FROM users WHERE id IN (${ids.map(() => "?").join(",")})`)
+        .bind(...ids).all<{ id: string }>();
+      const balances = await readUserBalances(env, rows.results || []);
+      return authJson({ balances }, 200, corsHeaders);
     }
     const detailMatch = /^\/admin\/users\/([^/]+)$/.exec(url.pathname);
     if (detailMatch) {

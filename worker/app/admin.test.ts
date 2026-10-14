@@ -214,34 +214,45 @@ test("admin users require a current allowlisted session and a trusted origin", a
   assert.equal((await call("/admin/users", adminToken)).status, 401);
 });
 
-test("admin users work with the production schema and return all users newest first without credentials", async () => {
-  const { call, sqlite, adminToken } = await fixture({ legacy: false });
+test("admin users return all users newest first without credentials or waiting for wallets", async t => {
+  const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  let walletCalls = 0;
+  env.CONTAINER_ACCOUNT = { idFromName() { walletCalls++; throw new Error('List must not access wallets'); } } as unknown as Env['CONTAINER_ACCOUNT'];
   sqlite.exec(readFileSync(new URL("../../migrations/012_email_password.sql", import.meta.url), "utf8"));
   sqlite.prepare("UPDATE users SET created_at = '2025-01-01T00:00:00.000Z', google_sub = 'private-' || id, password_hash = 'private-hash'").run();
   for (let index = 0; index < 30; index++) {
     sqlite.prepare("INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)")
       .run(`user-${String(index).padStart(2, '0')}`, `User ${index}`, index < 15 ? '2026-01-01T00:00:00.000Z' : '2026-02-01T00:00:00.000Z');
   }
-  const response = await call("/admin/users", adminToken);
+  const response = await call("/admin/users?includeBalances=false", adminToken);
   assert.equal(response.status, 200);
   const { users } = await response.json() as { users: Record<string, unknown>[] };
   assert.equal(users.length, 32);
   assert.equal(users[0].id, 'user-29');
   assert.equal(users[15].id, 'user-14');
   for (const user of users) {
-    assert.deepEqual(Object.keys(user).sort(), ['balanceCents', 'created_at', 'dob', 'email', 'id', 'name', 'plan']);
+    assert.deepEqual(Object.keys(user).sort(), ['created_at', 'dob', 'email', 'id', 'name', 'plan']);
     assert.equal(user.plan, 'none');
-    assert.equal(user.balanceCents, null);
   }
+  assert.equal(walletCalls, 0);
+  assert.equal((await call('/admin/users?includeBalances=invalid', adminToken)).status, 400);
+  const legacy = await call('/admin/users', adminToken);
+  assert.equal(legacy.status, 200);
+  const legacyBody = await legacy.json() as { users: { balanceCents: number | null }[] };
+  assert.equal(legacyBody.users.length, 32);
+  assert.ok(legacyBody.users.every(user => user.balanceCents === null));
+  assert.equal(walletCalls, 32);
 });
 
-test("admin users return current wallet balances with bounded reads and isolate unavailable wallets", async t => {
+test("admin balance batches select requested users with bounded reads and isolate unavailable wallets", async t => {
   const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
   t.after(() => sqlite.close());
   const balances = new Map<string, number>([['positive', 12345], ['zero', 0], ['negative', -125]]);
   for (const id of [...balances.keys(), 'failed', 'invalid', 'http-error', 'wrong-currency', 'fractional', 'unsafe']) {
     sqlite.prepare("INSERT INTO users (id, name) VALUES (?, ?)").run(id, id);
   }
+  const requested = [...balances.keys(), 'failed', 'invalid', 'http-error', 'wrong-currency', 'fractional', 'unsafe'];
   const routed: string[] = [];
   let active = 0;
   let peak = 0;
@@ -268,18 +279,46 @@ test("admin users return current wallet balances with bounded reads and isolate 
     } }; },
   } as unknown as Env['CONTAINER_ACCOUNT'];
 
-  const response = await call('/admin/users', adminToken);
+  const query = new URLSearchParams([...requested, 'absent'].map(id => ['id', id]));
+  const response = await call(`/admin/user-balances?${query}`, adminToken);
   assert.equal(response.status, 200);
-  const { users } = await response.json() as { users: { id: string; balanceCents: number | null }[] };
-  assert.equal(routed.length, users.length);
-  assert.equal(new Set(routed).size, users.length);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const { balances: users } = await response.json() as { balances: { id: string; balanceCents: number | null }[] };
+  assert.equal(users.length, requested.length);
+  assert.deepEqual([...routed].sort(), [...requested].sort());
+  assert.equal(new Set(routed).size, requested.length);
   assert.equal(peak, 5);
   for (const user of users) {
+    assert.deepEqual(Object.keys(user).sort(), ['balanceCents', 'id']);
     const unavailable = ['failed', 'invalid', 'http-error', 'wrong-currency', 'fractional', 'unsafe'].includes(user.id);
     assert.equal(user.balanceCents, unavailable ? null : balances.get(user.id) ?? 0, user.id);
   }
   assert.equal(JSON.stringify(users).includes('must-not-leak'), false);
   assert.equal(JSON.stringify(users).includes('Private wallet details'), false);
+});
+
+test("admin balance batches require the allowlisted session and validate IDs before wallet reads", async t => {
+  const { call, sqlite, env, adminToken, memberToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  let walletCalls = 0;
+  env.CONTAINER_ACCOUNT = { idFromName() { walletCalls++; throw new Error('Must not access wallets'); } } as unknown as Env['CONTAINER_ACCOUNT'];
+  const path = '/admin/user-balances?id=positive';
+  assert.equal((await call(path)).status, 401);
+  assert.equal((await call(path, memberToken)).status, 403);
+  assert.equal((await call(path, adminToken, 'GET', 'https://example.com')).status, 403);
+  assert.equal((await call(path, adminToken, 'POST')).status, 405);
+  for (const query of ['', '?id=', '?id=one&id=one', '?other=x&id=one', `?id=${'x'.repeat(201)}`,
+    `?${new URLSearchParams(Array.from({ length: 31 }, (_, i) => ['id', `user-${i}`]))}`]) {
+    const response = await call(`/admin/user-balances${query}`, adminToken);
+    assert.equal(response.status, 400, query);
+    assert.deepEqual(await response.json(), { error: 'invalid_request' });
+  }
+  for (const id of ['absent', "' OR 1=1 --"]) {
+    const response = await call(`/admin/user-balances?${new URLSearchParams({ id })}`, adminToken);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { balances: [] });
+  }
+  assert.equal(walletCalls, 0);
 });
 
 test("admin users include stored active subscription and trial plan levels", async () => {

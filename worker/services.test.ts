@@ -9,6 +9,7 @@ const origin = 'https://raindrop.mainbrella.com';
 test('API forwards every admin route and marketing endpoint to its owning service', async () => {
   for (const [path, binding] of [
     ['/admin/users', 'ADMIN_API'], ['/admin/users/user%2Fone?limit=4&fundingCursor=next', 'ADMIN_API'],
+    ['/admin/user-balances?id=one&id=two', 'ADMIN_API'],
     ['/admin/tables/users?q=long%20name&offset=25', 'ADMIN_API'], ['/admin/accounting/ledger', 'ADMIN_API'],
     ['/admin/accounting/closes', 'ADMIN_API'], ['/admin/accounting/policies', 'ADMIN_API'],
     ['/admin/accounting/storage-invoices', 'ADMIN_API'], ['/admin/acquisition/leads', 'ADMIN_API'],

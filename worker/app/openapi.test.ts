@@ -77,7 +77,7 @@ const endpointMethods: Record<string, string[]> = {
   "/images/tags": ["get"], "/images/tags/{tag}": ["get", "put", "delete"],
   "/internal/image-builds/manifest": ["get"], "/internal/image-builds/deployment-lock": ["post", "delete"],
   "/internal/image-builds/{id}/source": ["post"], "/internal/image-builds/{id}/status": ["post"],
-  "/admin/users": ["get"], "/admin/users/{userId}": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
+  "/admin/users": ["get"], "/admin/user-balances": ["get"], "/admin/users/{userId}": ["get"], "/admin/tables": ["get"], "/admin/tables/{table}": ["get"],
   "/api/get-marketing-users": ["get"],
   "/api/send-marketing-email": ["post"],
   "/api/unsubscribe": ["post"],
@@ -393,11 +393,27 @@ test("admin users schema documents restricted cookie access and safe user fields
   assert.deepEqual(planFields.properties.plan.enum, ['none', 'builder', 'pro', 'scale']);
   assert.ok(planFields.required.includes('plan'));
   assert.equal(operation.responses[200].content['application/json'].schema.properties.users.items.$ref,
-    '#/components/schemas/AdminUserWithBalance');
-  const balanceFields = components.schemas.AdminUserWithBalance.allOf.find((schema: any) => schema.properties?.balanceCents);
-  assert.deepEqual(balanceFields.properties.balanceCents.type, ['integer', 'null']);
-  assert.ok(balanceFields.required.includes('balanceCents'));
-  assert.match(operation.description, /null if that wallet is unavailable/);
+    '#/components/schemas/AdminUserListItem');
+  const includeBalances = operation.parameters.find((parameter: any) => parameter.name === 'includeBalances');
+  assert.deepEqual(includeBalances.schema.enum, ['true', 'false']);
+  assert.match(operation.description, /without accessing wallet services/);
+});
+
+test("admin balance batches document indexed user selection and restricted live wallet reads", async () => {
+  const { paths, components } = await document();
+  const operation = paths['/admin/user-balances'].get;
+  assert.equal(operation.operationId, 'getAdminUserBalances');
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }]);
+  assert.match(operation.description, /WHERE id IN/);
+  assert.match(operation.description, /at most five concurrent reads/);
+  for (const status of [200, 400, 401, 403, 405, 503]) assert.ok(operation.responses[status]);
+  const ids = operation.parameters.find((parameter: any) => parameter.name === 'id');
+  assert.equal(ids.required, true);
+  assert.equal(ids.schema.minItems, 1);
+  assert.equal(ids.schema.maxItems, 30);
+  const balance = components.schemas.AdminUserBalance;
+  assert.deepEqual(balance.properties.balanceCents.type, ['integer', 'null']);
+  assert.ok(balance.required.includes('balanceCents'));
 });
 
 test("marketing users schema documents admin access, opt-outs and bounded pagination", async () => {
