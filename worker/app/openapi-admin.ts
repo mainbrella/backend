@@ -3,6 +3,9 @@ import { cookieSecurity, errors, jsonResponse, register, userSchema, type Legacy
 import { prepaidBalanceSchema } from "./openapi-prepaid-billing";
 
 const adminUser = userSchema.extend({ plan: z.enum(["none", "builder", "pro", "scale"]) }).openapi("AdminUser");
+const adminUserWithBalance = adminUser.extend({
+  balanceCents: z.number().int().nullable().describe("Current total prepaid wallet balance in USD cents, including reserved funds. Null when the wallet is unavailable."),
+}).openapi("AdminUserWithBalance");
 const funding = z.object({ id: z.string(), createdAt: z.number(), amountCents: z.number(), revokedCents: z.number(), reason: z.enum(["refund", "dispute"]).nullable() });
 
 export function registerAdminRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
@@ -10,10 +13,10 @@ export function registerAdminRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
     operationId: "listAdminUsers",
     tags: ["Admin"],
     summary: "List all users, newest first",
-    description: "Requires a browser session for oneone@gmail.com. Returns all users ordered by created_at descending, then id descending. Plan is based on the last synced active subscription with an unexpired period, or an unexpired trial when no subscription is recorded; otherwise none. This administrative snapshot does not verify paid access with Stripe. Excludes credentials and provider identifiers.",
+    description: "Requires a browser session for oneone@gmail.com. Returns all users ordered by created_at descending, then id descending. balanceCents is the current total prepaid wallet balance in USD cents, including reserved funds, or null if that wallet is unavailable. Wallets are read with limited concurrency and no Stripe requests. Plan is based on the last synced active subscription with an unexpired period, or an unexpired trial when no subscription is recorded; otherwise none. This administrative snapshot does not verify paid access with Stripe. Excludes credentials and provider identifiers.",
     security: cookieSecurity,
     responses: {
-      200: jsonResponse(z.object({ users: z.array(adminUser) })),
+      200: jsonResponse(z.object({ users: z.array(adminUserWithBalance) })),
       ...errors(401, 403, 405, 503),
     },
   }, handler);

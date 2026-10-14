@@ -96,7 +96,23 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       const rows = await env.DB.prepare(
         `${adminUserQuery} ORDER BY users.created_at DESC, users.id DESC`,
       ).bind(...adminUserArgs()).all<AdminUser>();
-      return authJson({ users: rows.results || [] }, 200, corsHeaders);
+      const users: (AdminUser & { balanceCents: number | null })[] = [];
+      // Limit concurrent account reads and preserve the database's newest-first order.
+      const results = rows.results || [];
+      for (let offset = 0; offset < results.length; offset += 5) {
+        users.push(...await Promise.all(results.slice(offset, offset + 5).map(async row => {
+          try {
+            const { balance } = await accountBillingRequest(env, row.id, "/billing/balance");
+            if (balance.currency !== "usd" || !Number.isSafeInteger(balance.balanceCents)) {
+              throw new Error("invalid_balance");
+            }
+            return { ...row, balanceCents: balance.balanceCents };
+          } catch {
+            return { ...row, balanceCents: null };
+          }
+        })));
+      }
+      return authJson({ users }, 200, corsHeaders);
     }
     const detailMatch = /^\/admin\/users\/([^/]+)$/.exec(url.pathname);
     if (detailMatch) {

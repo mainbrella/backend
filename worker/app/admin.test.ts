@@ -229,9 +229,57 @@ test("admin users work with the production schema and return all users newest fi
   assert.equal(users[0].id, 'user-29');
   assert.equal(users[15].id, 'user-14');
   for (const user of users) {
-    assert.deepEqual(Object.keys(user).sort(), ['created_at', 'dob', 'email', 'id', 'name', 'plan']);
+    assert.deepEqual(Object.keys(user).sort(), ['balanceCents', 'created_at', 'dob', 'email', 'id', 'name', 'plan']);
     assert.equal(user.plan, 'none');
+    assert.equal(user.balanceCents, null);
   }
+});
+
+test("admin users return current wallet balances with bounded reads and isolate unavailable wallets", async t => {
+  const { call, sqlite, env, adminToken } = await fixture({ legacy: false });
+  t.after(() => sqlite.close());
+  const balances = new Map<string, number>([['positive', 12345], ['zero', 0], ['negative', -125]]);
+  for (const id of [...balances.keys(), 'failed', 'invalid', 'http-error', 'wrong-currency', 'fractional', 'unsafe']) {
+    sqlite.prepare("INSERT INTO users (id, name) VALUES (?, ?)").run(id, id);
+  }
+  const routed: string[] = [];
+  let active = 0;
+  let peak = 0;
+  env.CONTAINER_ACCOUNT = {
+    idFromName(name: string) { return name; },
+    get(id: string) { return { async fetch(request: Request) {
+      const userID = request.headers.get('x-mainbrella-user')!;
+      assert.equal(id, `account:${userID}`);
+      assert.equal(request.url, 'https://internal/billing/balance');
+      assert.equal(request.method, 'GET');
+      routed.push(userID);
+      peak = Math.max(peak, ++active);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1));
+        if (userID === 'failed') throw new Error('Private wallet details');
+        if (userID === 'invalid') return Response.json({ balance: {} });
+        if (userID === 'http-error') return Response.json({ error: 'private_failure' }, { status: 503 });
+        return Response.json({ balance: {
+          balanceCents: userID === 'fractional' ? 1.5 : userID === 'unsafe' ? Number.MAX_SAFE_INTEGER + 1 : balances.get(userID) ?? 0,
+          currency: userID === 'wrong-currency' ? 'eur' : 'usd',
+          availableBalanceCents: 0, reservedBalanceCents: 0, privateDetails: 'must-not-leak',
+        } });
+      } finally { active--; }
+    } }; },
+  } as unknown as Env['CONTAINER_ACCOUNT'];
+
+  const response = await call('/admin/users', adminToken);
+  assert.equal(response.status, 200);
+  const { users } = await response.json() as { users: { id: string; balanceCents: number | null }[] };
+  assert.equal(routed.length, users.length);
+  assert.equal(new Set(routed).size, users.length);
+  assert.equal(peak, 5);
+  for (const user of users) {
+    const unavailable = ['failed', 'invalid', 'http-error', 'wrong-currency', 'fractional', 'unsafe'].includes(user.id);
+    assert.equal(user.balanceCents, unavailable ? null : balances.get(user.id) ?? 0, user.id);
+  }
+  assert.equal(JSON.stringify(users).includes('must-not-leak'), false);
+  assert.equal(JSON.stringify(users).includes('Private wallet details'), false);
 });
 
 test("admin users include stored active subscription and trial plan levels", async () => {

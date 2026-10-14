@@ -392,6 +392,12 @@ test("admin users schema documents restricted cookie access and safe user fields
   const planFields = components.schemas.AdminUser.allOf.find((schema: any) => schema.properties?.plan);
   assert.deepEqual(planFields.properties.plan.enum, ['none', 'builder', 'pro', 'scale']);
   assert.ok(planFields.required.includes('plan'));
+  assert.equal(operation.responses[200].content['application/json'].schema.properties.users.items.$ref,
+    '#/components/schemas/AdminUserWithBalance');
+  const balanceFields = components.schemas.AdminUserWithBalance.allOf.find((schema: any) => schema.properties?.balanceCents);
+  assert.deepEqual(balanceFields.properties.balanceCents.type, ['integer', 'null']);
+  assert.ok(balanceFields.required.includes('balanceCents'));
+  assert.match(operation.description, /null if that wallet is unavailable/);
 });
 
 test("marketing users schema documents admin access, opt-outs and bounded pagination", async () => {
