@@ -1,5 +1,7 @@
-import { AppStoreServerAPIClient, Environment, SignedDataVerifier, VerificationException, VerificationStatus,
-  type JWSTransactionDecodedPayload } from '@apple/app-store-server-library';
+import type { SignedDataVerifier, JWSTransactionDecodedPayload } from '@apple/app-store-server-library';
+// Import only the deterministic enum at startup. The library's main entry point
+// loads jsrsasign, which seeds randomness and must run inside a Worker handler.
+import { Environment } from '@apple/app-store-server-library/dist/models/Environment';
 import { Buffer } from 'node:buffer';
 import { appleRootG3 } from './apple-root';
 import { appendAccountingEvent } from './accounting-ledger';
@@ -56,7 +58,8 @@ export async function appleAccountToken(env: Env, userId: string): Promise<strin
   return account.app_account_token;
 }
 
-export function appleVerifier(env: Env, environment = appleEnvironment(env)): SignedDataVerifier {
+export async function appleVerifier(env: Env, environment = appleEnvironment(env)): Promise<SignedDataVerifier> {
+  const { SignedDataVerifier } = await import('@apple/app-store-server-library');
   // Apple's library validates its pinned certificate chain, bundle ID,
   // environment and notification app ID, with online certificate checks.
   return new SignedDataVerifier([appleRootG3], true, environment, APPLE_BUNDLE_ID,
@@ -64,19 +67,20 @@ export function appleVerifier(env: Env, environment = appleEnvironment(env)): Si
 }
 
 export async function verifyAppleTransaction(env: Env, signed: string, local: boolean): Promise<JWSTransactionDecodedPayload> {
+  const { AppStoreServerAPIClient, VerificationException, VerificationStatus } = await import('@apple/app-store-server-library');
   let transaction: JWSTransactionDecodedPayload;
   try {
     // Read only an environment hint before verification, never money or identity.
     const hint = JSON.parse(Buffer.from(signed.split('.')[1] ?? '', 'base64url').toString('utf8'));
     const environment = local && hint.environment === Environment.XCODE ? Environment.XCODE : appleEnvironment(env);
-    transaction = await appleVerifier(env, environment).verifyAndDecodeTransaction(signed);
+    transaction = await (await appleVerifier(env, environment)).verifyAndDecodeTransaction(signed);
     if (environment !== Environment.XCODE) {
       if (!/^[0-9]{1,100}$/.test(transaction.transactionId ?? '')) throw new Error('invalid_apple_transaction');
       const client = new AppStoreServerAPIClient(env.APPLE_IAP_PRIVATE_KEY!, env.APPLE_IAP_KEY_ID!, env.APPLE_IAP_ISSUER_ID!, APPLE_BUNDLE_ID, environment);
       // A valid old purchase JWS can predate a refund. Fetch Apple's current
       // transaction before every delivery, including notification retries.
       const latest = await client.getTransactionInfo(transaction.transactionId!);
-      const current = await appleVerifier(env, environment).verifyAndDecodeTransaction(latest.signedTransactionInfo ?? '');
+      const current = await (await appleVerifier(env, environment)).verifyAndDecodeTransaction(latest.signedTransactionInfo ?? '');
       if (current.transactionId !== transaction.transactionId) throw new Error('invalid_apple_transaction');
       transaction = current;
     }

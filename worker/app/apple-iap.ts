@@ -32,7 +32,7 @@ export async function handleAppleIAPRequest(request: Request, env: Env): Promise
     if (notification) {
       // No cookie is needed for Apple webhooks: Apple's verified JWS is the
       // authentication. Local Xcode payloads cannot authenticate a webhook.
-      const event = await appleVerifier(env).verifyAndDecodeNotification(signed);
+      const event = await (await appleVerifier(env)).verifyAndDecodeNotification(signed);
       if (!event.data?.signedTransactionInfo) return authJson({ ok: true }, 200, cors);
       signed = event.data.signedTransactionInfo;
     }
