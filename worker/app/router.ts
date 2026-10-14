@@ -13,6 +13,7 @@ import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
 import { handlePrepaidBillingRequest } from './prepaid-billing';
+import { handleAppleIAPRequest } from './apple-iap';
 import { forwardServiceRequest } from "../shared/service-proxy";
 import { serviceForPath } from "../shared/service-routing";
 import { handleContainersRequest } from "./containers";
@@ -62,6 +63,7 @@ async function handleLegacyRequest(
   if (url.pathname === '/projects/github' || url.pathname === '/projects/github/storage') return handleProjectGithubRequest(request, env);
   if (url.pathname.startsWith('/build/')) return handleBuildRequest(request, env);
   if (url.pathname.startsWith('/acquisition/')) return handleAcquisitionRequest(request, env);
+  if (url.pathname.startsWith('/billing/apple/')) return handleAppleIAPRequest(request, env);
   if (url.pathname === '/billing/storage') return handleStorageBillingRequest(request, env);
   if (url.pathname === '/billing' || url.pathname.startsWith('/billing/')) return handlePrepaidBillingRequest(request, env);
   if (url.pathname === '/repo-launches' || url.pathname.startsWith('/repo-launches/')) return handleRepoLaunchRequest(request, env, ctx);

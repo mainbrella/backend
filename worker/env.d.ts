@@ -16,6 +16,13 @@ interface Env {
   STRIPE_SECRET_KEY?: string;
   STRIPE_PREPAID_PRICE_ID?: string;
   LOCAL_DEV?: string;
+  APPLE_IAP_ENVIRONMENT?: 'Production' | 'Sandbox';
+  APPLE_IAP_APP_ID?: string;
+  APPLE_IAP_ISSUER_ID?: string;
+  APPLE_IAP_KEY_ID?: string;
+  APPLE_IAP_PRIVATE_KEY?: string;
+  APPLE_IAP_PROCEEDS_JSON?: string;
+  APPLE_IAP_ALLOW_XCODE?: string;
   LOCAL_PREVIEW_PORT?: string;
   ACTIVITY_WEBSOCKET_ENABLED?: string;
   WORKSPACE_PERSISTENCE_ENABLED?: string;

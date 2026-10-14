@@ -32,6 +32,7 @@ import { registerWorkspaceRoutes } from './openapi-workspaces';
 import { registerImageRoutes } from "./openapi-images";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerPrepaidBillingRoutes } from './openapi-prepaid-billing';
+import { registerAppleIAPRoutes } from './openapi-apple-iap';
 import { registerAccountingRoutes } from './openapi-accounting';
 import { registerOperationsRoutes } from "./openapi-operations";
 import { registerPrivateServiceRoutes } from './openapi-private-services';
@@ -105,6 +106,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerDomainRoutes(api, handler);
   registerSubscriptionRoutes(api, handler);
   registerPrepaidBillingRoutes(api, handler);
+  registerAppleIAPRoutes(api, handler);
   registerStorageBillingRoutes(api, handler);
   registerContainerRoutes(api, handler);
   registerContainerLifecycleRoutes(api, handler);

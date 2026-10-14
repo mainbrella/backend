@@ -114,7 +114,8 @@ export async function syncSubscriptionRecord(env: BillingEnv, userId: string, su
 export async function resolveBillingState(env: BillingEnv, userId: string, includeLegacySubscription = false): Promise<BillingState> {
   const checkedAt = Date.now();
   const prepaid = await prepaidAccount(env, userId);
-  if (prepaid) {
+  const apple = !prepaid && await env.DB.prepare('SELECT user_id FROM apple_iap_transactions WHERE user_id = ? LIMIT 1').bind(userId).first();
+  if (prepaid || apple) {
     // Read the stored account ledger without reconciliation: the controller
     // calls this resolver during reconciliation, so it must not recurse.
     const { balance } = await accountBillingRequest(env, userId, '/billing/balance');
@@ -127,7 +128,7 @@ export async function resolveBillingState(env: BillingEnv, userId: string, inclu
     if (record) await syncSubscriptionRecord(env, userId, subscription);
     return { record, subscription, trial: null, entitlement: { plan: active ? 'usage' : null, active,
       validUntil: active ? checkedAt + 86400000 : null, checkedAt,
-      billing: { kind: 'prepaid', customerId: prepaid.stripe_customer_id, periodStart, periodEnd } } };
+      billing: { kind: 'prepaid', customerId: prepaid?.stripe_customer_id ?? `account_${userId}`, periodStart, periodEnd } } };
   }
   const record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
     .bind(userId).first<BillingRecord>();

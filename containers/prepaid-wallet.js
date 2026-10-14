@@ -21,8 +21,10 @@ const unitsBetween = (lease, start, end) => Math.max(0, Math.min(end, lease.endA
 export class PrepaidWallet {
   constructor(account, recharge) { this.account = account; this.recharge = recharge; }
   ensure(state, customerId) {
-    if (!/^cus_[A-Za-z0-9_]+$/.test(customerId)) throw new Error('invalid_customer');
-    if (state.wallet?.customerId && state.wallet.customerId !== customerId) throw new Error('account_mismatch');
+    const accountId = `account_${state.userId}`;
+    if (customerId !== accountId && !/^cus_[A-Za-z0-9_]+$/.test(customerId)) throw new Error('invalid_customer');
+    if (state.wallet?.customerId && state.wallet.customerId !== customerId
+      && state.wallet.customerId !== accountId && customerId !== accountId) throw new Error('account_mismatch');
     if (!state.wallet) {
       state.wallet = { customerId, fundings: {}, usedUnitMs: 0, monthlyUnitMs: {},
         autoRecharge: { enabled: false, amountCents: 500, monthlyLimitCents: 500, status: 'disabled' }, rechargeSpending: {} };
@@ -30,6 +32,9 @@ export class PrepaidWallet {
       // being stopped and replaced by a reservation charged to this wallet.
       if (Object.values(state.leases ?? {}).some(lease => lease.billing?.kind !== 'prepaid')) state.wallet.fundingRevoked = true;
     }
+    // An Apple-first wallet needs no Stripe Customer. A later web purchase can
+    // attach its verified Customer while existing Apple leases keep their ID.
+    if (state.wallet.customerId === accountId && customerId !== accountId) state.wallet.customerId = customerId;
     return state.wallet;
   }
   accounting(state) {
@@ -332,8 +337,10 @@ export class PrepaidWallet {
       historyTruncated: Boolean(state.wallet?.resourceHistoryCompacted || unattributedUsedCents > 0), retainedResourceLimit: RETAINED_RESOURCE_LIMIT };
   }
   applyFunding(state, funding) {
-    if (!funding || !/^(?:pi|cs)_[A-Za-z0-9_]+$/.test(funding.id) || funding.kind !== 'topup'
-      || !Number.isSafeInteger(funding.amountCents) || funding.amountCents < 500 || funding.amountCents > 100000
+    const apple = funding?.source === 'apple';
+    if (!funding || !(apple ? /^apple_(?:Production|Sandbox|Xcode)_[A-Za-z0-9_-]{1,100}$/ : /^(?:pi|cs)_[A-Za-z0-9_]+$/).test(funding.id) || funding.kind !== 'topup'
+      || (apple && funding.customerId !== `account_${state.userId}`)
+      || !Number.isSafeInteger(funding.amountCents) || funding.amountCents < (apple ? 1 : 500) || funding.amountCents > 100000
       || !Number.isSafeInteger(funding.refundedCents) || funding.refundedCents < 0 || funding.refundedCents > funding.amountCents
       || typeof funding.disputed !== 'boolean' || !Number.isSafeInteger(funding.createdAt) || funding.createdAt <= 0) throw new Error('invalid_payment');
     // Accounting outages must not delay a verified revocation. This recovery

@@ -85,7 +85,7 @@ const configPaths = ['api', 'containers', 'admin', 'marketing'].map(name => {
     const portIndex = args.indexOf('--port');
     const port = args.find(arg => arg.startsWith('--port='))?.slice('--port='.length)
       ?? (portIndex >= 0 ? args[portIndex + 1] : undefined) ?? config.dev?.port ?? '8787';
-    config.vars = { ...config.vars, PROJECT_HOSTING_ENABLED: 'true', PROJECT_DOMAIN_PROVIDER: 'local', LOCAL_PREVIEW_PORT: String(port) };
+    config.vars = { ...config.vars, PROJECT_HOSTING_ENABLED: 'true', PROJECT_DOMAIN_PROVIDER: 'local', LOCAL_PREVIEW_PORT: String(port), APPLE_IAP_ALLOW_XCODE: 'true' };
   }
   const path = `${root}.wrangler-local-${name}-${process.pid}.jsonc`;
   writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });

@@ -64,6 +64,7 @@ const endpointMethods: Record<string, string[]> = {
   "/subscription/usage": ["get", "post"], "/subscription/webhook": ["post"], "/containers": ["get", "post", "delete"],
   '/billing/storage': ['get'], '/admin/accounting/storage-invoices': ['get', 'post'],
   '/billing/config': ['get'], '/billing/balance': ['get'], '/billing/history': ['get'], '/billing/topups': ['post'], '/billing/topups/complete': ['post'], '/billing/settings': ['post'],
+  '/billing/apple/config': ['get'], '/billing/apple/transactions': ['post'], '/billing/apple/notifications': ['post'],
   "/containers/ssh": ["post"], "/containers/terminal": ["get"],
   "/containers/exec": ["post"],
   "/containers/files": ["get", "put"],
