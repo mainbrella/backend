@@ -14,6 +14,7 @@ import { handleRequest } from './service-test-helpers';
 import { handleAppDelete } from './auth-app';
 import { hashToken } from './auth-core';
 import { cleanupDeletedBuildGit } from '../lib/build-git';
+import { BuildError } from '../lib/build-contract';
 
 async function fixture(t: TestContext, mode: 'meter' | 'charge' = 'meter') {
   let now = Date.UTC(2026, 9, 1, 12);
@@ -37,6 +38,23 @@ async function fixture(t: TestContext, mode: 'meter' | 'charge' = 'meter') {
   const key = (suffix: string) => `build-git/${USER_ONE}/${owner.appId}/objects/${suffix}`;
   return { ...f, ...billing, owner, key, app, now: () => now, advance(ms: number) { now += ms; }, setNow(at: number) { now = at; } };
 }
+
+test('fresh local storage can save builder source without production billing inventory', async t => {
+  const f = await fixture(t, 'charge');
+  f.sqlite.exec("DELETE FROM r2_meter_state WHERE id='inventory_complete'");
+  const files = { 'src/App.tsx': 'export default function App() { return <h1>Frogs</h1>; }' };
+  await assert.rejects(storeBuildSource(f.env, f.owner, files), error => {
+    assert.ok(error instanceof BuildError);
+    assert.equal(error.message, 'build_source_unavailable');
+    assert.ok(error.cause instanceof Error);
+    assert.equal(error.cause.message, 'storage_metering_incomplete');
+    return true;
+  });
+  f.env.R2_BILLING_MODE = 'off';
+  const stored = await storeBuildSource(f.env, f.owner, files);
+  assert.ok(JSON.parse(stored).$r2);
+  assert.ok(f.storage.objects.size > 0);
+});
 
 test('physical keys are unique, quota includes all apps, and repeated R2 requests remain separate operation evidence', async t => {
   const f = await fixture(t); f.env.R2_ACCOUNT_MAX_BYTES = '10';

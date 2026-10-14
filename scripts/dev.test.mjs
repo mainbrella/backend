@@ -19,7 +19,8 @@ async function run(t, { signal, fail = false, migrationFail, allImages = false, 
   if (devVars) writeFileSync(join(root, '.dev.vars'), `${existingEnv}GITHUB_BUILD_CLIENT_SECRET="old-local-secret"\n`);
   copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
   for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs', 'codex-bridge.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
-  writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }], ai: { binding: 'AI' }, compatibility_flags: ['nodejs_compat', 'global_fetch_strictly_public'] }));
+  writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }], ai: { binding: 'AI' },
+    vars: { R2_BILLING_MODE: 'charge', R2_CHARGE_FROM: '2026-10-11T00:00:00Z' }, compatibility_flags: ['nodejs_compat', 'global_fetch_strictly_public'] }));
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ name: 'mainbrella-containers', containers: [
     { class_name: 'UserContainer', images: { terminal: { dockerfile: './containers/Dockerfile' } } },
   ] }));
@@ -92,6 +93,7 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
   const configs = JSON.parse(readFileSync(join(root, 'configs.json')));
   assert.deepEqual(configs.map(config => config.name), ['mainbrella-api', 'mainbrella-containers', 'mainbrella-admin', 'mainbrella-marketing']);
   assert.equal(configs.every(config => config.vars.LOCAL_DEV === 'true' && !config.routes), true);
+  assert.equal(configs.every(config => config.vars.R2_BILLING_MODE === 'off'), true, 'local R2 writes must not require production billing inventory');
   const apiConfig = configs.find(config => config.name === 'mainbrella-api');
   const containerConfig = configs.find(config => config.name === 'mainbrella-containers');
   assert.equal(apiConfig.vars.PROJECT_HOSTING_ENABLED, 'true');

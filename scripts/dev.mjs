@@ -58,7 +58,8 @@ const configPaths = ['api', 'containers', 'admin', 'marketing'].map(name => {
   }
   delete config.routes;
   delete config.route;
-  config.vars = { ...config.vars, LOCAL_DEV: 'true' };
+  // Local R2 has its own inventory and no production billing cron bootstrap.
+  config.vars = { ...config.vars, LOCAL_DEV: 'true', R2_BILLING_MODE: 'off' };
   if (name === 'api') {
     try {
       const saved = JSON.parse(readFileSync(`${root}.github-build-local-secrets.json`, 'utf8'));

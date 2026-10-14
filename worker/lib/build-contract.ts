@@ -46,7 +46,7 @@ export class BuildError extends Error {
   classification: 'provider' | 'parser' | 'infrastructure' | 'validation' = 'infrastructure';
   providerCode?: string;
   operationId?: string;
-  constructor(message: string, public status = 503, public details?: string) { super(message); }
+  constructor(message: string, public status = 503, public details?: string, options?: ErrorOptions) { super(message, options); }
 }
 export const ownedBuildApp = (env: Env, userId: string, id: string) => env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? AND id = ?').bind(userId, id).first<BuildAppRow>();
 export function buildName(prompt: string) {

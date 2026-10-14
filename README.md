@@ -59,6 +59,8 @@ npm run dev
 `npm run dev` starts the API and private container Worker together, with local
 D1 and Durable Object storage in `.wrangler/state`. It applies pending local
 migrations for both `delta` and `mainbrella-preview-routes` before startup. The
+temporary local configs disable R2 storage billing so source uploads do not
+require the production inventory and billing bootstrap. The
 API is available at
 `http://localhost:8787`; API docs are at `/docs`. Wrangler builds the Node image
 from `containers/Dockerfile` and starts containers on demand. This requires
@@ -82,7 +84,7 @@ production Workers AI model. The app-server
 and the bridge enables `experimentalApi`.
 
 Mainbrella's existing build agent still validates and executes all six file and
-command tools, persists source in local D1, repairs compiler errors, and creates
+command tools, persists source in local R2 with references in D1, repairs compiler errors, and creates
 Docker-backed previews. Assistant updates use the existing activity stream.
 Codex runs from an empty temporary directory with local execution integrations
 disabled. The bridge uses an ephemeral bearer token, never exposes a browser

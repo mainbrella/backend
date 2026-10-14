@@ -40,8 +40,8 @@ export async function storeBuildObject(env: Env, owner: BuildStorageOwner, bytes
   try {
     await putStoredObject(env, owner, ref.$r2, bytes, purpose, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } });
   } catch (error) {
-    if (error instanceof Error && /storage_(funding_required|limit_exceeded)|insufficient_balance|spend_limit_exceeded/.test(error.message)) throw new BuildError(error.message.includes('storage_limit') ? 'storage_limit_exceeded' : 'storage_funding_required', 402);
-    throw new BuildError('build_source_unavailable');
+    if (error instanceof Error && /storage_(funding_required|limit_exceeded)|insufficient_balance|spend_limit_exceeded/.test(error.message)) throw new BuildError(error.message.includes('storage_limit') ? 'storage_limit_exceeded' : 'storage_funding_required', 402, undefined, { cause: error });
+    throw new BuildError('build_source_unavailable', 503, undefined, { cause: error });
   }
   return ref;
 }
