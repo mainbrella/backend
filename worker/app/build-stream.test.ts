@@ -135,6 +135,40 @@ function request(id: string, session = SESSION_ONE, suffix = '') {
 const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 4, 0, 4, 0, 0, 0xff, 0xd9]);
 const jpegBase64 = btoa(String.fromCharCode(...jpeg));
 
+test('build request logs retain expected error codes and unexpected exception details', async t => {
+  const f = await fixture(t);
+  const log = t.mock.method(console, 'error', () => {});
+  f.env.BUILD_ENABLED = 'false';
+  const submit = () => handleBuildRequest(new Request('https://api.mainbrella.com/build/apps', {
+    method: 'POST', headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}`,
+      'Content-Type': 'application/json', 'Idempotency-Key': 'log-failure' },
+    body: JSON.stringify({ prompt: 'Make me a website about frogs' }),
+  }), f.env);
+  const unavailable = await submit();
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(await unavailable.json(), { error: 'build_unavailable' });
+  const [event, context, error] = log.mock.calls[0].arguments as unknown as [string, any, BuildError];
+  assert.equal(event, 'build_request_failed');
+  assert.equal(context.method, 'POST');
+  assert.equal(context.path, '/build/apps');
+  assert.equal(context.status, 503);
+  assert.ok(error instanceof BuildError);
+  assert.equal(error.message, 'build_unavailable');
+  assert.match(error.stack!, /requireBuildAccess/);
+
+  const failure = new Error('D1 connection lost', { cause: new Error('database disconnected') });
+  const prepare = f.env.DB.prepare.bind(f.env.DB);
+  t.mock.method(f.env.DB, 'prepare', (sql: string) => {
+    if (sql.startsWith('SELECT * FROM build_apps WHERE user_id = ? AND create_key = ?')) throw failure;
+    return prepare(sql);
+  });
+  const unexpected = await submit();
+  assert.equal(unexpected.status, 503);
+  assert.deepEqual(await unexpected.json(), { error: 'build_unavailable' });
+  assert.equal(log.mock.calls.length, 2);
+  assert.equal(log.mock.calls[1].arguments[2], failure, 'log the original exception, including stack and cause');
+});
+
 const immediateStep = { async do(_name: string, _options: unknown, operation: () => Promise<unknown>) { return structuredClone(await operation()); },
   async sleep() {} } as unknown as Parameters<typeof runBuildAgent>[2];
 

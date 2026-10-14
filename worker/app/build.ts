@@ -152,7 +152,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
       if (['storage_rate_limited', 'storage_export_busy', 'storage_stream_busy'].includes(code)) return authJson({ error: code }, 429, { ...cors, 'Retry-After': '60' });
-      console.error('storage_read_failed');
+      console.error('storage_read_failed', { method: request.method, path: new URL(request.url).pathname }, error);
       return authJson({ error: 'storage_unavailable' }, 503, cors);
     }
   }
@@ -354,6 +354,9 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
     return authJson(await detail(env, user.id, appId), 202, cors);
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
+    console.error('build_request_failed', { method: request.method, path: url.pathname,
+      ...(error instanceof BuildError ? { status: error.status, classification: error.classification,
+        providerCode: error.providerCode, operationId: error.operationId, details: error.details } : {}) }, error);
     if (error instanceof BuildError) return authJson({ error: message }, error.status, cors);
     if (message.includes('github_project_busy')) return authJson({ error: 'github_project_busy' }, 409, cors);
     if (message.includes('build_busy') || message.includes('revision_conflict')) return authJson({ error: message.includes('revision_conflict') ? 'revision_conflict' : 'build_busy' }, 409, cors);
@@ -362,7 +365,6 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
     if (/UNIQUE constraint failed/.test(message)) return authJson({ error: 'submission_conflict' }, 409, cors);
     if (error instanceof SyntaxError || message === 'invalid_request') return authJson({ error: 'invalid_request' }, 400, cors);
     if (message === 'request_too_large') return authJson({ error: message }, 413, cors);
-    console.error('build_request_failed', { path: url.pathname });
     const failure = containerError(error, 'build_unavailable');
     return authJson({ error: failure.error }, failure.status, cors);
   }
