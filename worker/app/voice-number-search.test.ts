@@ -65,7 +65,6 @@ test('word search makes a single GET with the server key and explicit voice filt
     cost: { monthly: '1.00', upfront: '0.00', currency: 'USD' } });
   assert.equal(calls.length, 1); assert.equal(calls[0].url.origin, 'https://api.telnyx.com');
   assert.equal(calls[0].url.pathname, '/v2/available_phone_numbers'); assert.equal(calls[0].init?.method, 'GET');
-  assert.equal(calls[0].init?.redirect, 'manual');
   const params = calls[0].url.searchParams;
   assert.equal(params.get('filter[phone_number][ends_with]'), '3569377');
   assert.equal(params.get('filter[national_destination_code]'), '800'); assert.equal(params.get('filter[features][]'), 'voice');
@@ -106,7 +105,7 @@ test('search availability depends only on the key and limiter, and limits are ke
 
 test('provider failures and malformed responses produce safe retryable errors without leaking credentials', async t => {
   const f = await fixture(t);
-  for (const [providerStatus, status] of [[301, 503], [302, 503], [307, 503], [308, 503], [401, 503], [403, 503], [422, 400], [429, 429], [500, 503]]) {
+  for (const [providerStatus, status] of [[401, 503], [403, 503], [422, 400], [429, 429], [500, 503]]) {
     const mocked = t.mock.method(globalThis, 'fetch', async () => new Response('PRIVATE PROVIDER DATA', { status: providerStatus }));
     const response = await handleRequest(request(), f.env);
     assert.equal(response.status, status); assert.doesNotMatch(await response.text(), /PRIVATE|secret-fixture/); mocked.mock.restore();

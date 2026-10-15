@@ -1,7 +1,5 @@
 const ACKNOWLEDGMENTS = ['Mm-hmm.', 'Okay.', 'Ah-huh.'];
 const HOLD_PHRASES = ['One moment.', 'Just a moment.', 'Bear with me a moment.'];
-export const voiceAcknowledgment = (turn: number) => ACKNOWLEDGMENTS[Math.max(0,turn-1) % ACKNOWLEDGMENTS.length];
-export const isVoiceBackchannel = (text: string) => [...ACKNOWLEDGMENTS,...HOLD_PHRASES].includes(text.trim());
 type VoiceTextPart = {type:'text-delta';text:string} | {type:'text-end'} | {type:'error';error:unknown};
 
 /** Keep acknowledgments in the same ordered, interruptible TTS stream as the reply. */
@@ -20,7 +18,7 @@ async function* streamBackchannel(result: Promise<VoiceTextPart>, signal: AbortS
   const index = Math.max(0,turn-1) % ACKNOWLEDGMENTS.length;
   try {
     if (signal.aborted) return;
-    for (const [afterMs,text] of [[0,ACKNOWLEDGMENTS[index]], [5000,HOLD_PHRASES[index]]] as const) {
+    for (const [afterMs,text] of [[1000,ACKNOWLEDGMENTS[index]], [5000,HOLD_PHRASES[index]]] as const) {
       const waiting = new Promise<undefined>(resolve=>{
         timer=setTimeout(()=>resolve(undefined),Math.max(0,startedAt+afterMs-Date.now()));
       });
