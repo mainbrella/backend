@@ -119,9 +119,86 @@ test('installed VoiceClient browser start accepts PCM, raw PCM greeting and spee
   await f.request(`/voice/calls/${created.call.id}/end`,'POST');
   const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).all() as any;
   assert.ok(usage.results.every((row:any)=>row.status==='settled'));
+  assert.equal(usage.results.filter((row:any)=>row.model==='@cf/deepgram/aura-1').length,2,'Fast replies should only synthesize the greeting and answer');
   assert.deepEqual(new Set(usage.results.map((row:any)=>row.model)),new Set(['@cf/deepgram/flux','@cf/deepgram/aura-1','@cf/meta/llama-3.3-70b-instruct-fp8-fast']));
   const stt=usage.results.find((row:any)=>row.model==='@cf/deepgram/flux');
   assert.equal(JSON.parse(stt.usage_json).audioBytes,640);assert.equal(stt.cost_micro_usd,5);
+});
+
+test('slow voice turns play short acknowledgments before the answer, while text turns stay unchanged',async t=>{
+  const f=await runtime(t);
+  const voice=await f.create('browser');
+  const text=await f.create('text');
+  const {transport}=clientTransport(f.mf,text.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});
+  t.after(()=>client.disconnect());client.connect();
+  await until(()=>client.transcript.length===1,'Text greeting missing');
+  const connected=await f.mf.dispatchFetch(voice.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
+  const ws=connected.webSocket!;
+  const messages:any[]=[];
+  let audioFrames=0;
+  ws.addEventListener('message',event=>{
+    if(typeof event.data==='string') messages.push(JSON.parse(event.data));
+    else audioFrames++;
+  });
+  ws.accept();t.after(()=>ws.close());
+  ws.send(JSON.stringify({type:'start_call'}));
+  await until(()=>audioFrames===1,'Voice greeting missing');
+  messages.length=0;audioFrames=0;
+  ws.send(JSON.stringify({type:'text_message',text:'waiting model'}));
+  client.sendText('waiting model');
+  await until(()=>audioFrames===1,'Acknowledgment audio missing');
+  assert.ok(messages.some(message=>message.type==='transcript_delta'&&message.text==='Mm-hmm. '));
+  assert.ok(!messages.some(message=>message.type==='transcript_end'),'Acknowledgment must play before the answer is ready');
+  await until(()=>audioFrames===2,'Holding phrase audio missing');
+  assert.ok(messages.some(message=>message.type==='transcript_delta'&&message.text==='One moment. '));
+  assert.ok(!messages.some(message=>message.type==='transcript_end'));
+  await until(()=>messages.some(message=>message.type==='transcript_end'),'Voice answer missing');
+  await until(()=>audioFrames===3,'Voice answer audio missing');
+  const expected='Mm-hmm. One moment. I can take a message: waiting model';
+  assert.equal(messages.find(message=>message.type==='transcript_end').text,expected);
+  await until(()=>client.transcript.at(-1)?.text==='I can take a message: waiting model','Text answer missing');
+  assert.equal(client.transcript.length,3,'Text turns must not include acknowledgments');
+  await until(async()=>{
+    const detail=await (await f.request(`/voice/calls/${voice.call.id}`)).json() as any;
+    return detail.call.transcript.at(-1)?.text===expected;
+  },'Spoken acknowledgments and answer not persisted together');
+  await f.request(`/voice/calls/${voice.call.id}/end`,'POST');
+  await f.request(`/voice/calls/${text.call.id}/end`,'POST');
+  const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(voice.call.id).all() as any;
+  const tts=usage.results.filter((row:any)=>row.model==='@cf/deepgram/aura-1');
+  assert.equal(tts.length,4,'Greeting, two acknowledgments and answer must all be metered');
+  assert.ok(tts.every((row:any)=>row.status==='settled'));
+});
+
+test('interrupting an acknowledgment cancels later fillers and the stale answer',async t=>{
+  const f=await runtime(t);const created=await f.create('browser');
+  const connected=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
+  const ws=connected.webSocket!;const messages:any[]=[];
+  let audioFrames=0;
+  ws.addEventListener('message',event=>{
+    if(typeof event.data==='string') messages.push(JSON.parse(event.data));
+    else audioFrames++;
+  });
+  ws.accept();t.after(()=>ws.close());
+  ws.send(JSON.stringify({type:'start_call'}));
+  await until(()=>audioFrames===1,'Greeting missing');
+  messages.length=0;audioFrames=0;
+  ws.send(JSON.stringify({type:'text_message',text:'waiting model'}));
+  await until(()=>audioFrames===1,'Acknowledgment missing');
+  messages.length=0;
+  ws.send(JSON.stringify({type:'interrupt'}));
+  await until(()=>messages.some(message=>message.type==='status'&&message.status==='listening'),'Turn was not interrupted');
+  ws.send(JSON.stringify({type:'text_message',text:'New question'}));
+  await until(()=>messages.some(message=>message.type==='transcript_end'&&message.text==='I can take a message: New question'),'New answer missing');
+  await until(async()=>{
+    const rows=await f.db.prepare("SELECT status FROM voice_usage WHERE call_id=? AND model<>'@cf/deepgram/flux'").bind(created.call.id).all() as any;
+    return rows.results.every((row:any)=>row.status==='settled');
+  },'Interrupted inference did not settle');
+  assert.equal(audioFrames,2,'Only the acknowledgment and the new answer should play');
+  assert.ok(!messages.some(message=>message.type==='transcript_delta'&&message.text.includes('One moment.')));
+  assert.ok(!messages.some(message=>message.type==='transcript_end'&&message.text.includes('waiting model')));
+  assert.equal((await f.request(`/voice/calls/${created.call.id}/end`,'POST')).status,200);
 });
 
 test('Agent denies SDK state mutation and a second socket, and records model failures',async t=>{
