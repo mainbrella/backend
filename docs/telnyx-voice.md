@@ -91,6 +91,21 @@ Under **Account Settings → Keys & Credentials**:
   has been configured and deployed. Also confirm `ConnectionId` matches the
   application you just created.
 
+If you cannot find the TeXML request in the portal, configure all the other
+variables and leave `TELNYX_ACCOUNT_SID` empty temporarily. Deploy the Worker,
+start `npx wrangler tail --config wrangler.jsonc`, and call your number. Once
+the incoming request's signature, connection ID, agent and destination have
+been verified, the Worker logs:
+
+```text
+voice_telnyx_account_sid_required {"AccountSid":"YOUR_ACCOUNT_UUID","ConnectionId":"YOUR_APPLICATION_ID"}
+```
+
+Copy that `AccountSid` into `TELNYX_ACCOUNT_SID` and redeploy. Until then the
+request returns 503 and does not allocate a receptionist session. If the log
+instead says `voice_telnyx_webhook_signature_invalid`, the request could not
+be authenticated; check the public key and signature/timestamp headers.
+
 Requests use Telnyx's [Ed25519 webhook signature](https://support.telnyx.com/en/articles/4334722-how-to-leverage-webhooks).
 The Worker rejects signatures older than five minutes, incorrect destinations,
 and mismatched accounts/applications/agents.

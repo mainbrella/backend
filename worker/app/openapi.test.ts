@@ -793,6 +793,7 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.deepEqual(paths['/voice/telnyx/media/{callId}'].get.security,[{telnyxSignature:[]}]);
   assert.ok(paths['/voice/telnyx/media/{callId}'].get.responses[101]);
   assert.ok(paths['/voice/telnyx/incoming/{agentId}'].post.requestBody.content['application/x-www-form-urlencoded']);
+  assert.match(paths['/voice/telnyx/incoming/{agentId}'].post.responses[503].description,/No call is allocated/);
   assert.ok(paths['/voice/telnyx/incoming/{agentId}'].post.parameters.some((parameter:any)=>parameter.name==='telnyx-timestamp' && parameter.required));
   assert.match(paths['/voice/agent'].put.description, /CRM and calendar/);
   assert.match(paths['/voice/calls'].post.description, /15 minutes/);

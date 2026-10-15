@@ -8,7 +8,10 @@ const unavailable = () => xml('<Response><Say>Sorry, our receptionist is unavail
 export async function handleTelnyxRequest(request: Request,env: Env,ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const origin = publicVoiceOrigin(env);
-  if (!origin || !env.TELNYX_PUBLIC_KEY || !telnyxConfigured(env,env.TELNYX_AGENT_ID || null)) return new Response(null,{status:503});
+  if (!origin || !env.TELNYX_PUBLIC_KEY) {
+    console.warn('voice_telnyx_configuration_incomplete');
+    return new Response(null,{status:503});
+  }
   const incoming = url.pathname.match(/^\/voice\/telnyx\/incoming\/([a-f0-9-]{36})$/i);
   const media = url.pathname.match(/^\/voice\/telnyx\/media\/([a-f0-9-]{36})$/i);
   if (url.search || (!incoming && !media)) return new Response(null,{status:404});
@@ -20,17 +23,40 @@ export async function handleTelnyxRequest(request: Request,env: Env,ctx?: Execut
       const text = await request.text();
       if (new TextEncoder().encode(text).length>32_768) return new Response(null,{status:400});
       const fields=new URLSearchParams(text);
-      if (!await validTelnyxSignature(env.TELNYX_PUBLIC_KEY,request.headers,text)) return new Response(null,{status:403});
+      if (!await validTelnyxSignature(env.TELNYX_PUBLIC_KEY,request.headers,text)) {
+        console.warn('voice_telnyx_webhook_signature_invalid');
+        return new Response(null,{status:403});
+      }
       const callSid=fields.get('CallSid');
+      const accountSid=fields.get('AccountSid');
       const to=fields.get('To');
       // ToSipUri is supplied without a sip: prefix by TeXML. PSTN calls
       // use number@sip.telnyx.com; application SIP calls use a subdomain.
       const sipTo=telnyxSipUri(fields.get('ToSipUri') || to);
       const transport=sipTo || to?.toLowerCase().startsWith('sip:') ? 'sip' : 'pstn';
       const destinationMatches=transport === 'sip' ? Boolean(sipTo && sipTo===telnyxSipUri(env.TELNYX_SIP_URI)) : to===env.TELNYX_PHONE_NUMBER;
-      if (fields.get('AccountSid')!==env.TELNYX_ACCOUNT_SID || fields.get('ConnectionId')!==env.TELNYX_CONNECTION_ID ||
-        !destinationMatches || incoming[1]!==env.TELNYX_AGENT_ID || !validTelnyxCallId(callSid)) return new Response(null,{status:403});
-      if (!telnyxConfigured(env,incoming[1],transport)) return new Response(null,{status:503});
+      if (fields.get('ConnectionId')!==env.TELNYX_CONNECTION_ID ||
+        !destinationMatches || incoming[1]!==env.TELNYX_AGENT_ID || !validTelnyxCallId(callSid)) {
+        console.warn('voice_telnyx_webhook_identity_mismatch');
+        return new Response(null,{status:403});
+      }
+      if (!env.TELNYX_ACCOUNT_SID) {
+        // Bootstrap diagnostics only: the signature, application, destination
+        // and agent must match before logging the account identity. Never
+        // allocate a call or infer account configuration from this request.
+        if (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(accountSid || '')) {
+          console.warn('voice_telnyx_account_sid_required',JSON.stringify({AccountSid:accountSid,ConnectionId:fields.get('ConnectionId')}));
+        } else console.warn('voice_telnyx_account_sid_missing_or_invalid');
+        return new Response(null,{status:503});
+      }
+      if (accountSid!==env.TELNYX_ACCOUNT_SID) {
+        console.warn('voice_telnyx_webhook_account_mismatch');
+        return new Response(null,{status:403});
+      }
+      if (!telnyxConfigured(env,incoming[1],transport)) {
+        console.warn('voice_telnyx_configuration_incomplete');
+        return new Response(null,{status:503});
+      }
       const agent=await env.DB.prepare('SELECT * FROM voice_agents WHERE id=?').bind(incoming[1]).first<VoiceAgentRow>();
       if (!agent) return unavailable();
       const existing=await env.DB.prepare('SELECT id FROM voice_calls WHERE provider_call_id=?').bind(callSid).first();
@@ -46,6 +72,7 @@ export async function handleTelnyxRequest(request: Request,env: Env,ctx?: Execut
       }
       return xml(streamTexml(`${origin.replace('https:','wss:')}/voice/telnyx/media/${call.id}`,token));
     }
+    if (!telnyxConfigured(env,env.TELNYX_AGENT_ID || null)) return new Response(null,{status:503});
     if (request.method !== 'GET') return new Response(null,{status:405});
     if (request.headers.get('Upgrade')?.toLowerCase()!=='websocket') return new Response(null,{status:426});
     if (!await validTelnyxSignature(env.TELNYX_PUBLIC_KEY,request.headers,expectedUrl.replace('https:','wss:'))) return new Response(null,{status:403});

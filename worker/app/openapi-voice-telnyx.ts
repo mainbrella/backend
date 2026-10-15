@@ -12,7 +12,7 @@ export function registerVoiceTelnyxRoutes(api: OpenAPIApi, handler: LegacyHandle
     request:{params:z.object({agentId:z.uuid()}),headers:z.object(signatureHeaders),body:{required:true,content:{'application/x-www-form-urlencoded':{schema:z.object({
       AccountSid:z.string(),ConnectionId:z.string(),CallSid:z.string(),To:z.string(),ToSipUri:z.string().optional(),From:z.string().optional(),
     }).catchall(z.string())}}}},
-    responses:{200:{description:'TeXML call instructions.',content:{'application/xml':{schema:z.string()}}},...errors(400,403,404,405,503)},
+    responses:{200:{description:'TeXML call instructions.',content:{'application/xml':{schema:z.string()}}},...errors(400,403,404,405),503:{description:'Telnyx configuration is incomplete. If TELNYX_ACCOUNT_SID is empty, an authenticated request matching the application, agent and destination logs its AccountSid for operator setup. No call is allocated and no account ID is returned in the response.'}},
   },handler);
   register(api,'get','/voice/telnyx/media/{callId}',{
     tags:['Voice'],operationId:'connectVoiceTelnyxMedia',summary:'Upgrade a signed Telnyx media stream',security:[{telnyxSignature:[]}],

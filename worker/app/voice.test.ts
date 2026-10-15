@@ -410,6 +410,36 @@ function telnyxForm(path:string,fields=telnyxFields(),timestamp?:string) {
   return new Request(`${API}${path}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...telnyxTestSignature(body,timestamp)},body});
 }
 
+test('Telnyx account SID discovery logs only verified mapped identities and never allocates calls',async t=>{
+  const f=await fixture(t);const agent=await saveAgent(f);
+  Object.assign(f.env,TELNYX_TEST_BINDINGS,{TELNYX_AGENT_ID:agent.id,TELNYX_ACCOUNT_SID:''});
+  const warnings=t.mock.method(console,'warn',()=>{});
+  const path=`/voice/telnyx/incoming/${agent.id}`;
+  const unsigned=telnyxForm(path);unsigned.headers.delete('telnyx-signature-ed25519');
+  assert.equal((await handleRequest(unsigned,f.env)).status,403);
+  const stale=telnyxForm(path,telnyxFields(),String(Math.floor(Date.now()/1000)-400));
+  assert.equal((await handleRequest(stale,f.env)).status,403);
+  assert.equal((await handleRequest(telnyxForm(path,telnyxFields({ConnectionId:'123'})),f.env)).status,403);
+  assert.equal((await handleRequest(telnyxForm(path,telnyxFields({To:'+15550000000'})),f.env)).status,403);
+  assert.equal((await handleRequest(telnyxForm(`/voice/telnyx/incoming/${crypto.randomUUID()}`),f.env)).status,403);
+  assert.equal((await handleRequest(telnyxForm(path,telnyxFields({AccountSid:'untrusted\nlog-injection'})),f.env)).status,503);
+  assert.equal(warnings.mock.calls.some(call=>call.arguments[0]==='voice_telnyx_account_sid_required'),false);
+
+  const response=await handleRequest(telnyxForm(path),f.env);
+  assert.equal(response.status,503);assert.equal(await response.text(),'');
+  const discovery=warnings.mock.calls.filter(call=>call.arguments[0]==='voice_telnyx_account_sid_required');
+  assert.equal(discovery.length,1);
+  assert.deepEqual(JSON.parse(discovery[0].arguments[1]),{AccountSid:TELNYX_TEST_ACCOUNT,ConnectionId:TELNYX_TEST_CONNECTION});
+  assert.equal(f.env.TELNYX_ACCOUNT_SID,'');
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,0);
+  assert.equal(f.calls.length,0);
+
+  f.env.TELNYX_ACCOUNT_SID=TELNYX_TEST_ACCOUNT;
+  const configured=await handleRequest(telnyxForm(path),f.env);
+  assert.equal(configured.status,200);assert.match(await configured.text(),/<Stream/);
+  assert.equal(f.calls.filter(call=>new URL(call.request.url).pathname==='/initialize').length,1);
+});
+
 test('Telnyx availability is priced per destination, isolated by agent and independent of Twilio',async t=>{
   const f=await fixture(t);const agent=await saveAgent(f);
   Object.assign(f.env,TELNYX_TEST_BINDINGS,{TELNYX_AGENT_ID:agent.id,TELNYX_SIP_URI:TELNYX_TEST_SIP});
