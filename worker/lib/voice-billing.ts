@@ -1,6 +1,6 @@
 import { accountBillingRequest } from './prepaid-billing';
 import { buildInferenceChargeMicroUsd, buildTokenCostMicroUsd, readBuildTokenUsage } from './build-pricing';
-import { callStub, type VoiceCallRow, VOICE_MODELS } from './voice';
+import { callStub, type VoiceCallRow, type VoicePhoneTransport, VOICE_MODELS } from './voice';
 
 // Verified 2026-10-15: https://developers.cloudflare.com/workers-ai/platform/pricing/
 // Flux $0.0077/audio minute; Aura $0.015/1,000 input characters.
@@ -17,8 +17,8 @@ export const llmReservation = (messages: Array<{role:string;content:string}>) =>
   inputTokens: new TextEncoder().encode(messages.map(row=>row.content).join('')).length + messages.length * 64 + 256,
   cachedInputTokens: 0, outputTokens: 256,
 });
-export function phoneRate(env: Env): number {
-  const value = Number(env.VOICE_PHONE_MICRO_USD_PER_MINUTE);
+export function phoneRate(env: Env, transport: VoicePhoneTransport = 'pstn'): number {
+  const value = Number(transport === 'sip' ? env.VOICE_SIP_MICRO_USD_PER_MINUTE : env.VOICE_PHONE_MICRO_USD_PER_MINUTE);
   if (!Number.isSafeInteger(value) || value <= 0 || value > 1_000_000) throw new Error('voice_phone_unpriced');
   return value;
 }

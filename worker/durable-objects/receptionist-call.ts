@@ -162,8 +162,9 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
         try {
           await this.checkBilling();
           if (call.channel==='phone') {
-            const rate=phoneRate(this.env);
-            const id=await reserveVoiceUsage(this.env,this.owner(),'twilio-inbound',rate*15);
+            const transport=call.phone_transport || 'pstn';
+            const rate=phoneRate(this.env,transport);
+            const id=await reserveVoiceUsage(this.env,this.owner(),transport === 'sip' ? 'twilio-sip-inbound' : 'twilio-inbound',rate*15);
             this.setState({...this.state!,phone:{id,rate}});
           }
         } catch (error) { await this.billingFailure(error); return Response.json({error:billingError(error)},{status:402}); }

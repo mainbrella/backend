@@ -1,4 +1,4 @@
-import { callStub, createCall, hashMediaToken, initializeCall, MAX_CALL_MS, publicAgent, publicVoiceOrigin, readCall, telephonyConfigured, type VoiceAgentRow } from '../lib/voice';
+import { callStub, createCall, hashMediaToken, initializeCall, MAX_CALL_MS, publicAgent, publicVoiceOrigin, readCall, telephonyConfigured, twilioSipUri, type VoiceAgentRow } from '../lib/voice';
 import { pcmToTwilio, streamTwiml, twilioToPCM, validTwilioSignature } from '../lib/voice-telephony';
 
 const xml = (body: string,status=200) => new Response(body,{status,headers:{'content-type':'application/xml; charset=utf-8','cache-control':'no-store'}});
@@ -20,14 +20,19 @@ export async function handleTwilioRequest(request: Request,env: Env,ctx?: Execut
       const fields=new URLSearchParams(text);
       if (!validTwilioSignature(env.TWILIO_AUTH_TOKEN,request.headers.get('X-Twilio-Signature'),expectedUrl,fields)) return new Response(null,{status:403});
       const callSid=fields.get('CallSid');
-      if (fields.get('AccountSid')!==env.TWILIO_ACCOUNT_SID || fields.get('To')!==env.TWILIO_PHONE_NUMBER || incoming[1]!==env.TWILIO_AGENT_ID || !/^CA[a-f0-9]{32}$/i.test(callSid || '')) return new Response(null,{status:403});
+      const to=fields.get('To');
+      const transport=to?.toLowerCase().startsWith('sip:') ? 'sip' : 'pstn';
+      const sipTo=twilioSipUri(to);
+      const destinationMatches=transport === 'sip' ? Boolean(sipTo && sipTo===twilioSipUri(env.TWILIO_SIP_URI)) : to===env.TWILIO_PHONE_NUMBER;
+      if (fields.get('AccountSid')!==env.TWILIO_ACCOUNT_SID || !destinationMatches || incoming[1]!==env.TWILIO_AGENT_ID || !/^CA[a-f0-9]{32}$/i.test(callSid || '')) return new Response(null,{status:403});
+      if (!telephonyConfigured(env,incoming[1],transport)) return new Response(null,{status:503});
       const agent=await env.DB.prepare('SELECT * FROM voice_agents WHERE id=?').bind(incoming[1]).first<VoiceAgentRow>();
       if (!agent) return unavailable();
       const existing=await env.DB.prepare('SELECT id FROM voice_calls WHERE provider_call_id=?').bind(callSid).first();
       // A signed webhook replay cannot allocate another paid model session.
       if (existing) return xml('<Response><Hangup /></Response>');
       const token=crypto.randomUUID().replaceAll('-','')+crypto.randomUUID().replaceAll('-','');
-      const call=await createCall(env,agent.user_id,publicAgent(agent),'phone',callSid,await hashMediaToken(token));
+      const call=await createCall(env,agent.user_id,publicAgent(agent),'phone',callSid,await hashMediaToken(token),transport);
       if (!call) return unavailable();
       try { await initializeCall(env,call); }
       catch {

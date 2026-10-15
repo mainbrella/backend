@@ -199,7 +199,7 @@ return 409 `recipient_unsubscribed`; preference lookup failures return 503
 The receptionist API is enabled by `VOICE_ENABLED=true` and the SQLite-backed
 `RECEPTIONIST_CALL` Durable Object binding (`ReceptionistCall`) in
 `wrangler.jsonc`. Set `VOICE_PUBLIC_ORIGIN` to the exact public HTTPS API origin.
-Apply migrations through `044_voice_billing.sql` before using the API:
+Apply migrations through `045_voice_sip.sql` before using the API:
 
 ```sh
 npm run db:migrate:local
@@ -231,22 +231,51 @@ models are `@cf/deepgram/flux` STT, `@cf/meta/llama-3.3-70b-instruct-fp8-fast`
 with a 256-token response limit, and `@cf/deepgram/aura-1` TTS. Available Aura
 voices are `asteria`, `luna`, and `athena`.
 
-Inbound phone support requires manually provisioning an existing Twilio number;
-this service does not buy numbers. Set `TWILIO_AUTH_TOKEN` as a Wrangler secret
-and configure `TWILIO_ACCOUNT_SID`, `TWILIO_PHONE_NUMBER` (E.164), and
-`TWILIO_AGENT_ID` (the saved agent's ID) as variables, alongside
-`VOICE_PUBLIC_ORIGIN`. Also set `VOICE_PHONE_MICRO_USD_PER_MINUTE` to the
-provider's total per-minute cost in micro-USD for this number (include inbound
-voice and Media Streams). No default rate is assumed; phone calling stays
-unavailable without it. This rate excludes our markup. For example, a combined
-$0.0125/minute provider tariff is `12500`; verify your actual number's tariff.
-`GET /voice/config` returns the mapped phone number and per-agent `webhookUrl`;
-configure that URL as the number's Twilio Voice webhook using HTTP POST. The
-incoming form webhook and media WebSocket handshake are checked with Twilio's
-SDK signature validation. TwiML passes a media token that expires after 60
-seconds and can be claimed once. This release maps one number to one configured
-agent. `transferNumber` must be `null`; transfers, outbound calling, CRM and
-calendar integrations are not supported.
+Inbound telephony supports Twilio phone numbers (PSTN) and
+[Twilio Programmable Voice SIP Domains](https://www.twilio.com/docs/voice/api/sending-sip).
+The PBX or SIP endpoint connects to Twilio, which sends a signed HTTP webhook
+and bridges bidirectional audio over WebSockets to this Worker. Mainbrella does
+not terminate SIP/RTP directly or provision Twilio numbers or SIP Domains.
+
+For either transport, set `TWILIO_AUTH_TOKEN` as a Wrangler secret and configure
+`TWILIO_ACCOUNT_SID`, `TWILIO_AGENT_ID` (the saved agent's ID), and
+`VOICE_PUBLIC_ORIGIN`. Then configure one or both destinations:
+
+| Transport | Destination variable | Provider rate variable |
+| --- | --- | --- |
+| PSTN | `TWILIO_PHONE_NUMBER`, an E.164 number | `VOICE_PHONE_MICRO_USD_PER_MINUTE` |
+| SIP | `TWILIO_SIP_URI`, e.g. `sip:receptionist@your-domain.sip.twilio.com` | `VOICE_SIP_MICRO_USD_PER_MINUTE` |
+
+Each rate is the provider's total per-minute cost in micro-USD for that transport,
+including Media Streams, before Mainbrella's markup. For example, a combined
+$0.0125/minute provider tariff is `12500`; verify your actual tariff. No default
+or cross-transport rate is assumed. A destination remains unavailable until its
+own rate is configured. SIP-only installations do not need a phone number or
+PSTN rate.
+
+`GET /voice/config` reports `telephony.phoneNumber`, `telephony.sipUri` and a
+per-agent `telephony.webhookUrl`. `configured` is true when at least one priced
+destination is available; unavailable destinations are null. Configure the
+webhook URL using HTTP POST on the Twilio number and/or the SIP Domain's
+"A call comes in" handler. For SIP, attach a Twilio Credential List or IP Access
+Control List to authenticate your PBX or SIP endpoint, then dial the configured
+SIP URI. Use a Programmable Voice SIP Domain, rather than an Elastic SIP Trunk.
+
+The called SIP user and host must match `TWILIO_SIP_URI`. Regional hosts such as
+`your-domain.sip.us1.twilio.com` are accepted when configured with that exact host.
+Host matching ignores case; user matching preserves case. The signaling ports
+5060/5061 and an optional `;transport=udp`, `;transport=tcp`, or `;transport=tls`
+suffix do not affect destination matching. Other URI parameters and headers are
+rejected. Calls to other users or domains are rejected even with a valid Twilio
+signature. Both destinations map to the single `TWILIO_AGENT_ID`.
+
+The incoming form webhook and media WebSocket handshake are checked with
+Twilio's SDK signature validation. TwiML passes a media token that expires after
+60 seconds and can be claimed once. PSTN and SIP calls both use `channel: "phone"`;
+call history distinguishes them with `phoneTransport: "pstn"` or `"sip"` (null
+for browser/text calls). Historical phone calls are reported as PSTN.
+`transferNumber` must be `null`; transfers, outbound calling, CRM and calendar
+integrations are not supported.
 
 Each account can have three active calls and 100 calls started in a rolling day.
 Calls end after 15 minutes or 60 caller turns. Each call retains a snapshot of
@@ -263,10 +292,11 @@ Voice uses the owner's prepaid wallet for all three channels, with the existing
 charges input characters, including the greeting; Flux reserves five seconds of
 16 kHz PCM at a time and settles the audio bytes forwarded. Rates are taken from
 [Cloudflare Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
-Phone transport reserves the 15-minute maximum at the configured rate, then
+Phone transport reserves the 15-minute maximum at its PSTN or SIP rate, then
 settles rounded-up minutes from Twilio’s reported duration and releases the unused
-hold. Missing provider duration retains the hold until a retry obtains it. Number rental
-is outside this per-call tariff.
+hold. SIP transport receipts use `twilio-sip-inbound`; PSTN receipts retain
+`twilio-inbound`. Missing provider duration retains the hold until a retry obtains
+it. Number rental is outside this per-call tariff.
 
 Credits and spending limits are checked before allocation, connection and paid
 inference, and every five seconds while active. A failed reservation or balance

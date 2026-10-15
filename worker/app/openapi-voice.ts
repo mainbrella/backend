@@ -12,7 +12,7 @@ const agent = z.object({
   voice, transferNumber: z.null(), updatedAt: z.iso.datetime(),
 }).openapi('VoiceAgentConfig');
 const call = z.object({
-  id: z.string(), channel, status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
+  id: z.string(), channel, phoneTransport: z.enum(['pstn', 'sip']).nullable().describe('Twilio transport for phone calls; null for browser/text calls. Historical phone calls use pstn.'), status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(), durationSeconds: z.number().int().nonnegative(),
   transcript: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string() })).max(121),
 }).openapi('VoiceCall');
@@ -22,9 +22,9 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   const common = { tags: ['Voice'], security: cookieSecurity };
   register(api, 'get', '/voice/config', {
     ...common, operationId: 'getVoiceConfig', summary: 'Read AI receptionist availability and model configuration',
-    description: 'Reports whether browser calling and telephony are configured. Telephony URLs and numbers may be null. Voice reception supports calls up to 15 minutes and 60 transcript turns.',
+    description: 'Reports whether browser calling and Twilio PSTN or SIP reception are configured. Telephony is configured when at least one destination has its own provider rate. Phone number and SIP URI are reported independently and may be null; a SIP-only setup does not require a phone number. Both destinations use the same webhook URL and configured agent. Voice reception supports calls up to 15 minutes and 60 transcript turns.',
     request: { headers }, responses: { 200: jsonResponse(z.object({
-      enabled: z.boolean(), browserCalling: z.boolean(), telephony: z.object({ configured: z.boolean(), webhookUrl: z.string().nullable(), phoneNumber: z.string().nullable() }),
+      enabled: z.boolean(), browserCalling: z.boolean(), telephony: z.object({ configured: z.boolean(), webhookUrl: z.string().nullable(), phoneNumber: z.string().nullable(), sipUri: z.string().nullable() }),
       models: z.object({ stt: z.string(), llm: z.string(), tts: z.string() }),
     })), ...errors(401, 403, 503) },
   }, handler);
@@ -67,7 +67,7 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }, handler);
   register(api, 'post', '/voice/twilio/incoming/{agentId}', {
     operationId: 'receiveVoiceTwilioCall', tags: ['Voice'], summary: 'Receive a signed Twilio incoming call webhook', security: [{ twilioSignature: [] }],
-    description: 'Twilio form-encoded webhook authenticated with X-Twilio-Signature. The response is TwiML XML; insufficient prepaid funds return a hangup response. Phone transport requires a configured provider rate, held for the 15-minute maximum then settled by rounded-up provider-reported minutes at cost plus 50%. Calls expire after 15 minutes and support up to 60 transcript turns.',
+    description: 'Twilio form-encoded webhook authenticated with X-Twilio-Signature and the configured AccountSid and agent ID. To must match TWILIO_PHONE_NUMBER or the user and host of TWILIO_SIP_URI (sip:user@domain.sip.twilio.com, including regional domains). SIP host case, signaling ports 5060/5061 and an optional transport=udp/tcp/tls parameter do not affect destination matching; other URI parameters and headers are rejected. Configure this HTTP POST URL on the Twilio number or Programmable Voice SIP Domain; authenticate SIP callers using Twilio credentials or IP ACLs. SIP calls retain channel phone with phoneTransport sip. The response is TwiML XML; insufficient prepaid funds return a hangup response. PSTN and SIP require their respective VOICE_PHONE_MICRO_USD_PER_MINUTE or VOICE_SIP_MICRO_USD_PER_MINUTE provider rate, held for the 15-minute maximum then settled by rounded-up provider-reported minutes at cost plus 50%. Calls expire after 15 minutes and support up to 60 transcript turns.',
     request: { params: agentId, headers: z.object({ 'X-Twilio-Signature': z.string() }), body: { required: true, content: { 'application/x-www-form-urlencoded': { schema: z.record(z.string(), z.string()) } } } },
     responses: { 200: { description: 'TwiML response.', content: { 'application/xml': { schema: z.string() } } }, ...errors(400, 403, 404, 429, 503) },
   }, handler);

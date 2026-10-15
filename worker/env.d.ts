@@ -3,10 +3,12 @@
 interface Env {
   VOICE_ENABLED?: string;
   VOICE_PHONE_MICRO_USD_PER_MINUTE?: string;
+  VOICE_SIP_MICRO_USD_PER_MINUTE?: string;
   VOICE_PUBLIC_ORIGIN?: string;
   TWILIO_AUTH_TOKEN?: string;
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_PHONE_NUMBER?: string;
+  TWILIO_SIP_URI?: string;
   TWILIO_AGENT_ID?: string;
   NAMECOM_ENABLED?: string;
   NAME_DOT_COM_USERNAME?: string;

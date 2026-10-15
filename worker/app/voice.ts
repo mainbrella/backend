@@ -1,6 +1,6 @@
 import { billingError } from '../lib/voice-billing';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
-import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceCallRow } from '../lib/voice';
+import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, twilioSipUri, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceCallRow } from '../lib/voice';
 import { handleTwilioRequest } from './voice-twilio';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -28,7 +28,8 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       return authJson({enabled:voiceEnabled(env),browserCalling:voiceEnabled(env),
         telephony:{configured:telephonyConfigured(env,agent?.id || null),
           webhookUrl:agent && publicVoiceOrigin(env) ? `${publicVoiceOrigin(env)}/voice/twilio/incoming/${agent.id}` : null,
-          phoneNumber:telephonyConfigured(env,agent?.id || null) ? env.TWILIO_PHONE_NUMBER : null},models:VOICE_MODELS},200,cors);
+          phoneNumber:telephonyConfigured(env,agent?.id || null,'pstn') ? env.TWILIO_PHONE_NUMBER : null,
+          sipUri:telephonyConfigured(env,agent?.id || null,'sip') ? twilioSipUri(env.TWILIO_SIP_URI) : null},models:VOICE_MODELS},200,cors);
     }
     if (url.pathname === '/voice/agent') {
       if (request.method === 'GET') {

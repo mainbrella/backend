@@ -7,6 +7,7 @@ import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 import { voiceBillingFixture } from './voice-billing-test-helpers';
 import { hangupTwilioCall, pcmToTwilio, twilioToPCM } from '../lib/voice-telephony';
+import { publicCall, twilioSipUri, type VoiceCallRow } from '../lib/voice';
 
 const API = 'https://api.mainbrella.com';
 const ORIGIN = 'https://mainbrella.com';
@@ -15,6 +16,7 @@ const AUTH_TOKEN = 'twilio-auth-token-for-tests';
 const ACCOUNT_SID = `AC${'a'.repeat(32)}`;
 const PHONE_NUMBER = '+15551234567';
 const CALL_SID = `CA${'b'.repeat(32)}`;
+const SIP_URI = 'sip:receptionist@mainbrella.sip.twilio.com';
 
 type VoiceMockCall = { name: string; request: Request };
 function upgradeResponse(): Response {
@@ -25,6 +27,7 @@ async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t);
   t.after(() => f.close());
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/043_voice_receptionist.sql', import.meta.url)), 'utf8'));
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/045_voice_sip.sql', import.meta.url)), 'utf8'));
   const billing=await voiceBillingFixture(f.env,f.sqlite,USER_ONE);
   f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
   f.env.AI = {} as Ai;
@@ -124,6 +127,7 @@ test('config reflects enablement and telephony is mapped only to its configured 
   assert.equal(before.browserCalling, true);
   assert.equal(before.telephony.configured, false);
   assert.equal(before.telephony.phoneNumber, null);
+  assert.equal(before.telephony.sipUri, null);
   const agent = await saveAgent(f);
   f.env.TWILIO_AGENT_ID = agent.id;
   const configured = await (await handleRequest(request('/voice/config'), f.env)).json() as any;
@@ -139,6 +143,43 @@ test('config reflects enablement and telephony is mapped only to its configured 
   assert.equal(disabled.telephony.configured, false);
 });
 
+test('SIP-only and combined telephony report independently priced destinations only to their mapped agent', async t => {
+  const f=await fixture(t);
+  const agent=await saveAgent(f);f.env.TWILIO_AGENT_ID=agent.id;
+  f.env.TWILIO_SIP_URI=SIP_URI;
+  const config=async(session=SESSION_ONE)=>(await (await handleRequest(request('/voice/config','GET',undefined,{session}),f.env)).json() as any).telephony;
+  assert.equal((await config()).sipUri,null); // PSTN pricing cannot enable SIP.
+  f.env.VOICE_SIP_MICRO_USD_PER_MINUTE='4000';
+  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:PHONE_NUMBER,sipUri:SIP_URI});
+  delete f.env.TWILIO_PHONE_NUMBER;delete f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE;
+  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:null,sipUri:SIP_URI});
+  await saveAgent(f,SESSION_TWO);
+  const other=await config(SESSION_TWO);
+  assert.equal(other.configured,false);assert.equal(other.sipUri,null);assert.equal(other.phoneNumber,null);
+  for (const rate of ['', '0', '-1', 'NaN', '1.5', '1000001']) {
+    f.env.VOICE_SIP_MICRO_USD_PER_MINUTE=rate;
+    assert.equal((await config()).configured,false,rate);
+  }
+  f.env.VOICE_SIP_MICRO_USD_PER_MINUTE='4000';
+  f.env.TWILIO_SIP_URI='sip:receptionist@untrusted.example';
+  assert.equal((await config()).configured,false);
+  f.env.TWILIO_SIP_URI=SIP_URI;f.env.VOICE_ENABLED='false';
+  assert.equal((await config()).sipUri,null);
+});
+
+test('SIP destination parsing preserves the called user and rejects ambiguous or foreign URIs', () => {
+  for (const uri of [SIP_URI,'SIP:receptionist@MAINBRELLA.SIP.TWILIO.COM:5061;transport=tls',`${SIP_URI}:5060;transport=udp`,`${SIP_URI};transport=tcp`]) {
+    assert.equal(twilioSipUri(uri),SIP_URI);
+  }
+  assert.equal(twilioSipUri('sip:Receptionist@mainbrella.sip.twilio.com'),'sip:Receptionist@mainbrella.sip.twilio.com');
+  assert.equal(twilioSipUri('sip:receptionist@mainbrella.sip.us1.twilio.com'),'sip:receptionist@mainbrella.sip.us1.twilio.com');
+  for (const uri of [null,'',PHONE_NUMBER,'sip:receptionist@evil.example',`${SIP_URI}.evil.example`,`${SIP_URI}@evil.example`,
+    `${SIP_URI}?To=${PHONE_NUMBER}`,`${SIP_URI};user=phone`,`${SIP_URI};transport=tls;extra=1`,`${SIP_URI}:9999`,
+    'sip:receptionist:password@mainbrella.sip.twilio.com',`${SIP_URI}\r\n`,`${SIP_URI}\n`, `sip:${'x'.repeat(321)}@mainbrella.sip.twilio.com`]) {
+    assert.equal(twilioSipUri(uri),null,String(uri));
+  }
+});
+
 test('text and browser calls initialize with frozen config, then list, detail and end remain account-scoped', async t => {
   const f = await fixture(t);
   const agent = await saveAgent(f);
@@ -147,6 +188,7 @@ test('text and browser calls initialize with frozen config, then list, detail an
   const browserBody = await browserResponse.json() as any;
   const browser = browserBody.call;
   assert.equal(browser.channel, 'browser');
+  assert.equal(browser.phoneTransport, null);
   assert.equal(browser.status, 'active');
   assert.match(browserBody.websocketUrl, /^wss:/);
   const snapshot = f.sqlite.prepare('SELECT config_json FROM voice_calls WHERE id=?').get(browser.id) as { config_json: string };
@@ -234,6 +276,55 @@ test('Twilio incoming webhooks require valid signatures, mapped identities and r
   assert.match(await replay.text(), /<Hangup \/>/);
   assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls WHERE provider_call_id=?').get(CALL_SID) as any).count, 1);
   assert.equal(f.calls.filter(call => new URL(call.request.url).pathname === '/initialize').length, 1);
+  const row=f.sqlite.prepare('SELECT * FROM voice_calls WHERE provider_call_id=?').get(CALL_SID) as unknown as VoiceCallRow;
+  assert.equal(publicCall(row).phoneTransport,'pstn');
+  f.sqlite.prepare('UPDATE voice_calls SET phone_transport=NULL WHERE id=?').run(row.id);
+  const legacy=f.sqlite.prepare('SELECT * FROM voice_calls WHERE id=?').get(row.id) as unknown as VoiceCallRow;
+  assert.equal(publicCall(legacy).phoneTransport,'pstn');
+});
+
+test('signed SIP calls require the configured destination, account, agent and SIP rate before allocation', async t => {
+  const f=await fixture(t);const agent=await saveAgent(f);f.env.TWILIO_AGENT_ID=agent.id;
+  const path=`/voice/twilio/incoming/${agent.id}`;
+  const fields={AccountSid:ACCOUNT_SID,CallSid:CALL_SID,From:'sip:caller@pbx.example',To:SIP_URI};
+  assert.equal((await handleRequest(signedForm(path,fields),f.env)).status,403);
+  f.env.TWILIO_SIP_URI=SIP_URI;
+  assert.equal((await handleRequest(signedForm(path,fields),f.env)).status,503);
+  f.env.VOICE_SIP_MICRO_USD_PER_MINUTE='4000';
+  delete f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE;
+  assert.equal((await handleRequest(signedForm(path,{...fields,To:PHONE_NUMBER}),f.env)).status,503);
+  f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
+  const invalid=signedForm(path,fields);invalid.headers.set('X-Twilio-Signature','invalid');
+  assert.equal((await handleRequest(invalid,f.env)).status,403);
+  for (const To of ['sip:someone-else@mainbrella.sip.twilio.com','sip:Receptionist@mainbrella.sip.twilio.com',
+    'sip:receptionist@other.sip.twilio.com',`${SIP_URI}.evil.example`,`${SIP_URI};user=phone`,`${SIP_URI}?x=1`]) {
+    assert.equal((await handleRequest(signedForm(path,{...fields,To}),f.env)).status,403,To);
+  }
+  assert.equal((await handleRequest(signedForm(path,{...fields,AccountSid:`AC${'c'.repeat(32)}`}),f.env)).status,403);
+  assert.equal((await handleRequest(signedForm(`/voice/twilio/incoming/${crypto.randomUUID()}`,fields),f.env)).status,403);
+  assert.equal((await handleRequest(signedForm(path,{...fields,CallSid:'invalid'}),f.env)).status,403);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,0);
+  delete f.env.TWILIO_PHONE_NUMBER;delete f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE;
+  const response=await handleRequest(signedForm(path,{...fields,To:'sip:receptionist@MAINBRELLA.SIP.TWILIO.COM:5061;transport=tls'}),f.env);
+  assert.equal(response.status,200);assert.match(await response.text(),/<Connect><Stream/);
+  const row=f.sqlite.prepare('SELECT * FROM voice_calls WHERE provider_call_id=?').get(CALL_SID) as unknown as VoiceCallRow;
+  assert.equal(row.phone_transport,'sip');assert.equal(publicCall(row).phoneTransport,'sip');
+  assert.equal(row.channel,'phone');
+  const replay=await handleRequest(signedForm(path,fields),f.env);
+  assert.match(await replay.text(),/<Hangup \/>/);
+  assert.equal(f.calls.filter(call=>new URL(call.request.url).pathname==='/initialize').length,1);
+});
+
+test('unfunded SIP calls hang up without allocating a paid session', async t => {
+  const f=await fixture(t);const agent=await saveAgent(f);f.env.TWILIO_AGENT_ID=agent.id;
+  f.env.TWILIO_SIP_URI=SIP_URI;f.env.VOICE_SIP_MICRO_USD_PER_MINUTE='4000';
+  delete f.env.TWILIO_PHONE_NUMBER;
+  const state=f.billing.stored.get('containerAccount') as any;
+  state.wallet.fundings.pi_voice.refundedCents=500;f.billing.stored.set('containerAccount',state);
+  const response=await handleRequest(signedForm(`/voice/twilio/incoming/${agent.id}`,{AccountSid:ACCOUNT_SID,CallSid:CALL_SID,To:SIP_URI}),f.env);
+  assert.equal(response.status,200);assert.match(await response.text(),/<Hangup \/>/);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,0);
+  assert.equal(f.calls.filter(call=>new URL(call.request.url).pathname==='/initialize').length,0);
 });
 
 test('Twilio μ-law conversion produces bounded 16 kHz PCM and valid 8 kHz frame shapes', () => {
