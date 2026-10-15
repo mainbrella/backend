@@ -816,6 +816,7 @@ test('voice inventory search documents authenticated bounded read-only filters a
   assert.equal((parameters.includeSimilar as any).default, 'false');
   assert.match(search.description, /No number is bought, held or reserved/);
   assert.ok(search.responses[429]); assert.ok(search.responses[503]);
+  assert.match(search.responses[503].description, /Provider redirects are rejected/);
   assert.equal(search.responses[200].content['application/json'].schema.properties.numbers.maxItems, 50);
   assert.equal(paths['/voice/numbers/search'].post, undefined);
 });

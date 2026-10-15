@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+import { Miniflare, Response as MiniflareResponse, convertV4MiniflareOptions } from 'miniflare';
 import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
 import { matchesNumberPattern, numberSearchDigits } from './voice-number-search';
@@ -23,6 +26,47 @@ async function fixture(t: test.TestContext) {
   f.env.VOICE_NUMBER_SEARCH_LIMIT = { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: true }; } } as RateLimit;
   return { ...f, keys };
 }
+
+test('number search works in Workers and rejects provider redirects without following them', async t => {
+  const bundle = await build({
+    stdin: { contents: `
+      import { searchVoiceNumbers, numberSearchInput } from './voice-number-search';
+      export default { async fetch(request, env) {
+        try {
+          return Response.json(await searchVoiceNumbers(env, numberSearchInput.parse({ query: 'flowers' })));
+        } catch {
+          return Response.json({ error: 'number_search_unavailable' }, { status: 503 });
+        }
+      } };
+    `, resolveDir: fileURLToPath(new URL('.', import.meta.url)) },
+    bundle: true, write: false, format: 'esm', target: 'es2022', platform: 'browser', external: ['cloudflare:*', 'node:*'],
+  });
+  const requests: string[] = [];
+  let redirect = false;
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
+    name: 'number-search-test', modules: true, script: bundle.outputFiles[0].text,
+    compatibilityDate: '2026-09-18', compatibilityFlags: ['nodejs_compat'],
+    bindings: { TELNYX_API_KEY: 'number-search-secret-fixture' },
+    outboundService: async request => {
+      requests.push(request.url);
+      assert.equal(new URL(request.url).origin, 'https://api.telnyx.com');
+      assert.equal(request.headers.get('authorization'), 'Bearer number-search-secret-fixture');
+      return redirect ? new MiniflareResponse(null, { status: 302, headers: { location: 'https://other.example/numbers' } })
+        : MiniflareResponse.json({ data: [row()] });
+    },
+  }] }));
+  t.after(() => mf.dispose());
+  const response = await mf.dispatchFetch(endpoint);
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.equal(body.numbers[0].phoneNumber, '+18003569377');
+  assert.equal(requests.length, 1);
+  redirect = true;
+  const redirected = await mf.dispatchFetch(endpoint);
+  assert.equal(redirected.status, 503);
+  assert.deepEqual(await redirected.json(), { error: 'number_search_unavailable' });
+  assert.equal(requests.length, 2);
+});
 
 test('number search requires an authenticated account and trusted origin before provider access', async t => {
   const f = await fixture(t);

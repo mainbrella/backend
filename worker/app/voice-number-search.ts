@@ -64,7 +64,7 @@ export async function searchVoiceNumbers(env: Env, search: Search, fetcher: type
   if (search.region) url.searchParams.set('filter[administrative_area]', search.region);
 
   const response = await fetcher(url, {
-    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(12_000),
+    method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(12_000),
     headers: { authorization: `Bearer ${env.TELNYX_API_KEY}`, accept: 'application/json' },
   });
   if (!response.ok) {
