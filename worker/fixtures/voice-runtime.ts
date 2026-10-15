@@ -5,27 +5,49 @@ import { appendAccountingEvent } from '../lib/accounting-ledger';
 // protocol and persistence without running paid inference during tests.
 import { ReceptionistCall as BaseCall } from '../durable-objects/receptionist-call';
 import { handleVoiceRequest } from '../app/voice';
-const ai = { async run(model: string,input: Record<string,unknown>) {
+type VoiceTestEnv = Env & {
+  VOICE_TEST_MULTI_TURN?:string; VOICE_TEST_FAIL_FILLER?:string; VOICE_TEST_REJECT_TTS_OVERLAP?:string;
+  VOICE_TEST_MULTI_SENTENCE?:string; VOICE_TEST_DELAY_MODEL?:string; VOICE_TEST_MODEL_DELAY_MS?:string;
+};
+function createAI(env: VoiceTestEnv) {
+  const testFlags=env;
+  let activeTTS=0;
+  return { async run(model: string,input: Record<string,unknown>) {
   if (model.includes('/flux')) {
     const pair=new WebSocketPair();pair[1].accept();
-    let sent=false;
+    let sent=0;
     pair[1].addEventListener('message',event=>{
-      if (!sent && typeof event.data!=='string') { sent=true;pair[1].send(JSON.stringify({event:'EndOfTurn',transcript:'Could I leave a message?'})); }
+      if (typeof event.data!=='string' && sent<(testFlags.VOICE_TEST_MULTI_TURN==='true'?2:1)) {
+        sent++;
+        pair[1].send(JSON.stringify({event:'EndOfTurn',transcript:'Could I leave a message?'}));
+      }
     });
     return new Response(null,{status:101,webSocket:pair[0]});
   }
   if (model.includes('/aura-1')) {
     if (input.encoding!=='linear16' || input.container!=='none' || input.sample_rate!==16000) throw new Error('Raw PCM TTS required');
+    const text=String(input.text);
+    if(testFlags.VOICE_TEST_FAIL_FILLER==='true' && ['Mm-hmm.','Okay.','Ah-huh.'].includes(text)) throw new Error('Fixture optional filler outage');
+    if(testFlags.VOICE_TEST_REJECT_TTS_OVERLAP==='true') {
+      activeTTS++;
+      if(activeTTS>1){activeTTS--;throw new Error('Fixture overlapping TTS requests');}
+      await new Promise(resolve=>setTimeout(resolve,20));
+      activeTTS--;
+    }
     return new Response(new Uint8Array(640),{headers:{'content-type':'audio/pcm'}});
   }
   const messages=input.messages as Array<{role:string;content:string}>;
   const caller=messages.at(-1)!.content;
-  if (caller==='slow model') await new Promise(resolve=>setTimeout(resolve,200));
+  if (caller==='slow model' || testFlags.VOICE_TEST_DELAY_MODEL==='true') await new Promise(resolve=>setTimeout(resolve,Number(testFlags.VOICE_TEST_MODEL_DELAY_MS)||200));
   if (caller==='waiting model') await new Promise(resolve=>setTimeout(resolve,6500));
   if (caller==='missing usage') return {response:'Unknown usage'};
   if (caller==='cause model failure') throw new Error('Fixture inference unavailable');
-  return {response:`I can take a message: ${caller}`,usage:{prompt_tokens:100,completion_tokens:20}};
+  const response=testFlags.VOICE_TEST_MULTI_SENTENCE==='true'
+    ? `I can take a message: ${caller}. I will keep this information for the team.`
+    : `I can take a message: ${caller}`;
+  return {response,usage:{prompt_tokens:100,completion_tokens:20}};
 }};
+}
 export class VoiceBillingAccount extends DurableObject<Env> {
   private controller: ContainerAccountController;
   constructor(ctx: DurableObjectState,env:Env) {
@@ -65,7 +87,7 @@ export class ReceptionistCall extends BaseCall {
       };
       const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
     }});
-    super(ctx,{...env,DB,RECEPTIONIST_CALL,AI:ai} as unknown as Env);
+    super(ctx,{...env,DB,RECEPTIONIST_CALL,AI:createAI(env as VoiceTestEnv)} as unknown as Env);
     this.faults=faults;
   }
   protected async hangupPhone(_callSid:string) {
@@ -95,4 +117,4 @@ export default { async fetch(request: Request,env: Env,ctx: ExecutionContext) {
   if(fault){await (env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(fault[1])) as unknown as ReceptionistCall).stageFinalizationOutage();return new Response(null,{status:204});}
   const match=new URL(request.url).pathname.match(/^\/__test_purge\/(.+)$/);
   if(match){await env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(match[1])).purgeCall();return new Response(null,{status:204});}
-  return handleVoiceRequest(request,{...env,AI:ai} as unknown as Env,ctx); } };
+  return handleVoiceRequest(request,{...env,AI:createAI(env as VoiceTestEnv)} as unknown as Env,ctx); } };

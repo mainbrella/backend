@@ -15,22 +15,17 @@ test('fast voice replies skip acknowledgments',async()=>{
   assert.deepEqual(parts,[{type:'text-delta',text:'Here is the answer.'}]);
 });
 
-test('slow voice replies acknowledge at one and five seconds, then wait for the answer',async t=>{
+test('slow voice replies acknowledge immediately, hold at five seconds, then wait for the answer',async t=>{
   t.mock.timers.enable({apis:['setTimeout','Date']});
   const reply=deferred();
   const stream=withVoiceBackchannel(reply.promise,new AbortController().signal,1);
-  let received=false;
-  const first=stream.next().then(part=>{received=true;return part;});
-  t.mock.timers.tick(999);
+  const first=stream.next();
   await Promise.resolve();
-  assert.equal(received,false);
-  t.mock.timers.tick(1);
+  t.mock.timers.tick(0);
   assert.deepEqual((await first).value,{type:'text-delta',text:'Mm-hmm. '});
   assert.deepEqual((await stream.next()).value,{type:'text-end'});
-  // Time spent synthesizing the acknowledgment counts toward the five seconds.
-  t.mock.timers.tick(2000);
   const second=stream.next();
-  t.mock.timers.tick(2000);
+  t.mock.timers.tick(5000);
   assert.deepEqual((await second).value,{type:'text-delta',text:'One moment. '});
   assert.deepEqual((await stream.next()).value,{type:'text-end'});
   const final=stream.next();
@@ -45,7 +40,7 @@ test('a ready answer takes priority over a later holding phrase',async t=>{
   const reply=deferred();
   const stream=withVoiceBackchannel(reply.promise,new AbortController().signal,2);
   const first=stream.next();
-  t.mock.timers.tick(1000);
+  t.mock.timers.tick(0);
   assert.deepEqual((await first).value,{type:'text-delta',text:'Okay. '});
   await stream.next();
   reply.resolve('The answer.');
@@ -62,7 +57,7 @@ for (const afterAcknowledgment of [false,true]) {
     const stream=withVoiceBackchannel(reply.promise,controller.signal,3);
     let next=stream.next();
     if (afterAcknowledgment) {
-      t.mock.timers.tick(1000);
+      t.mock.timers.tick(0);
       assert.deepEqual((await next).value,{type:'text-delta',text:'Ah-huh. '});
       await stream.next();
       next=stream.next();
@@ -80,7 +75,7 @@ test('model errors remain errors, including after an acknowledgment',async t=>{
   const reply=deferred();
   const stream=withVoiceBackchannel(reply.promise,new AbortController().signal,1);
   const first=stream.next();
-  t.mock.timers.tick(1000);
+  t.mock.timers.tick(0);
   await first;
   await stream.next();
   const error=new Error('Model unavailable');

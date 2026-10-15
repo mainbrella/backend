@@ -2,7 +2,7 @@ import { hangupTwilioCall } from '../lib/voice-telephony';
 import { hangupTelnyxCall } from '../lib/voice-telnyx';
 import { Agent, type Connection, type ConnectionContext } from 'agents';
 import { withVoice, WorkersAIFluxSTT, type TextSource, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
-import { withVoiceBackchannel } from '../lib/voice-backchannel';
+import { isVoiceBackchannel, voiceAcknowledgment, withVoiceBackchannel } from '../lib/voice-backchannel';
 import { billingError, checkVoiceBalance, llmCost, llmReservation, meteredVoiceInference, phoneRate, reportVoiceUsage, reserveVoiceUsage, stopUserCalls, STT_WINDOW_MS, sttCost, ttsCost } from '../lib/voice-billing';
 import { MAX_CALL_MS, MAX_TURNS, readCall, receptionistMessages, VOICE_MODELS, type VoiceAgentConfig, type VoiceCallRow } from '../lib/voice';
 
@@ -27,6 +27,8 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
   private lastTurn = 0;
   private activeInference = 0;
   private audioWrites: Promise<void> = Promise.resolve();
+  private ttsWrites: Promise<void> = Promise.resolve();
+  private backchannelAudio = new Map<string,Promise<ArrayBuffer | null>>();
   private sttReservation: Promise<void> | null = null;
   private billingTimer: ReturnType<typeof setTimeout> | null = null;
   private owner() {
@@ -89,23 +91,55 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     await reportVoiceUsage(this.env,stt.id,sttCost(audioMs),{audioBytes:stt.bytes,audioMs,sampleRate:16000});
     if (this.state?.stt?.id===stt.id) this.setState({...this.state,stt:undefined});
   }
-  tts: TTSProvider = { synthesize: async (text,signal) => {
+  tts: TTSProvider = { synthesize: (text,signal) => {
+    if (!isVoiceBackchannel(text)) return this.queueSpeech(text,signal);
+    const phrase=text.trim();
+    let audio=this.backchannelAudio.get(phrase);
+    if (!audio) {
+      // Config (including the speaker) is frozen for this call. Generate and
+      // meter a phrase once; playback reuses its PCM without another AI call.
+      audio=this.queueSpeech(phrase,undefined,true);
+      this.backchannelAudio.set(phrase,audio);
+    }
+    return audio.then(result=>signal?.aborted || this.state?.closed ? null : result);
+  }};
+  private queueSpeech(text: string,signal?: AbortSignal,optional=false): Promise<ArrayBuffer | null> {
     this.activeInference++;
+    // The SDK eagerly queues every sentence in a streamed answer. Keep the
+    // entire inference and response body serial to avoid a burst of requests.
+    const task=this.ttsWrites.then(()=>this.synthesizeSpeech(text,signal,optional));
+    this.ttsWrites=task.then(()=>{},()=>{});
+    return task.finally(()=>{this.activeInference--;});
+  }
+  private async synthesizeSpeech(text: string,signal?: AbortSignal,optional=false): Promise<ArrayBuffer | null> {
+    if (!this.state || this.state.closed || signal?.aborted) return null;
+    let providerFailed=false;
     try {
       await this.checkBilling();
       const response=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.tts,ttsCost(text),async()=>{
-        const response = await this.env.AI.run(VOICE_MODELS.tts,{
-          text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
-        },{returnRawResponse:true,signal}) as Response;
-        if (!response.ok) throw new Error('tts_failed');
-        return {result:response,providerMicroUsd:ttsCost(text),usage:{characters:text.length}};
+        try {
+          const response = await this.env.AI.run(VOICE_MODELS.tts,{
+            text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
+          },{returnRawResponse:true,signal}) as Response;
+          if (!response.ok) throw new Error(`tts_http_${response.status}`);
+          const audio=await response.arrayBuffer();
+          if (!audio.byteLength || audio.byteLength%2) throw new Error('tts_invalid_pcm');
+          return {result:audio,providerMicroUsd:ttsCost(text),usage:{characters:text.length}};
+        } catch (error) { providerFailed=true;throw error; }
       },()=>Boolean(this.state && !this.state.closed && !signal?.aborted));
-      return await response.arrayBuffer();
+      return response;
     } catch (error) {
+      if (this.state?.closed && error instanceof Error && error.message==='call_ended') return null;
+      if (providerFailed && !signal?.aborted) {
+        console.error('voice_tts_provider_failed',{callId:this.state?.callId,optional,error:error instanceof Error?error.message.slice(0,200):'unknown'});
+        // A filler is optional. Its provider failure must not close the call;
+        // metering retains the reservation when provider usage is unknown.
+        if (optional) return null;
+      }
       if (!signal?.aborted) await this.billingFailure(error);
       throw error;
-    } finally { this.activeInference--; }
-  }};
+    }
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx,env as Cloudflare.Env & Env);
@@ -243,12 +277,21 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
       if (!text) throw new Error('No response generated');
       return text;
     } catch (error) {
-      if (!context.signal.aborted) await this.billingFailure(error);
+      if (!context.signal.aborted) {
+        console.error('voice_response_failed',{callId:this.state?.callId,error:error instanceof Error?error.message.slice(0,200):'unknown'});
+        await this.billingFailure(error);
+      }
       throw new Error(context.signal.aborted ? 'Turn interrupted' : 'The receptionist is unavailable. Please try again.');
     } finally { this.activeInference--; }
   }
   saveMessage(role: 'user'|'assistant',text: string): void {
     super.saveMessage(role,text);
+    if (role==='assistant' && this.state && !this.state.closed && this.state.channel!=='text') {
+      // Prepare the next acknowledgment while the greeting/answer is playing,
+      // so a caller's completed turn needs no extra wait or TTS round trip.
+      const warm=this.tts.synthesize(voiceAcknowledgment(this.state.turns+1));
+      this.ctx.waitUntil(warm.then(()=>{},()=>{}));
+    }
     const transcript = JSON.stringify(this.getConversationHistory(MAX_TURNS*2+1).map(message=>({role:message.role,text:message.content})));
     const callId = this.state?.callId;
     if (!callId) return;
