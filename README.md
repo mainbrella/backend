@@ -231,7 +231,14 @@ models are `@cf/deepgram/flux` STT, `@cf/meta/llama-3.3-70b-instruct-fp8-fast`
 with a 256-token response limit, and `@cf/deepgram/aura-1` TTS. Available Aura
 voices are `asteria`, `luna`, and `athena`.
 
-Inbound telephony supports Twilio phone numbers (PSTN) and
+Inbound telephony also supports Telnyx phone numbers and TeXML application SIP
+subdomains. Follow the [Telnyx setup guide](docs/telnyx-voice.md) to configure a
+new number, credentials, independent PSTN/SIP rates, deployment and a test call.
+Telnyx availability is returned in `telephony.telnyx`; call history includes
+`phoneProvider` (`twilio` or `telnyx`, null for browser/text). Historical phone
+calls remain Twilio. Both providers share the existing account limits and wallet.
+
+Inbound Twilio telephony supports phone numbers (PSTN) and
 [Twilio Programmable Voice SIP Domains](https://www.twilio.com/docs/voice/api/sending-sip).
 The PBX or SIP endpoint connects to Twilio, which sends a signed HTTP webhook
 and bridges bidirectional audio over WebSockets to this Worker. Mainbrella does

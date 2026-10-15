@@ -12,7 +12,7 @@ const agent = z.object({
   voice, transferNumber: z.null(), updatedAt: z.iso.datetime(),
 }).openapi('VoiceAgentConfig');
 const call = z.object({
-  id: z.string(), channel, phoneTransport: z.enum(['pstn', 'sip']).nullable().describe('Twilio transport for phone calls; null for browser/text calls. Historical phone calls use pstn.'), status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
+  id: z.string(), channel, phoneProvider: z.enum(['twilio','telnyx']).nullable().describe('Telephony provider; null for browser/text calls. Historical phone calls use twilio.'), phoneTransport: z.enum(['pstn', 'sip']).nullable().describe('Transport for phone calls; null for browser/text calls. Historical phone calls use pstn.'), status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(), durationSeconds: z.number().int().nonnegative(),
   transcript: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string() })).max(121),
 }).openapi('VoiceCall');
@@ -22,9 +22,10 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   const common = { tags: ['Voice'], security: cookieSecurity };
   register(api, 'get', '/voice/config', {
     ...common, operationId: 'getVoiceConfig', summary: 'Read AI receptionist availability and model configuration',
-    description: 'Reports whether browser calling and Twilio PSTN or SIP reception are configured. Telephony is configured when at least one destination has its own provider rate. Phone number and SIP URI are reported independently and may be null; a SIP-only setup does not require a phone number. Both destinations use the same webhook URL and configured agent. Voice reception supports calls up to 15 minutes and 60 transcript turns.',
+    description: 'Reports browser calling and Twilio or Telnyx PSTN/SIP availability. Telephony configured is true when either provider has a priced destination for this agent. The top-level webhookUrl, phoneNumber and sipUri inside telephony remain Twilio fields; telephony.telnyx contains Telnyx configuration. Each provider has independent credentials, destinations, rates and agent mapping. SIP-only setups do not require a phone number. Calls support up to 15 minutes and 60 transcript turns.',
     request: { headers }, responses: { 200: jsonResponse(z.object({
-      enabled: z.boolean(), browserCalling: z.boolean(), telephony: z.object({ configured: z.boolean(), webhookUrl: z.string().nullable(), phoneNumber: z.string().nullable(), sipUri: z.string().nullable() }),
+      enabled: z.boolean(), browserCalling: z.boolean(), telephony: z.object({ configured: z.boolean(), webhookUrl: z.string().nullable(), phoneNumber: z.string().nullable(), sipUri: z.string().nullable(),
+        telnyx:z.object({configured:z.boolean(),webhookUrl:z.string().nullable(),phoneNumber:z.string().nullable(),sipUri:z.string().nullable()}) }),
       models: z.object({ stt: z.string(), llm: z.string(), tts: z.string() }),
     })), ...errors(401, 403, 503) },
   }, handler);

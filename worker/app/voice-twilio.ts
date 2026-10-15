@@ -50,7 +50,7 @@ export async function handleTwilioRequest(request: Request,env: Env,ctx?: Execut
     if (![expectedUrl,expectedUrl+'/',expectedUrl.replace('https:','wss:'),expectedUrl.replace('https:','wss:')+'/']
       .some(value=>validTwilioSignature(env.TWILIO_AUTH_TOKEN!,signature,value))) return new Response(null,{status:403});
     const call=await readCall(env,media![1]);
-    if (!call || call.channel!=='phone' || call.status!=='active' || call.connected_at || !call.media_token_hash || call.agent_id!==env.TWILIO_AGENT_ID) return new Response(null,{status:404});
+    if (!call || call.channel!=='phone' || (call.phone_provider && call.phone_provider!=='twilio') || call.status!=='active' || call.connected_at || !call.media_token_hash || call.agent_id!==env.TWILIO_AGENT_ID) return new Response(null,{status:404});
     return bridgeTwilio(env,call.id,call.provider_call_id!,ctx);
   } catch {
     console.error('voice_telephony_unavailable');

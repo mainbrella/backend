@@ -29,6 +29,7 @@ const endpointMethods: Record<string, string[]> = {
   '/voice/config': ['get'], '/voice/agent': ['get', 'put'], '/voice/calls': ['get', 'post'],
   '/voice/calls/{callId}': ['get'], '/voice/calls/{callId}/end': ['post'], '/voice/calls/{callId}/connect': ['get'],
   '/voice/twilio/incoming/{agentId}': ['post'], '/voice/twilio/media/{callId}': ['get'],
+  '/voice/telnyx/incoming/{agentId}': ['post'], '/voice/telnyx/media/{callId}': ['get'],
   '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
   '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
@@ -785,6 +786,14 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.match(paths['/voice/twilio/incoming/{agentId}'].post.description,/TWILIO_SIP_URI/);
   assert.match(paths['/voice/twilio/incoming/{agentId}'].post.description,/VOICE_SIP_MICRO_USD_PER_MINUTE/);
   assert.ok(components.securitySchemes.twilioSignature);
+  assert.deepEqual(components.schemas.VoiceCall.properties.phoneProvider.enum,['twilio','telnyx',null]);
+  assert.ok(telephony.required.includes('telnyx'));
+  assert.ok(components.securitySchemes.telnyxSignature);
+  assert.deepEqual(paths['/voice/telnyx/incoming/{agentId}'].post.security,[{telnyxSignature:[]}]);
+  assert.deepEqual(paths['/voice/telnyx/media/{callId}'].get.security,[{telnyxSignature:[]}]);
+  assert.ok(paths['/voice/telnyx/media/{callId}'].get.responses[101]);
+  assert.ok(paths['/voice/telnyx/incoming/{agentId}'].post.requestBody.content['application/x-www-form-urlencoded']);
+  assert.ok(paths['/voice/telnyx/incoming/{agentId}'].post.parameters.some((parameter:any)=>parameter.name==='telnyx-timestamp' && parameter.required));
   assert.match(paths['/voice/agent'].put.description, /CRM and calendar/);
   assert.match(paths['/voice/calls'].post.description, /15 minutes/);
 });

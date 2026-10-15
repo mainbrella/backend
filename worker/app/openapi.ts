@@ -41,6 +41,7 @@ import { registerBuildRoutes } from './openapi-build';
 import { forward, type LegacyHandler } from "./openapi-shared";
 import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
 import { registerVoiceRoutes } from './openapi-voice';
+import { registerVoiceTelnyxRoutes } from './openapi-voice-telnyx';
 
 // Independent service documents keep infrastructure routes off the customer API.
 export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: LegacyHandler) {
@@ -76,6 +77,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     stripeSignature: { type: "apiKey", in: "header", name: "Stripe-Signature" },
     monitoring: { type: 'http', scheme: 'bearer', description: 'Dedicated MONITORING_SECRET; operational observations and incidents only.' },
     twilioSignature: { type: 'apiKey', in: 'header', name: 'X-Twilio-Signature', description: 'Twilio request signature; validated against the configured Twilio auth token.' },
+    telnyxSignature: { type: 'apiKey', in: 'header', name: 'telnyx-signature-ed25519', description: 'Ed25519 signature verified with TELNYX_PUBLIC_KEY and a fresh telnyx-timestamp header.' },
   } as const;
   for (const [name, scheme] of Object.entries(securitySchemes)) {
     api.registry.registerComponent("securitySchemes", name, scheme);
@@ -86,6 +88,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerProjectGithubRoutes(api, handler);
   registerBuildRoutes(api, handler);
   registerVoiceRoutes(api, handler);
+  registerVoiceTelnyxRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);

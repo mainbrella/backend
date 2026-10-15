@@ -19,6 +19,7 @@ export const voiceAgentInput = z.object({
 export type VoiceAgentConfig = z.infer<typeof voiceAgentInput> & { id: string; updatedAt: string };
 export type VoiceTranscript = { role: 'user' | 'assistant'; text: string }[];
 export type VoicePhoneTransport = 'pstn' | 'sip';
+export type VoicePhoneProvider = 'twilio' | 'telnyx';
 export interface VoiceCallRow {
   id: string; user_id: string; agent_id: string;
   channel: 'browser' | 'text' | 'phone'; status: 'active' | 'completed' | 'failed';
@@ -26,6 +27,7 @@ export interface VoiceCallRow {
   provider_call_id: string | null; media_token_hash: string | null;
   media_token_expires_at: string | null; connected_at: string | null;
   phone_transport: VoicePhoneTransport | null;
+  phone_provider: VoicePhoneProvider | null;
 }
 export interface VoiceAgentRow {
   id: string; user_id: string; name: string; business_name: string;
@@ -36,7 +38,7 @@ export function publicAgent(row: VoiceAgentRow): VoiceAgentConfig {
     instructions: row.instructions, voice: row.voice, transferNumber: null, updatedAt: row.updated_at };
 }
 export function publicCall(row: VoiceCallRow) {
-  return { id: row.id, channel: row.channel, phoneTransport: row.channel === 'phone' ? row.phone_transport || 'pstn' : null, status: row.status, startedAt: row.started_at,
+  return { id: row.id, channel: row.channel, phoneProvider: row.channel === 'phone' ? row.phone_provider || 'twilio' : null, phoneTransport: row.channel === 'phone' ? row.phone_transport || 'pstn' : null, status: row.status, startedAt: row.started_at,
     endedAt: row.ended_at, durationSeconds: Math.max(0, Math.floor(((row.ended_at ? Date.parse(row.ended_at) : Date.now()) - Date.parse(row.started_at)) / 1000)),
     transcript: JSON.parse(row.transcript_json) as VoiceTranscript };
 }
@@ -81,19 +83,19 @@ export async function expireCalls(env: Env, userId: string) {
     WHERE user_id=? AND status='active' AND started_at<=?`).bind(userId, expiredAt).run();
 }
 export async function createCall(env: Env, userId: string, agent: VoiceAgentConfig, channel: VoiceCallRow['channel'],
-  providerCallId: string | null = null, mediaTokenHash: string | null = null, phoneTransport: VoicePhoneTransport = 'pstn'): Promise<VoiceCallRow | null> {
+  providerCallId: string | null = null, mediaTokenHash: string | null = null, phoneTransport: VoicePhoneTransport = 'pstn', phoneProvider: VoicePhoneProvider = 'twilio'): Promise<VoiceCallRow | null> {
   try { await checkVoiceBalance(env,userId); }
   catch (error) { await stopUserCalls(env,userId); throw new Error(billingError(error)); }
   await expireCalls(env, userId);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const result = await env.DB.prepare(`INSERT INTO voice_calls
-    (id,user_id,agent_id,channel,status,started_at,transcript_json,config_json,provider_call_id,media_token_hash,media_token_expires_at,phone_transport)
-    SELECT ?,?,?,?,'active',?,'[]',?,?,?,?,? WHERE
+    (id,user_id,agent_id,channel,status,started_at,transcript_json,config_json,provider_call_id,media_token_hash,media_token_expires_at,phone_transport,phone_provider)
+    SELECT ?,?,?,?,'active',?,'[]',?,?,?,?,?,? WHERE
     (SELECT COUNT(*) FROM voice_calls WHERE user_id=? AND status='active') < 3 AND
     (SELECT COUNT(*) FROM voice_calls WHERE user_id=? AND started_at>=?) < 100`)
     .bind(id,userId,agent.id,channel,now,JSON.stringify(agent),providerCallId,mediaTokenHash,
-      mediaTokenHash ? new Date(Date.now()+60_000).toISOString() : null,channel === 'phone' ? phoneTransport : null,userId,userId,
+      mediaTokenHash ? new Date(Date.now()+60_000).toISOString() : null,channel === 'phone' ? phoneTransport : null,channel === 'phone' ? phoneProvider : null,userId,userId,
       new Date(Date.now()-86_400_000).toISOString()).run();
   return result.meta.changes ? readCall(env,id) : null;
 }

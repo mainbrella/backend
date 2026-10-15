@@ -1,4 +1,5 @@
 import { hangupTwilioCall } from '../lib/voice-telephony';
+import { hangupTelnyxCall } from '../lib/voice-telnyx';
 import { Agent, type Connection, type ConnectionContext } from 'agents';
 import { withVoice, WorkersAIFluxSTT, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
 import { billingError, checkVoiceBalance, llmCost, llmReservation, meteredVoiceInference, phoneRate, reportVoiceUsage, reserveVoiceUsage, stopUserCalls, STT_WINDOW_MS, sttCost, ttsCost } from '../lib/voice-billing';
@@ -8,7 +9,7 @@ const VoiceAgent = withVoice(Agent,{audioFormat:'pcm16',sampleRate:16000,history
 interface CallState {
   callId: string; userId: string; channel: VoiceCallRow['channel']; startedAt: string;
   config: VoiceAgentConfig; closed: boolean; failed: boolean; turns: number;
-  stt?: {id:string;bytes:number}; phone?: {id:string;rate:number}; providerCallId?: string | null; phoneEnded?: boolean; endedAt?: string; pendingAccountStop?: string; phoneUsage?: {durationSeconds:number;billableMinutes:number};
+  stt?: {id:string;bytes:number}; phone?: {id:string;rate:number}; phoneProvider?: VoiceCallRow['phone_provider']; providerCallId?: string | null; phoneEnded?: boolean; endedAt?: string; pendingAccountStop?: string; phoneUsage?: {durationSeconds:number;billableMinutes:number};
 }
 interface SocketState { accepted: boolean; started: boolean; ready?: boolean }
 
@@ -157,14 +158,15 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
       if (!call || call.status !== 'active' || (this.state && this.state.callId!==call.id)) return new Response(null,{status:409});
       if (!this.state) {
         this.setState({callId:call.id,userId:call.user_id,channel:call.channel,startedAt:call.started_at,
-          config:JSON.parse(call.config_json),providerCallId:call.provider_call_id,closed:false,failed:false,turns:0});
+          config:JSON.parse(call.config_json),providerCallId:call.provider_call_id,phoneProvider:call.phone_provider || 'twilio',closed:false,failed:false,turns:0});
         await this.schedule(new Date(Date.parse(call.started_at)+MAX_CALL_MS),'expireCall');
         try {
           await this.checkBilling();
           if (call.channel==='phone') {
             const transport=call.phone_transport || 'pstn';
-            const rate=phoneRate(this.env,transport);
-            const id=await reserveVoiceUsage(this.env,this.owner(),transport === 'sip' ? 'twilio-sip-inbound' : 'twilio-inbound',rate*15);
+            const provider=call.phone_provider || 'twilio';
+            const rate=phoneRate(this.env,transport,provider);
+            const id=await reserveVoiceUsage(this.env,this.owner(),`${provider}${transport === 'sip' ? '-sip' : ''}-inbound`,rate*15);
             this.setState({...this.state!,phone:{id,rate}});
           }
         } catch (error) { await this.billingFailure(error); return Response.json({error:billingError(error)},{status:402}); }
@@ -260,7 +262,9 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
       await this.writes;
     }
   }
-  protected async hangupPhone(callSid:string) { return hangupTwilioCall(this.env,callSid); }
+  protected async hangupPhone(callSid:string) {
+    return this.state?.phoneProvider === 'telnyx' ? hangupTelnyxCall(this.env,callSid) : hangupTwilioCall(this.env,callSid);
+  }
   async retryFinish() { await this.finish(); }
   async expireCall() { await this.finish(); }
   async purgeCall(): Promise<void> {

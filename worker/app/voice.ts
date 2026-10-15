@@ -2,6 +2,8 @@ import { billingError } from '../lib/voice-billing';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, twilioSipUri, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceCallRow } from '../lib/voice';
 import { handleTwilioRequest } from './voice-twilio';
+import { handleTelnyxRequest } from './voice-telnyx';
+import { telnyxConfigured, telnyxSipUri } from '../lib/voice-telnyx';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 async function body(request: Request) {
@@ -14,6 +16,7 @@ async function body(request: Request) {
 export async function handleVoiceRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname.startsWith('/voice/twilio/')) return handleTwilioRequest(request,env,ctx);
+  if (url.pathname.startsWith('/voice/telnyx/')) return handleTelnyxRequest(request,env,ctx);
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({error:'origin_not_allowed'},403,{});
   if (request.method === 'OPTIONS') return new Response(null,{status:204,headers:cors});
@@ -26,10 +29,14 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
     if (url.pathname === '/voice/config' && request.method === 'GET') {
       const agent = await readAgent(env,user.id);
       return authJson({enabled:voiceEnabled(env),browserCalling:voiceEnabled(env),
-        telephony:{configured:telephonyConfigured(env,agent?.id || null),
+        telephony:{configured:telephonyConfigured(env,agent?.id || null) || telnyxConfigured(env,agent?.id || null),
           webhookUrl:agent && publicVoiceOrigin(env) ? `${publicVoiceOrigin(env)}/voice/twilio/incoming/${agent.id}` : null,
           phoneNumber:telephonyConfigured(env,agent?.id || null,'pstn') ? env.TWILIO_PHONE_NUMBER : null,
-          sipUri:telephonyConfigured(env,agent?.id || null,'sip') ? twilioSipUri(env.TWILIO_SIP_URI) : null},models:VOICE_MODELS},200,cors);
+          sipUri:telephonyConfigured(env,agent?.id || null,'sip') ? twilioSipUri(env.TWILIO_SIP_URI) : null,
+          telnyx:{configured:telnyxConfigured(env,agent?.id || null),
+            webhookUrl:agent && agent.id===env.TELNYX_AGENT_ID && publicVoiceOrigin(env) ? `${publicVoiceOrigin(env)}/voice/telnyx/incoming/${agent.id}` : null,
+            phoneNumber:telnyxConfigured(env,agent?.id || null,'pstn') ? env.TELNYX_PHONE_NUMBER : null,
+            sipUri:telnyxConfigured(env,agent?.id || null,'sip') ? telnyxSipUri(env.TELNYX_SIP_URI) : null}},models:VOICE_MODELS},200,cors);
     }
     if (url.pathname === '/voice/agent') {
       if (request.method === 'GET') {

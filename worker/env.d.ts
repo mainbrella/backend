@@ -10,6 +10,15 @@ interface Env {
   TWILIO_PHONE_NUMBER?: string;
   TWILIO_SIP_URI?: string;
   TWILIO_AGENT_ID?: string;
+  TELNYX_API_KEY?: string;
+  TELNYX_PUBLIC_KEY?: string;
+  TELNYX_ACCOUNT_SID?: string;
+  TELNYX_CONNECTION_ID?: string;
+  TELNYX_PHONE_NUMBER?: string;
+  TELNYX_SIP_URI?: string;
+  TELNYX_AGENT_ID?: string;
+  TELNYX_PHONE_MICRO_USD_PER_MINUTE?: string;
+  TELNYX_SIP_MICRO_USD_PER_MINUTE?: string;
   NAMECOM_ENABLED?: string;
   NAME_DOT_COM_USERNAME?: string;
   NAME_DOT_COM_DEV_USERNAME?: string;

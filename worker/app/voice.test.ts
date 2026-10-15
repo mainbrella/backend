@@ -8,6 +8,8 @@ import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } fr
 import { voiceBillingFixture } from './voice-billing-test-helpers';
 import { hangupTwilioCall, pcmToTwilio, twilioToPCM } from '../lib/voice-telephony';
 import { publicCall, twilioSipUri, type VoiceCallRow } from '../lib/voice';
+import { hangupTelnyxCall, pcmToTelnyx, telnyxCallIdMatches, telnyxSipUri, validTelnyxSignature } from '../lib/voice-telnyx';
+import { TELNYX_TEST_ACCOUNT, TELNYX_TEST_BINDINGS, TELNYX_TEST_CALL, TELNYX_TEST_CONNECTION, TELNYX_TEST_SIP, telnyxTestSignature } from './voice-telnyx-test-helpers';
 
 const API = 'https://api.mainbrella.com';
 const ORIGIN = 'https://mainbrella.com';
@@ -28,6 +30,7 @@ async function fixture(t: TestContext) {
   t.after(() => f.close());
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/043_voice_receptionist.sql', import.meta.url)), 'utf8'));
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/045_voice_sip.sql', import.meta.url)), 'utf8'));
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/046_voice_telnyx.sql', import.meta.url)), 'utf8'));
   const billing=await voiceBillingFixture(f.env,f.sqlite,USER_ONE);
   f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
   f.env.AI = {} as Ai;
@@ -150,9 +153,9 @@ test('SIP-only and combined telephony report independently priced destinations o
   const config=async(session=SESSION_ONE)=>(await (await handleRequest(request('/voice/config','GET',undefined,{session}),f.env)).json() as any).telephony;
   assert.equal((await config()).sipUri,null); // PSTN pricing cannot enable SIP.
   f.env.VOICE_SIP_MICRO_USD_PER_MINUTE='4000';
-  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:PHONE_NUMBER,sipUri:SIP_URI});
+  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:PHONE_NUMBER,sipUri:SIP_URI,telnyx:{configured:false,webhookUrl:null,phoneNumber:null,sipUri:null}});
   delete f.env.TWILIO_PHONE_NUMBER;delete f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE;
-  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:null,sipUri:SIP_URI});
+  assert.deepEqual(await config(),{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/twilio/incoming/${agent.id}`,phoneNumber:null,sipUri:SIP_URI,telnyx:{configured:false,webhookUrl:null,phoneNumber:null,sipUri:null}});
   await saveAgent(f,SESSION_TWO);
   const other=await config(SESSION_TWO);
   assert.equal(other.configured,false);assert.equal(other.sipUri,null);assert.equal(other.phoneNumber,null);
@@ -398,4 +401,124 @@ test('phone billing recovers provider duration after a lost hangup acknowledgeme
   }) as typeof fetch);
   assert.equal(requests,2);assert.deepEqual(usage,{durationSeconds:61,billableMinutes:2});
   await assert.rejects(hangupTwilioCall(env,CALL_SID,(async()=>Response.json({sid:CALL_SID,status:'completed',duration:null})) as typeof fetch),/voice_telephony_usage_pending/);
+});
+
+const telnyxFields = (overrides:Record<string,string>={}) => ({AccountSid:TELNYX_TEST_ACCOUNT,ConnectionId:TELNYX_TEST_CONNECTION,
+  CallSid:TELNYX_TEST_CALL,To:TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER,ToSipUri:`${TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER}@sip.telnyx.com`,...overrides});
+function telnyxForm(path:string,fields=telnyxFields(),timestamp?:string) {
+  const body=new URLSearchParams(fields).toString();
+  return new Request(`${API}${path}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...telnyxTestSignature(body,timestamp)},body});
+}
+
+test('Telnyx availability is priced per destination, isolated by agent and independent of Twilio',async t=>{
+  const f=await fixture(t);const agent=await saveAgent(f);
+  Object.assign(f.env,TELNYX_TEST_BINDINGS,{TELNYX_AGENT_ID:agent.id,TELNYX_SIP_URI:TELNYX_TEST_SIP});
+  delete f.env.TWILIO_AUTH_TOKEN;
+  const config=async(session=SESSION_ONE)=>(await (await handleRequest(request('/voice/config','GET',undefined,{session}),f.env)).json() as any).telephony;
+  let result=await config();
+  assert.equal(result.configured,true);assert.equal(result.phoneNumber,null);
+  assert.deepEqual(result.telnyx,{configured:true,webhookUrl:`${PUBLIC_ORIGIN}/voice/telnyx/incoming/${agent.id}`,phoneNumber:'+19362461010',sipUri:null});
+  f.env.TELNYX_SIP_MICRO_USD_PER_MINUTE='3000';delete f.env.TELNYX_PHONE_NUMBER;
+  result=await config();assert.equal(result.telnyx.sipUri,TELNYX_TEST_SIP);assert.equal(result.telnyx.phoneNumber,null);
+  for(const rate of ['', '0', '-1', 'NaN', '1.5', '1000001']) {
+    f.env.TELNYX_SIP_MICRO_USD_PER_MINUTE=rate;assert.equal((await config()).configured,false);
+  }
+  f.env.TELNYX_SIP_MICRO_USD_PER_MINUTE='3000';
+  await saveAgent(f,SESSION_TWO);assert.deepEqual((await config(SESSION_TWO)).telnyx,{configured:false,webhookUrl:null,phoneNumber:null,sipUri:null});
+  f.env.VOICE_ENABLED='false';assert.equal((await config()).configured,false);
+});
+
+test('Telnyx Ed25519 signatures cover exact bytes and reject missing, malformed, stale or future headers',async()=>{
+  const key=TELNYX_TEST_BINDINGS.TELNYX_PUBLIC_KEY,payload='To=%2B19362461010&AccountSid=test';
+  const headers=new Headers(telnyxTestSignature(payload));
+  assert.equal(await validTelnyxSignature(key,headers,payload),true);
+  assert.equal(await validTelnyxSignature(key,headers,payload.replace('%2B','%2b')),false);
+  assert.equal(await validTelnyxSignature(key,new Headers(),payload),false);
+  for(const timestamp of ['NaN','123abc',String(Math.floor(Date.now()/1000)-301),String(Math.floor(Date.now()/1000)+301)])
+    assert.equal(await validTelnyxSignature(key,new Headers(telnyxTestSignature(payload,timestamp)),payload),false);
+  assert.equal(await validTelnyxSignature('bad-key',headers,payload),false);
+});
+
+for(const transport of ['pstn','sip'] as const) {
+  test(`Telnyx ${transport} webhooks require signature, mapped account/application/destination and replay-safe allocation`,async t=>{
+    const f=await fixture(t);const agent=await saveAgent(f);
+    Object.assign(f.env,TELNYX_TEST_BINDINGS,{TELNYX_AGENT_ID:agent.id,TELNYX_SIP_URI:TELNYX_TEST_SIP,TELNYX_SIP_MICRO_USD_PER_MINUTE:'3000'});
+    const path=`/voice/telnyx/incoming/${agent.id}`;
+    const fields=telnyxFields(transport==='sip'?{To:'receptionist',ToSipUri:'receptionist@MAINBRELLA.SIP.TELNYX.COM:5060;transport=tcp'}:{});
+    const unsigned=telnyxForm(path,fields);unsigned.headers.delete('telnyx-signature-ed25519');
+    assert.equal((await handleRequest(unsigned,f.env)).status,403);
+    assert.equal((await handleRequest(telnyxForm(path,fields,String(Math.floor(Date.now()/1000)-400)),f.env)).status,403);
+    for(const changes of [{AccountSid:crypto.randomUUID()},{ConnectionId:'123'}, {CallSid:'../../other'},
+      transport==='sip'?{ToSipUri:'someone-else@mainbrella.sip.telnyx.com'}:{To:'+15550000000'}]) {
+      assert.equal((await handleRequest(telnyxForm(path,{...fields,...changes}),f.env)).status,403);
+    }
+    assert.equal((await handleRequest(telnyxForm(`/voice/telnyx/incoming/${crypto.randomUUID()}`,fields),f.env)).status,403);
+    if(transport==='sip')delete f.env.TELNYX_SIP_MICRO_USD_PER_MINUTE;else delete f.env.TELNYX_PHONE_MICRO_USD_PER_MINUTE;
+    assert.equal((await handleRequest(telnyxForm(path,fields),f.env)).status,503);
+    f.env.TELNYX_SIP_MICRO_USD_PER_MINUTE='3000';f.env.TELNYX_PHONE_MICRO_USD_PER_MINUTE='10000';
+    const first=await handleRequest(telnyxForm(path,fields),f.env);assert.equal(first.status,200);
+    const xml=await first.text();assert.match(xml,/bidirectionalMode="rtp"/);assert.match(xml,/codec="PCMU"/);assert.match(xml,/enableReconnect="false"/);
+    const row=f.sqlite.prepare('SELECT * FROM voice_calls WHERE provider_call_id=?').get(TELNYX_TEST_CALL) as unknown as VoiceCallRow;
+    assert.equal(row.phone_provider,'telnyx');assert.equal(row.phone_transport,transport);assert.equal(publicCall(row).phoneProvider,'telnyx');
+    assert.match(await (await handleRequest(telnyxForm(path,fields),f.env)).text(),/<Hangup/);
+    assert.equal(f.calls.filter(call=>new URL(call.request.url).pathname==='/initialize').length,1);
+    assert.equal((await handleRequest(new Request(`${API}/voice/telnyx/media/${row.id}`,{headers:{Upgrade:'websocket'}}),f.env)).status,403);
+    const mediaUrl=`${PUBLIC_ORIGIN}/voice/telnyx/media/${row.id}`;
+    assert.equal((await handleRequest(new Request(mediaUrl,{headers:{Upgrade:'websocket',...telnyxTestSignature(mediaUrl)}}),f.env)).status,403);
+    f.env.TWILIO_AGENT_ID=agent.id;
+    const wrongProvider=`${PUBLIC_ORIGIN}/voice/twilio/media/${row.id}`;
+    assert.equal((await handleRequest(new Request(wrongProvider,{headers:{Upgrade:'websocket','X-Twilio-Signature':getExpectedTwilioSignature(AUTH_TOKEN,wrongProvider,{})}}),f.env)).status,404);
+  });
+}
+
+test('unfunded Telnyx calls hang up without allocating a paid session',async t=>{
+  const f=await fixture(t);const agent=await saveAgent(f);
+  Object.assign(f.env,TELNYX_TEST_BINDINGS,{TELNYX_AGENT_ID:agent.id});
+  const state=f.billing.stored.get('containerAccount') as any;
+  state.wallet.fundings.pi_voice.refundedCents=500;f.billing.stored.set('containerAccount',state);
+  assert.match(await (await handleRequest(telnyxForm(`/voice/telnyx/incoming/${agent.id}`),f.env)).text(),/<Hangup/);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,0);
+});
+
+test('Telnyx SIP destinations preserve users, normalize hosts and reject foreign or ambiguous URIs',()=>{
+  assert.equal(telnyxSipUri('receptionist@MAINBRELLA.SIP.TELNYX.COM:5060;transport=tcp'),TELNYX_TEST_SIP);
+  for(const value of [`${TELNYX_TEST_SIP}.evil.example`,`${TELNYX_TEST_SIP}?x=1`,`${TELNYX_TEST_SIP};transport=tls`,`${TELNYX_TEST_SIP}\n`,'sip:receptionist@sip.telnyx.com','sip:user:pass@mainbrella.sip.telnyx.com'])
+    assert.equal(telnyxSipUri(value),null,value);
+});
+
+test('Telnyx RTP pads partial output to the minimum 20 ms PCMU chunk',()=>{
+  assert.deepEqual(pcmToTelnyx(new ArrayBuffer(0)),[]);
+  const frames=pcmToTelnyx(new ArrayBuffer(644));
+  assert.equal(frames.length,2);
+  assert.ok(frames.every(frame=>Buffer.from(frame,'base64').length===160));
+  assert.ok(Buffer.from(frames[1],'base64').every(byte=>byte===255));
+});
+
+test('Telnyx legacy UUID calls accept native media IDs while native calls require exact identity',()=>{
+  assert.equal(telnyxCallIdMatches(TELNYX_TEST_ACCOUNT,TELNYX_TEST_CALL),true);
+  assert.equal(telnyxCallIdMatches(TELNYX_TEST_CALL,TELNYX_TEST_CALL),true);
+  assert.equal(telnyxCallIdMatches(TELNYX_TEST_CALL,'v3:other'),false);
+  assert.equal(telnyxCallIdMatches('V3:original','v3:other'),false);
+  assert.equal(telnyxCallIdMatches(TELNYX_TEST_ACCOUNT,'../../other'),false);
+});
+
+test('Telnyx hangup authenticates TeXML API, confirms terminal duration and retries pending/failed outcomes',async()=>{
+  const env=TELNYX_TEST_BINDINGS as unknown as Env;
+  let requests=0;
+  const usage=await hangupTelnyxCall(env,TELNYX_TEST_CALL,(async(url,init)=>{
+    requests++;assert.equal(url,`https://api.telnyx.com/v2/texml/Accounts/${TELNYX_TEST_ACCOUNT}/Calls/${encodeURIComponent(TELNYX_TEST_CALL)}`);
+    assert.equal((init!.headers as any).authorization,`Bearer ${env.TELNYX_API_KEY}`);
+    if(init!.method==='POST'){assert.equal(String(init!.body),'Status=completed');return Response.json({status:'completed',duration:null});}
+    return Response.json({sid:TELNYX_TEST_CALL,account_sid:TELNYX_TEST_ACCOUNT,status:'completed',duration:'61',end_time:new Date().toISOString()});
+  }) as typeof fetch);
+  assert.equal(requests,2);assert.deepEqual(usage,{durationSeconds:61,billableMinutes:2});
+  await assert.rejects(hangupTelnyxCall(env,TELNYX_TEST_CALL,(async()=>new Response(null,{status:503})) as typeof fetch),/voice_telephony_stop_failed/);
+  for(const result of [{status:'completed',duration:null},{status:'in-progress',duration:'61'},{status:'completed',duration:'-1'}, {status:'completed',duration:'61',account_sid:crypto.randomUUID()}]) {
+    await assert.rejects(hangupTelnyxCall(env,TELNYX_TEST_CALL,(async()=>Response.json({sid:TELNYX_TEST_CALL,account_sid:TELNYX_TEST_ACCOUNT,end_time:new Date().toISOString(),...result})) as typeof fetch),/voice_telephony_usage_pending/);
+  }
+  let requestCount=0;
+  assert.deepEqual(await hangupTelnyxCall(env,TELNYX_TEST_CALL,(async()=>{
+    if(++requestCount===1)return new Response(null,{status:422});
+    return Response.json({sid:TELNYX_TEST_CALL,account_sid:TELNYX_TEST_ACCOUNT,status:'busy'});
+  }) as typeof fetch),{durationSeconds:0,billableMinutes:0});
 });

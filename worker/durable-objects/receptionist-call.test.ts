@@ -5,6 +5,7 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { VoiceClient, type VoiceTransport } from '@cloudflare/voice/client';
 import { getExpectedTwilioSignature } from 'twilio/lib/webhooks/webhooks.js';
+import { TELNYX_TEST_ACCOUNT, TELNYX_TEST_BINDINGS, TELNYX_TEST_CALL, TELNYX_TEST_CONNECTION, TELNYX_TEST_SIP, telnyxTestSignature } from '../app/voice-telnyx-test-helpers';
 import { hashToken } from '../app/auth-core';
 
 async function runtime(t: test.TestContext, bindings: Record<string,string> = {}) {
@@ -16,7 +17,7 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
     bindings:{VOICE_ENABLED:'true',VOICE_PHONE_MICRO_USD_PER_MINUTE:'12500',VOICE_PUBLIC_ORIGIN:'https://api.mainbrella.com',TWILIO_AUTH_TOKEN:'voice-test-twilio-secret',TWILIO_ACCOUNT_SID:'AC'+'a'.repeat(32),TWILIO_PHONE_NUMBER:'+15551234567',TWILIO_AGENT_ID:'11111111-1111-4111-8111-111111111111',...bindings}}]}));
   t.after(()=>mf.dispose());
   const db=await mf.getD1Database('DB');
-  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip']) {
+  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip','046_voice_telnyx']) {
     const statements=readFileSync(new URL(`../../migrations/${migration}.sql`,import.meta.url),'utf8').split(';').map(value=>value.trim()).filter(Boolean);
     for (const statement of statements) await db.prepare(statement).run();
   }
@@ -319,4 +320,69 @@ test('speech windows settle all forwarded audio and a normal hangup keeps siblin
   assert.equal(results.length,2);assert.ok(results.every((row:any)=>row.status==='settled'));
   assert.equal(results.reduce((sum:number,row:any)=>sum+JSON.parse(row.usage_json).audioBytes,0),192000);
   assert.equal((await (await f.request(`/voice/calls/${sibling.call.id}`)).json() as any).call.status,'active');
+});
+
+for(const transport of ['pstn','sip'] as const) {
+  test(`Telnyx ${transport} media streams round-trip audio through the Agent, settle Telnyx rates and consume tokens once`,async t=>{
+    const agentId='11111111-1111-4111-8111-111111111111';
+    const f=await runtime(t,{...TELNYX_TEST_BINDINGS,TELNYX_AGENT_ID:agentId,
+      ...(transport==='sip'?{TELNYX_PHONE_NUMBER:'',TELNYX_PHONE_MICRO_USD_PER_MINUTE:'',TELNYX_SIP_URI:TELNYX_TEST_SIP,TELNYX_SIP_MICRO_USD_PER_MINUTE:'3000'}:{})});
+    const body=new URLSearchParams({AccountSid:TELNYX_TEST_ACCOUNT,ConnectionId:TELNYX_TEST_CONNECTION,CallSid:TELNYX_TEST_CALL,
+      To:transport==='sip'?'receptionist':TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER,
+      ToSipUri:transport==='sip'?'receptionist@mainbrella.sip.telnyx.com':`${TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER}@sip.telnyx.com`}).toString();
+    const incoming=await f.mf.dispatchFetch(`https://api.mainbrella.com/voice/telnyx/incoming/${agentId}`,{
+      method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...telnyxTestSignature(body)},body});
+    assert.equal(incoming.status,200);const xml=await incoming.text();
+    const wssUrl=xml.match(/<Stream url="([^"]+)"/)![1],token=xml.match(/name="token" value="([^"]+)"/)![1];
+    const url=wssUrl.replace('wss:','https:');const callId=url.split('/').at(-1)!;
+    const upgrade=()=>f.mf.dispatchFetch(url,{headers:{Upgrade:'websocket',...telnyxTestSignature(wssUrl)}});
+    const response=await upgrade();assert.equal(response.status,101);
+    const ws=response.webSocket!;const messages:any[]=[];
+    ws.addEventListener('message',event=>messages.push(JSON.parse(String(event.data))));ws.accept();t.after(()=>ws.close());
+    const streamId=crypto.randomUUID();
+    ws.send(JSON.stringify({event:'connected',version:'1.0.0'}));
+    ws.send(JSON.stringify({event:'start',stream_id:streamId,start:{call_control_id:TELNYX_TEST_CALL,user_id:TELNYX_TEST_ACCOUNT.toUpperCase(),
+      media_format:{encoding:'PCMU',sample_rate:8000,channels:1},custom_parameters:{token}}}));
+    await until(()=>messages.some(message=>message.event==='media'),'Telnyx greeting missing');
+    assert.ok(messages.every(message=>message.event==='media' && Buffer.from(message.media.payload,'base64').length===160));
+    assert.equal((await upgrade()).status,404);
+    ws.send(JSON.stringify({event:'media',stream_id:streamId,media:{track:'inbound',payload:Buffer.alloc(160,255).toString('base64')}}));
+    await until(async()=>((await (await f.request(`/voice/calls/${callId}`)).json()) as any).call.transcript.length===3,'Telnyx speech transcript missing');
+    ws.send(JSON.stringify({event:'stop',stream_id:streamId}));
+    await until(async()=>((await (await f.request(`/voice/calls/${callId}`)).json()) as any).call.status==='completed','Telnyx call did not end');
+    const detail=await (await f.request(`/voice/calls/${callId}`)).json() as any;
+    assert.equal(detail.call.phoneProvider,'telnyx');assert.equal(detail.call.phoneTransport,transport);
+    const model=transport==='sip'?'telnyx-sip-inbound':'telnyx-inbound';
+    const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=? AND model=?').bind(callId,model).first() as any;
+    assert.equal(usage.status,'settled');assert.equal(usage.reserved_micro_usd,transport==='sip'?67500:225000);
+    assert.equal(usage.cost_micro_usd,transport==='sip'?4500:15000);
+    assert.equal(JSON.parse(usage.usage_json).durationSeconds,1);
+    const state=await (await f.request(`/__test_inspect/${callId}`)).json() as any;
+    assert.equal(state.state.phoneProvider,'telnyx');assert.equal(state.state.phoneEnded,true);
+    const ledger=await f.db.prepare("SELECT payload FROM accounting_ledger WHERE event_type='inference' AND json_extract(payload,'$.model')=?").bind(model).all() as any;
+    assert.equal(ledger.results.length,1);assert.equal(JSON.parse(ledger.results[0].payload).providerCostMicroUsd,transport==='sip'?3000:10000);
+  });
+}
+
+test('Telnyx media rejects wrong tokens, call identities, formats and expired tokens before AI dispatch',async t=>{
+  const agentId='11111111-1111-4111-8111-111111111111';
+  const f=await runtime(t,{...TELNYX_TEST_BINDINGS,TELNYX_AGENT_ID:agentId});
+  for(const fault of ['token','identity','format','expired']) {
+    const providerCallId=`v3:${fault}`;
+    const body=new URLSearchParams({AccountSid:TELNYX_TEST_ACCOUNT,ConnectionId:TELNYX_TEST_CONNECTION,CallSid:providerCallId,To:TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER}).toString();
+    const incoming=await f.mf.dispatchFetch(`https://api.mainbrella.com/voice/telnyx/incoming/${agentId}`,{
+      method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...telnyxTestSignature(body)},body});
+    const xml=await incoming.text(),wssUrl=xml.match(/<Stream url="([^"]+)"/)![1],token=xml.match(/name="token" value="([^"]+)"/)![1];
+    const callId=wssUrl.split('/').at(-1)!;
+    if(fault==='expired')await f.db.prepare("UPDATE voice_calls SET media_token_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").bind(callId).run();
+    const response=await f.mf.dispatchFetch(wssUrl.replace('wss:','https:'),{headers:{Upgrade:'websocket',...telnyxTestSignature(wssUrl)}});
+    assert.equal(response.status,101);const ws=response.webSocket!;const messages:any[]=[];ws.accept();
+    ws.addEventListener('message',event=>messages.push(event.data));
+    ws.send(JSON.stringify({event:'start',stream_id:crypto.randomUUID(),start:{call_control_id:fault==='identity'?'v3:another':providerCallId,
+      user_id:TELNYX_TEST_ACCOUNT,media_format:{encoding:fault==='format'?'OPUS':'PCMU',sample_rate:8000,channels:1},custom_parameters:{token:fault==='token'?'0'.repeat(64):token}}}));
+    await until(async()=>((await (await f.request(`/voice/calls/${callId}`)).json()) as any).call.status==='failed',`Telnyx ${fault} did not close`);
+    assert.deepEqual(messages,[]);
+    assert.equal((await (await f.request(`/voice/calls/${callId}`)).json() as any).call.transcript.length,0);
+    ws.close();
+  }
 });
