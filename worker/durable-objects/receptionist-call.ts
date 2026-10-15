@@ -6,7 +6,7 @@ import { billingError, checkVoiceBalance, llmCost, llmReservation, meteredVoiceI
 import { MAX_CALL_MS, MAX_TURNS, readCall, receptionistMessages, VOICE_MODELS, type VoiceAgentConfig, type VoiceCallRow } from '../lib/voice';
 
 const VoiceAgent = withVoice(Agent,{audioFormat:'pcm16',sampleRate:16000,historyLimit:20,maxMessageCount:MAX_TURNS*2+1});
-const IMMEDIATE_REPLY = '1 sec.';
+const IMMEDIATE_REPLIES = ['One second please.', 'Got it, just a sec.', 'I see, let me think.'];
 interface CallState {
   callId: string; userId: string; channel: VoiceCallRow['channel']; startedAt: string;
   config: VoiceAgentConfig; closed: boolean; failed: boolean; turns: number;
@@ -26,7 +26,7 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
   private windowFrames = 0;
   private lastTurn = 0;
   private activeInference = 0;
-  private immediateReplyAudio: ArrayBuffer | null = null;
+  private immediateReplyAudio: ArrayBuffer[] = [];
   private audioWrites: Promise<void> = Promise.resolve();
   private sttReservation: Promise<void> | null = null;
   private billingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -112,21 +112,25 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     if (!this.state || this.state.closed || this.state.channel==='text' || this.state.config.voiceLogic!=='reply_right_away') return;
     this.activeInference++;
     try {
-      // Prepare once before speech capture, with this call's frozen voice. This
-      // optional cue never changes the normal reply's synthesis or error path.
-      const audio=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.tts,ttsCost(IMMEDIATE_REPLY),async()=>{
-        const response=await this.env.AI.run(VOICE_MODELS.tts,{
-          text:IMMEDIATE_REPLY,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
-        },{returnRawResponse:true}) as Response;
-        if (!response.ok) throw new Error('tts_failed');
-        const audio=await response.arrayBuffer();
-        if (!audio.byteLength || audio.byteLength%2) throw new Error('tts_invalid_pcm');
-        return {result:audio,providerMicroUsd:ttsCost(IMMEDIATE_REPLY),usage:{characters:IMMEDIATE_REPLY.length,purpose:'reply_right_away'}};
-      },()=>Boolean(this.state && !this.state.closed));
-      if (!this.state?.closed) this.immediateReplyAudio=audio;
+      // Prepare the rotation serially before speech capture, with this call's
+      // frozen voice. Playback never needs another optional inference request.
+      for (const text of IMMEDIATE_REPLIES) {
+        if (this.state?.closed) return;
+        const audio=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.tts,ttsCost(text),async()=>{
+          const response=await this.env.AI.run(VOICE_MODELS.tts,{
+            text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
+          },{returnRawResponse:true}) as Response;
+          if (!response.ok) throw new Error('tts_failed');
+          const audio=await response.arrayBuffer();
+          if (!audio.byteLength || audio.byteLength%2) throw new Error('tts_invalid_pcm');
+          return {result:audio,providerMicroUsd:ttsCost(text),usage:{characters:text.length,purpose:'reply_right_away'}};
+        },()=>Boolean(this.state && !this.state.closed));
+        if (!this.state?.closed) this.immediateReplyAudio.push(audio);
+      }
     } catch {
       // No retry or SDK error: Telnyx treats SDK errors as fatal. Reservations
       // with unknown provider usage remain held by the existing billing code.
+      // Keep any clips already prepared; stop preparing more on failure.
       console.error('voice_immediate_reply_unavailable',{callId:this.state?.callId});
     } finally { this.activeInference--; }
   }
@@ -259,13 +263,13 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     }
     this.lastTurn=Date.now();
     this.setState({...this.state,turns:this.state.turns+1});
-    if (replyRightAway && (context.connection.state as SocketState | null)?.started && this.immediateReplyAudio && !context.signal.aborted) {
+    if (replyRightAway && (context.connection.state as SocketState | null)?.started && this.immediateReplyAudio.length && !context.signal.aborted) {
       // Use the current turn's connection and interruption signal. speak()
       // would abort this turn; a text stream would split the real reply's TTS.
       // Skip a missing cue rather than making the answer wait for it.
       try {
         context.connection.send(JSON.stringify({type:'status',status:'speaking'}));
-        context.connection.send(this.immediateReplyAudio);
+        context.connection.send(this.immediateReplyAudio[(this.state!.turns-1)%this.immediateReplyAudio.length]);
       } catch { /* The caller may have disconnected. */ }
     }
     await this.flush();

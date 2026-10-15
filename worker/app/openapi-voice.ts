@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
 const voice = z.enum(['asteria', 'luna', 'athena']);
-const voiceLogic = z.enum(['original_no_reply', 'reply_right_away']).describe('original_no_reply keeps normal replies. reply_right_away adds a single spoken "1 sec" cue after each completed spoken turn, then the normal reply. Text calls are unchanged; the setting applies to new calls.');
+const voiceLogic = z.enum(['original_no_reply', 'reply_right_away']).describe('original_no_reply keeps normal replies. reply_right_away rotates short spoken acknowledgments after each completed spoken turn, then gives the normal reply. Text calls are unchanged; the setting applies to new calls.');
 const channel = z.enum(['browser', 'text', 'phone']);
 const headers = z.object({ Origin: z.string().optional() });
 const callId = z.object({ callId: z.string().min(1).max(128) });

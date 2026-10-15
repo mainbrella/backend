@@ -22,9 +22,11 @@ saved and there are no changes to save. Editing a field enables the button.
 
 Keep **Voice logic** set to `original_no_reply` for production. To test the
 optional spoken cue, select `reply_right_away` and save before starting a new
-call. It says “1 sec” once when the caller's turn finishes, then gives the normal
-reply. The clip is prepared once during call setup using the saved voice, and
-reused for that call. If preparation fails, the call continues without the cue.
+call. It rotates “One second please.”, “Got it, just a sec.”, and “I see, let me
+think.” when the caller's turn finishes, then gives the normal reply. The clips
+are prepared one at a time during call setup using the saved voice, and reused
+for that call. If preparation fails, the call uses any clips already prepared,
+or continues without a cue if none are available.
 Text calls and calls already in progress keep their existing behavior.
 
 Apply `047_voice_logic.sql` before deploying this setting. It defaults all

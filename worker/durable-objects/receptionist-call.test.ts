@@ -9,6 +9,8 @@ import { TELNYX_TEST_ACCOUNT, TELNYX_TEST_BINDINGS, TELNYX_TEST_CALL, TELNYX_TES
 import { hashToken } from '../app/auth-core';
 import { pcmToTelnyx } from '../lib/voice-telnyx';
 
+const acknowledgmentPhrases=['One second please.','Got it, just a sec.','I see, let me think.'];
+
 async function runtime(t: test.TestContext, bindings: Record<string,string> = {}) {
   const result=await build({entryPoints:[new URL('../fixtures/voice-runtime.ts',import.meta.url).pathname],bundle:true,write:false,
     banner:{js:"import { createRequire } from 'node:module'; const require = createRequire('/voice-test.js');"},
@@ -169,32 +171,33 @@ test('installed VoiceClient browser start accepts PCM, raw PCM greeting and spee
   assert.equal(JSON.parse(stt.usage_json).audioBytes,640);assert.equal(stt.cost_micro_usd,5);
 });
 
-test('reply_right_away plays one cached cue before each whole speech reply without changing conversation history',async t=>{
+test('reply_right_away rotates cached cues before whole speech replies without changing conversation history',async t=>{
   const f=await runtime(t,{VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_MULTI_SENTENCE:'true',VOICE_TEST_REPLY_DELAY_MS:'500',
     VOICE_TEST_REJECT_TTS_OVERLAP:'true',VOICE_TEST_TTS_DELAY_MS:'30'});
   await f.setVoiceLogic('reply_right_away');
   const call=await browserCall(t,f);
   assert.deepEqual(call.audio,[0],'Preparation is silent and only the greeting plays before speech');
-  for(let turn=0;turn<2;turn++) {
-    if(turn)await new Promise(resolve=>setTimeout(resolve,800));
+  for(let turn=0;turn<4;turn++) {
     call.ws.send(new Uint8Array(640).buffer);
     await until(()=>call.audio.length===2+turn*2,'Immediate cue missing',400);
-    assert.equal(call.audio.at(-1),1000);
+    assert.equal(call.audio.at(-1),1000+(turn%3)*2000);
     const before=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
     assert.equal(before.call.transcript.filter((message:any)=>message.role==='assistant').length,turn+1,'Cue must arrive before the delayed answer');
     await until(()=>call.audio.length===3+turn*2,'Whole speech reply missing');
     await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Speech history missing');
   }
-  assert.deepEqual(call.audio,[0,1000,2000,1000,2000],'Each cue is followed by exactly one complete answer buffer');
+  assert.deepEqual(call.audio,[0,1000,2000,3000,2000,5000,2000,1000,2000],'Cues rotate and wrap, each followed by exactly one complete answer buffer');
   assert.ok(!call.messages.some(message=>message.type==='error'||message.type==='transcript_delta'));
   const inspected=await (await f.request(`/__test_inspect/${call.callId}`)).json() as any;
   assert.equal(inspected.state.closed,false);
-  assert.ok(inspected.history.every((message:any)=>!message.content.includes('1 sec.')),'Audio cues must not become model conversation history');
+  assert.ok(inspected.history.every((message:any)=>!acknowledgmentPhrases.some(phrase=>message.content.includes(phrase))),'Audio cues must not become model conversation history');
   assert.equal((await f.request(`/voice/calls/${call.callId}/end`,'POST')).status,200);
   const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
-  assert.equal(usage.results.length,4,'One preparation, one greeting, and one TTS request per complete answer');
+  assert.equal(usage.results.length,8,'Three preparations, one greeting, and one TTS request per complete answer');
   assert.ok(usage.results.every((row:any)=>row.status==='settled'));
-  assert.equal(usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,1,'Replaying the cue must not call or bill the provider again');
+  const preparations=usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away');
+  assert.equal(preparations.length,3,'Each phrase is prepared once; replays never call or bill the provider again');
+  assert.deepEqual(preparations.map((row:any)=>JSON.parse(row.usage_json).characters).sort(),acknowledgmentPhrases.map(phrase=>phrase.length).sort());
 });
 
 test('reply_right_away leaves text tests free of acknowledgment audio and extra inference',async t=>{
@@ -226,7 +229,7 @@ test('reply_right_away barge-in cancels the stale reply, accepts the next speech
   await until(()=>call.audio.length===3,'Second acknowledgment missing');
   assert.ok(call.messages.some(message=>message.type==='playback_interrupt'));
   await until(()=>call.audio.length===4,'Replacement reply missing');
-  assert.deepEqual(call.audio,[0,1000,1000,2000],'Interrupted reply must not play after the replacement cue');
+  assert.deepEqual(call.audio,[0,1000,3000,2000],'Interrupted reply must not play after the replacement cue');
   const replies=call.messages.filter(message=>message.type==='transcript_end').map(message=>message.text);
   assert.ok(!replies.includes('I can take a message: Could I leave a message?'));
   assert.ok(replies.includes('I can take a message: Could I change that message?'));
@@ -237,7 +240,7 @@ test('reply_right_away barge-in cancels the stale reply, accepts the next speech
     const rows=await f.db.prepare('SELECT status FROM voice_usage WHERE call_id=?').bind(call.callId).all() as any;
     return rows.results.every((row:any)=>row.status==='settled');
   },'Interrupted or ended inference did not settle');
-  assert.deepEqual(call.audio,[0,1000,1000,2000,1000],'Hanging up while the model is working must suppress its answer');
+  assert.deepEqual(call.audio,[0,1000,3000,2000,5000],'Hanging up while the model is working must suppress its answer');
   assert.ok(!call.messages.some(message=>message.type==='error'));
   const detail=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
   assert.equal(detail.call.status,'completed');
@@ -489,26 +492,45 @@ test('Telnyx reply_right_away keeps the phone open through cached cues and order
     VOICE_TEST_REJECT_TTS_OVERLAP:'true',VOICE_TEST_TTS_DELAY_MS:'30'});
   await f.setVoiceLogic('reply_right_away');const call=await telnyxCall(t,f);
   const payload=(sample:number)=>pcmToTelnyx(new Int16Array(320).fill(sample).buffer)[0];
-  for(let turn=0;turn<2;turn++) {
+  for(let turn=0;turn<4;turn++) {
     call.speak();
     await until(()=>call.audio.length===2+turn*2,'Telnyx immediate cue missing',400);
-    assert.equal(call.audio.at(-1),payload(1000));
+    assert.equal(call.audio.at(-1),payload(1000+(turn%3)*2000));
     await until(()=>call.audio.length===3+turn*2,'Telnyx answer missing');
     await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Telnyx transcript missing');
     const detail=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
     assert.equal(detail.call.status,'active','An acknowledgment must not hang up the call');
-    assert.ok(!detail.call.transcript.some((message:any)=>message.text.includes('1 sec.')));
+    assert.ok(!detail.call.transcript.some((message:any)=>acknowledgmentPhrases.some(phrase=>message.text.includes(phrase))));
   }
-  assert.deepEqual(call.audio,[0,1000,2000,1000,2000].map(payload),'Telnyx must receive each cue before its answer');
+  assert.deepEqual(call.audio,[0,1000,2000,3000,2000,5000,2000,1000,2000].map(payload),'Telnyx must receive each rotating cue before its answer');
   assert.ok(call.audio.every(frame=>Buffer.from(frame,'base64').length===160));
   const beforeStop=await (await f.request(`/__test_inspect/${call.callId}`)).json() as any;
   assert.notEqual(beforeStop.state.phoneEnded,true);
   call.stop();
   await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.status==='completed','Telnyx normal hangup failed');
   const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
-  assert.equal(usage.results.length,4);
+  assert.equal(usage.results.length,8);
   assert.ok(usage.results.every((row:any)=>row.status==='settled'));
-  assert.equal(usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,1);
+  assert.equal(usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,3);
+});
+
+test('reply_right_away keeps prepared cues if a later phrase fails, without retrying or hanging up',async t=>{
+  const f=await runtime(t,{VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_ACK_FAILURE:'provider',
+    VOICE_TEST_ACK_FAILURE_TEXT:'Got it, just a sec.'});
+  await f.setVoiceLogic('reply_right_away');const call=await browserCall(t,f);
+  for(let turn=0;turn<2;turn++) {
+    call.ws.send(new Uint8Array(640).buffer);
+    await until(()=>call.audio.length===3+turn*2,'Reply missing after partial cue preparation');
+    await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Transcript missing after partial cue preparation');
+  }
+  assert.deepEqual(call.audio,[0,1000,2000,1000,2000],'A failed later phrase must preserve earlier cached audio');
+  assert.ok(!call.messages.some(message=>message.type==='error'));
+  const detail=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
+  assert.equal(detail.call.status,'active');
+  await f.request(`/voice/calls/${call.callId}/end`,'POST');
+  const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
+  assert.equal(usage.results.length,5,'Preparation stops at the first failure and never retries during turns');
+  assert.equal(usage.results.filter((row:any)=>row.status==='running').length,1,'Unknown provider usage retains its reservation');
 });
 
 for(const failure of ['provider','odd_pcm','empty_pcm']) {

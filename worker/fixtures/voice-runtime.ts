@@ -26,11 +26,12 @@ function fixtureAI(env: Env) {
     activeTTS++;
     try {
       if(options.VOICE_TEST_TTS_DELAY_MS)await new Promise(resolve=>setTimeout(resolve,Number(options.VOICE_TEST_TTS_DELAY_MS)));
-      const acknowledgment=input.text==='1 sec.';
-      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='provider')return new Response('Unavailable',{status:503});
-      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='odd_pcm')return new Response(new Uint8Array(3));
-      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='empty_pcm')return new Response(new Uint8Array());
-      const sample=acknowledgment?1000:input.text==='Hello, how can I help?'?0:2000;
+      const acknowledgment=['One second please.','Got it, just a sec.','I see, let me think.'].indexOf(String(input.text));
+      const failAcknowledgment=acknowledgment>=0 && (!options.VOICE_TEST_ACK_FAILURE_TEXT || input.text===options.VOICE_TEST_ACK_FAILURE_TEXT);
+      if(failAcknowledgment && options.VOICE_TEST_ACK_FAILURE==='provider')return new Response('Unavailable',{status:503});
+      if(failAcknowledgment && options.VOICE_TEST_ACK_FAILURE==='odd_pcm')return new Response(new Uint8Array(3));
+      if(failAcknowledgment && options.VOICE_TEST_ACK_FAILURE==='empty_pcm')return new Response(new Uint8Array());
+      const sample=acknowledgment>=0?1000+acknowledgment*2000:input.text==='Hello, how can I help?'?0:2000;
       return new Response(new Int16Array(320).fill(sample).buffer,{headers:{'content-type':'audio/pcm'}});
     } finally {activeTTS--;}
   }
