@@ -14,7 +14,7 @@ const agent = z.object({
 const call = z.object({
   id: z.string(), channel, status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(), durationSeconds: z.number().int().nonnegative(),
-  transcript: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string() })).max(60),
+  transcript: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string() })).max(121),
 }).openapi('VoiceCall');
 const failures = errors(400, 401, 403, 404, 409, 413, 429, 503);
 
@@ -45,7 +45,7 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
     ...common, operationId: 'createVoiceCall', summary: 'Start a browser or text receptionist call',
     description: 'Allows at most three concurrent active calls per account. Calls expire after 15 minutes and support up to 60 transcript turns. Phone calls are created by the telephony provider.',
     request: { headers, ...requestBody(z.object({ channel: z.enum(['browser', 'text']) }).strict()) },
-    responses: { 201: jsonResponse(z.object({ call, websocketUrl: z.string().nullable() })), ...errors(400, 401, 403, 409, 429, 503) },
+    responses: { 201: jsonResponse(z.object({ call, websocketUrl: z.string() })), ...errors(400, 401, 403, 409, 429, 503) },
   }, handler);
   register(api, 'get', '/voice/calls', {
     ...common, operationId: 'listVoiceCalls', summary: 'List recent receptionist calls', request: { headers },
@@ -69,7 +69,7 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
     operationId: 'receiveVoiceTwilioCall', tags: ['Voice'], summary: 'Receive a signed Twilio incoming call webhook', security: [{ twilioSignature: [] }],
     description: 'Twilio form-encoded webhook authenticated with X-Twilio-Signature. The response is TwiML XML. Calls expire after 15 minutes and support up to 60 transcript turns.',
     request: { params: agentId, headers: z.object({ 'X-Twilio-Signature': z.string() }), body: { required: true, content: { 'application/x-www-form-urlencoded': { schema: z.record(z.string(), z.string()) } } } },
-    responses: { 200: { description: 'TwiML response.', content: { 'text/xml': { schema: z.string() } } }, ...errors(400, 403, 404, 429, 503) },
+    responses: { 200: { description: 'TwiML response.', content: { 'application/xml': { schema: z.string() } } }, ...errors(400, 403, 404, 429, 503) },
   }, handler);
   register(api, 'get', '/voice/twilio/media/{callId}', {
     operationId: 'connectVoiceTwilioMedia', tags: ['Voice'], summary: 'Upgrade a signed Twilio media stream', security: [{ twilioSignature: [] }],

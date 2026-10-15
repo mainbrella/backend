@@ -194,6 +194,77 @@ return 409 `recipient_unsubscribed`; preference lookup failures return 503
 `email_preferences_unavailable` and do not send. Apply migration
 `033_marketing_email_unsubscribe.sql` before deploying this change.
 
+## AI receptionist
+
+The receptionist API is enabled by `VOICE_ENABLED=true` and the SQLite-backed
+`RECEPTIONIST_CALL` Durable Object binding (`ReceptionistCall`) in
+`wrangler.jsonc`. Set `VOICE_PUBLIC_ORIGIN` to the exact public HTTPS API origin.
+Apply migration `043_voice_receptionist.sql` before using the API:
+
+```sh
+npm run db:migrate:local
+# Apply to the production D1 database only as an explicit release step:
+npm run db:migrate:remote
+```
+
+Customer routes use the `mainbrella_session` cookie. Browser requests include a
+trusted `Origin`; mutations and WebSocket upgrades require it. Save or read the
+account's agent with `PUT` or `GET /voice/agent`, inspect availability with
+`GET /voice/config`, and start a browser or text session with
+`POST /voice/calls` and `{ "channel": "browser" }` or `{ "channel": "text" }`.
+The response includes a call snapshot and its exact `websocketUrl`. Connect an
+`@cloudflare/voice/client` `VoiceClient` for agent `ReceptionistCall` using a
+custom `VoiceTransport` pointed at that URL. Do not append query parameters;
+the API authenticates the WebSocket with the session cookie and trusted Origin.
+A text connection receives the greeting immediately and uses `sendText()`; it
+must not send `startCall()`. A browser connection calls `startCall()` after
+connecting and streams 16 kHz PCM audio. End sessions with
+`POST /voice/calls/{callId}/end`; account call history is available at
+`GET /voice/calls` and is limited to the latest 50 calls.
+
+The lockfile currently resolves `@cloudflare/voice` 0.5.0 and `agents` 0.28.1.
+The former is a compatibility package that re-exports the Agents Voice API. It
+does not provide a `TwilioAdapter`, so phone media uses this Worker’s explicit
+bridge: Aura `linear16` mono PCM at 16 kHz is converted to Twilio's 8 kHz μ-law,
+and inbound μ-law is expanded to the 16 kHz PCM expected by Flux. The configured
+models are `@cf/deepgram/flux` STT, `@cf/meta/llama-3.3-70b-instruct-fp8-fast`
+with a 256-token response limit, and `@cf/deepgram/aura-1` TTS. Available Aura
+voices are `asteria`, `luna`, and `athena`.
+
+Inbound phone support requires manually provisioning an existing Twilio number;
+this service does not buy numbers. Set `TWILIO_AUTH_TOKEN` as a Wrangler secret
+and configure `TWILIO_ACCOUNT_SID`, `TWILIO_PHONE_NUMBER` (E.164), and
+`TWILIO_AGENT_ID` (the saved agent's ID) as variables, alongside
+`VOICE_PUBLIC_ORIGIN`.
+`GET /voice/config` returns the mapped phone number and per-agent `webhookUrl`;
+configure that URL as the number's Twilio Voice webhook using HTTP POST. The
+incoming form webhook and media WebSocket handshake are checked with Twilio's
+SDK signature validation. TwiML passes a media token that expires after 60
+seconds and can be claimed once. This release maps one number to one configured
+agent. `transferNumber` must be `null`; transfers, outbound calling, CRM and
+calendar integrations are not supported.
+
+Each account can have three active calls and 100 calls started in a rolling day.
+Calls end after 15 minutes or 60 caller turns. Each call retains a snapshot of
+the agent settings used at start. Transcripts are stored in D1 for the account's
+lifetime; raw audio recordings are not stored. Temporary Agent SQLite history and
+business configuration are purged 60 seconds after a call ends, after in-flight
+inference and transcript writes settle; D1 call history remains available. There is no transcript deletion
+control yet, so production operators must account for transcript retention when
+setting their data-retention policy. No service cost estimate is declared here.
+
+The automated Voice tests use deterministic AI fixtures and Miniflare to exercise
+API behavior, the Agent protocol, and transcript persistence. They do not qualify
+live Workers AI inference or a deployed Twilio number and webhook. Run the
+relevant checks with:
+
+```sh
+npm run type-check
+npm run test:openapi
+npm run docs:generate
+npx tsx --test worker/app/voice.test.ts worker/durable-objects/receptionist-call.test.ts
+```
+
 ## Verification
 
 ```sh

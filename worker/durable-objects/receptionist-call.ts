@@ -7,18 +7,22 @@ interface CallState {
   callId: string; userId: string; channel: VoiceCallRow['channel']; startedAt: string;
   config: VoiceAgentConfig; closed: boolean; failed: boolean; turns: number;
 }
-interface SocketState { accepted: boolean; started: boolean }
+interface SocketState { accepted: boolean; started: boolean; ready?: boolean }
 
 /** One durable Agent and one conversation history for each call, never an account-wide Agent. */
-export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
+export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState | null> {
+  static options = { sendIdentityOnConnect: false };
   initialState: CallState | null = null;
   transcriber = new WorkersAIFluxSTT(this.env.AI);
   private writes: Promise<unknown> = Promise.resolve();
+  private finalization: Promise<void> | null = null;
   private windowStart = 0;
   private windowBytes = 0;
   private windowFrames = 0;
   private lastTurn = 0;
+  private activeInference = 0;
   tts: TTSProvider = { synthesize: async (text,signal) => {
+    this.activeInference++;
     try {
       const response = await this.env.AI.run(VOICE_MODELS.tts,{
         text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
@@ -28,11 +32,11 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
     } catch (error) {
       if (!signal?.aborted) await this.finish(true);
       throw error;
-    }
+    } finally { this.activeInference--; }
   }};
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx,env);
+    super(ctx,env as Cloudflare.Env & Env);
     // Filter before the mixin or Agent sees messages: disable SDK state mutation,
     // RPC and arbitrary custom traffic, and bound both audio and text input.
     const voiceMessage = this.onMessage.bind(this);
@@ -56,8 +60,9 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
         if (this.state.channel === 'text' || (connection.state as SocketState).started) { await this.finish(true); return; }
         connection.setState({accepted:true,started:true});
       } else if (input.type === 'text_message') {
+        if (this.state.turns>=MAX_TURNS) { await this.finish(); return; }
         if (typeof input.text !== 'string' || input.text.trim().length<1 || input.text.length>4000) { await this.finish(true); return; }
-      } else if (!['interrupt','end_of_speech','playback_complete'].includes(String(input.type))) {
+      } else if (!['hello','interrupt','start_of_speech','end_of_speech'].includes(String(input.type))) {
         await this.finish(true); return;
       }
       return voiceMessage(connection,message);
@@ -96,13 +101,20 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
   }
   async onCallStart(connection: Connection) {
     if (!this.state || this.state.closed) return;
+    connection.setState({...connection.state as SocketState,ready:true});
     await this.speak(connection,this.state.config.greeting);
   }
   async onCallEnd(connection: Connection) {
-    if ((connection.state as SocketState | null)?.accepted) await this.finish();
+    if ((connection.state as SocketState | null)?.accepted) await this.finish(this.state?.channel!=='text' && !(connection.state as SocketState).ready);
   }
   async onClose(connection: Connection) {
     if ((connection.state as SocketState | null)?.accepted) await this.finish();
+  }
+  async afterTranscribe(transcript: string, _connection: Connection): Promise<string | null> {
+    if (!this.state || this.state.closed || this.state.turns>=MAX_TURNS || transcript.length>4000) {
+      await this.finish(); return null;
+    }
+    return transcript;
   }
   async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
     if (!this.state || this.state.closed || this.state.turns>=MAX_TURNS || transcript.length>4000 || Date.now()-this.lastTurn<750) {
@@ -111,6 +123,7 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
     this.lastTurn=Date.now();
     this.setState({...this.state,turns:this.state.turns+1});
     await this.flush();
+    this.activeInference++;
     try {
       const response = await this.env.AI.run(VOICE_MODELS.llm,{
         messages:receptionistMessages(this.state!.config,context.messages,transcript),max_tokens:256,temperature:0.4,
@@ -123,8 +136,8 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
         context.connection.send(JSON.stringify({type:'error',message:'The receptionist is unavailable. Please try again.'}));
         await this.finish(true);
       }
-      throw error;
-    }
+      throw new Error(context.signal.aborted ? 'Turn interrupted' : 'The receptionist is unavailable. Please try again.');
+    } finally { this.activeInference--; }
   }
   saveMessage(role: 'user'|'assistant',text: string): void {
     super.saveMessage(role,text);
@@ -134,18 +147,47 @@ export class ReceptionistCall extends VoiceAgent<Env,CallState | null> {
     this.writes = this.writes.catch(()=>{}).then(()=>this.env.DB.prepare('UPDATE voice_calls SET transcript_json=? WHERE id=?').bind(transcript,callId).run());
     this.ctx.waitUntil(this.writes.catch(()=>{ console.error('voice_transcript_persistence_failed'); }));
   }
-  private async flush() { await this.writes; }
+  private async flush(retryTranscript=false): Promise<void> {
+    try { await this.writes; }
+    catch (error) {
+      if (!retryTranscript || !this.state) throw error;
+      // SDK SQLite is authoritative until finalization succeeds. Rebuild the
+      // entire snapshot rather than retaining a permanently rejected promise.
+      const transcript=JSON.stringify(this.getConversationHistory(MAX_TURNS*2+1).map(message=>({role:message.role,text:message.content})));
+      const callId=this.state.callId;
+      this.writes=this.writes.catch(()=>{}).then(()=>this.env.DB.prepare('UPDATE voice_calls SET transcript_json=? WHERE id=?').bind(transcript,callId).run());
+      await this.writes;
+    }
+  }
   async expireCall() { await this.finish(); }
+  async purgeCall(): Promise<void> {
+    if (!this.state?.closed) return;
+    if (this.activeInference) { await this.schedule(15,'purgeCall'); return; }
+    await this.flush();
+    // D1 owns call history. Remove SDK SQLite transcripts, business instructions,
+    // attachments and alarms from this temporary per-call Durable Object.
+    await this.destroy();
+  }
   private async finish(failed=false): Promise<void> {
     if (!this.state) return;
-    if (this.state.closed) { await this.flush(); return; }
-    this.setState({...this.state,closed:true,failed:this.state.failed || failed});
-    for (const connection of this.getConnections()) {
-      this.forceEndCall(connection);
-      connection.close(1000,'Call ended');
-    }
-    await this.flush();
-    await this.env.DB.prepare(`UPDATE voice_calls SET status=?,ended_at=COALESCE(ended_at,?) WHERE id=? AND status='active'`)
-      .bind(this.state.failed?'failed':'completed',new Date().toISOString(),this.state.callId).run();
+    if (this.finalization) return this.finalization;
+    // Assign before closing sockets: the SDK's end/close hooks can re-enter.
+    // Durable closed state blocks input; it does not mean D1 was finalized.
+    const finalization=Promise.resolve().then(async()=>{
+      if (!this.state!.closed) {
+        this.setState({...this.state!,closed:true,failed:this.state!.failed || failed});
+        for (const connection of this.getConnections()) {
+          this.forceEndCall(connection);
+          connection.close(1000,'Call ended');
+        }
+      }
+      await this.flush(true);
+      await this.env.DB.prepare(`UPDATE voice_calls SET status=?,ended_at=COALESCE(ended_at,?) WHERE id=? AND status='active'`)
+        .bind(this.state!.failed?'failed':'completed',new Date().toISOString(),this.state!.callId).run();
+      await this.schedule(60,'purgeCall',undefined,{idempotent:true});
+    });
+    this.finalization=finalization;
+    try { await finalization; }
+    finally { if (this.finalization===finalization) this.finalization=null; }
   }
 }

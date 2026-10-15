@@ -1,5 +1,5 @@
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
-import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceAgentRow, type VoiceCallRow } from '../lib/voice';
+import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceCallRow } from '../lib/voice';
 import { handleTwilioRequest } from './voice-twilio';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -10,9 +10,9 @@ async function body(request: Request) {
   if (new TextEncoder().encode(text).length > 16_384) return null;
   try { return JSON.parse(text); } catch { return null; }
 }
-export async function handleVoiceRequest(request: Request, env: Env): Promise<Response> {
+export async function handleVoiceRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname.startsWith('/voice/twilio/')) return handleTwilioRequest(request,env);
+  if (url.pathname.startsWith('/voice/twilio/')) return handleTwilioRequest(request,env,ctx);
   const cors = authCorsHeaders(request);
   if (cors === null) return authJson({error:'origin_not_allowed'},403,{});
   if (request.method === 'OPTIONS') return new Response(null,{status:204,headers:cors});
@@ -84,6 +84,7 @@ export async function handleVoiceRequest(request: Request, env: Env): Promise<Re
       if (call.channel === 'phone') return authJson({error:'not_found'},404,cors);
       if (!voiceEnabled(env)) return authJson({error:'voice_unavailable'},503,cors);
       if (call.status !== 'active') return authJson({error:'call_ended'},409,cors);
+      if (call.connected_at) return authJson({error:'call_already_connected'},409,cors);
       if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return authJson({error:'websocket_required'},426,cors);
       return callStub(env,call.id).fetch(new Request('https://voice.internal/connect',{headers:{Upgrade:'websocket'}}));
     }

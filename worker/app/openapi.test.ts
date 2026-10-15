@@ -770,7 +770,7 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.deepEqual(agentBody.properties.voice.enum, ['asteria', 'luna', 'athena']);
   assert.deepEqual(agentBody.properties.transferNumber.type, 'null');
   assert.equal(paths['/voice/calls'].get.responses[200].content['application/json'].schema.properties.calls.maxItems, 50);
-  assert.equal(components.schemas.VoiceCall.properties.transcript.maxItems, 60);
+  assert.equal(components.schemas.VoiceCall.properties.transcript.maxItems, 121);
   assert.ok(paths['/voice/calls/{callId}/connect'].get.responses[101]);
   assert.deepEqual(paths['/voice/calls/{callId}/connect'].get.security, [{ cookieAuth: [] }]);
   assert.ok(paths['/voice/twilio/media/{callId}'].get.responses[101]);

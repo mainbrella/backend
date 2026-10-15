@@ -49,7 +49,7 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname.startsWith('/voice/')) return handleVoiceRequest(request, env);
+  if (url.pathname.startsWith('/voice/')) return handleVoiceRequest(request, env, ctx);
   if (url.pathname === '/pools' || url.pathname.startsWith('/pools/')) return handlePoolsRequest(request, env);
   if (url.pathname === '/secrets' || url.pathname.startsWith('/secrets/')) return handleSecretsRequest(request, env);
   if (url.pathname === '/domains' || url.pathname.startsWith('/domains/')) return handleDomainsRequest(request, env);
