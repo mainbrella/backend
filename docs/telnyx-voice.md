@@ -15,9 +15,17 @@ assigning the application below. Messaging-profile setup is independent of voice
 
 ## 2. Save a Mainbrella receptionist
 
-Sign in to Mainbrella and save your receptionist's name, business, greeting,
-instructions and voice. Use **GET /voice/agent** from the signed-in app to read
-`agent.id`. To create one directly, run this in the browser console on
+Sign in to Mainbrella at **https://mainbrella.com/voice/** and save your
+receptionist's name, business, greeting, instructions and voice. If the fields
+are editable but **Save receptionist** is disabled, the receptionist is already
+saved and there are no changes to save. Editing a field enables the button.
+
+Open **Phone connection** and copy the **Incoming call webhook**. The UUID at
+the end of `/voice/twilio/incoming/UUID` is your `agent.id`. For Telnyx, use the
+same UUID with `/voice/telnyx/incoming/UUID` as shown in step 3.
+
+You can also use **GET /voice/agent** from the signed-in app to read `agent.id`.
+To create one directly, run this in the browser console on
 `https://mainbrella.com` while signed in:
 
 ```js
