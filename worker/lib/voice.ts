@@ -14,6 +14,7 @@ export const voiceAgentInput = z.object({
   greeting: z.string().trim().min(1).max(500),
   instructions: z.string().trim().min(1).max(8000),
   voice: z.enum(['asteria', 'luna', 'athena']),
+  voiceLogic: z.enum(['original_no_reply', 'reply_right_away']).default('original_no_reply'),
   transferNumber: z.null(),
 }).strict();
 export type VoiceAgentConfig = z.infer<typeof voiceAgentInput> & { id: string; updatedAt: string };
@@ -31,11 +32,11 @@ export interface VoiceCallRow {
 }
 export interface VoiceAgentRow {
   id: string; user_id: string; name: string; business_name: string;
-  greeting: string; instructions: string; voice: VoiceAgentConfig['voice']; updated_at: string;
+  greeting: string; instructions: string; voice: VoiceAgentConfig['voice']; voice_logic: VoiceAgentConfig['voiceLogic']; updated_at: string;
 }
 export function publicAgent(row: VoiceAgentRow): VoiceAgentConfig {
   return { id: row.id, name: row.name, businessName: row.business_name, greeting: row.greeting,
-    instructions: row.instructions, voice: row.voice, transferNumber: null, updatedAt: row.updated_at };
+    instructions: row.instructions, voice: row.voice, voiceLogic: row.voice_logic ?? 'original_no_reply', transferNumber: null, updatedAt: row.updated_at };
 }
 export function publicCall(row: VoiceCallRow) {
   return { id: row.id, channel: row.channel, phoneProvider: row.channel === 'phone' ? row.phone_provider || 'twilio' : null, phoneTransport: row.channel === 'phone' ? row.phone_transport || 'pstn' : null, status: row.status, startedAt: row.started_at,

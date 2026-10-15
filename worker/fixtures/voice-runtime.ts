@@ -5,26 +5,44 @@ import { appendAccountingEvent } from '../lib/accounting-ledger';
 // protocol and persistence without running paid inference during tests.
 import { ReceptionistCall as BaseCall } from '../durable-objects/receptionist-call';
 import { handleVoiceRequest } from '../app/voice';
-const ai = { async run(model: string,input: Record<string,unknown>) {
+function fixtureAI(env: Env) {
+  const options=env as unknown as Record<string,string>;
+  let activeTTS=0;
+  return { async run(model: string,input: Record<string,unknown>) {
   if (model.includes('/flux')) {
     const pair=new WebSocketPair();pair[1].accept();
-    let sent=false;
+    let turns=0;
     pair[1].addEventListener('message',event=>{
-      if (!sent && typeof event.data!=='string') { sent=true;pair[1].send(JSON.stringify({event:'EndOfTurn',transcript:'Could I leave a message?'})); }
+      if (typeof event.data==='string' || (turns && options.VOICE_TEST_MULTI_TURN!=='true')) return;
+      const transcript=['Could I leave a message?','Could I change that message?','Please take a final message.'][turns++] || 'Another message.';
+      if(options.VOICE_TEST_MULTI_TURN==='true')pair[1].send(JSON.stringify({event:'StartOfTurn'}));
+      pair[1].send(JSON.stringify({event:'EndOfTurn',transcript}));
     });
     return new Response(null,{status:101,webSocket:pair[0]});
   }
   if (model.includes('/aura-1')) {
     if (input.encoding!=='linear16' || input.container!=='none' || input.sample_rate!==16000) throw new Error('Raw PCM TTS required');
-    return new Response(new Uint8Array(640),{headers:{'content-type':'audio/pcm'}});
+    if(activeTTS && options.VOICE_TEST_REJECT_TTS_OVERLAP==='true')throw new Error('Overlapping TTS requests');
+    activeTTS++;
+    try {
+      if(options.VOICE_TEST_TTS_DELAY_MS)await new Promise(resolve=>setTimeout(resolve,Number(options.VOICE_TEST_TTS_DELAY_MS)));
+      const acknowledgment=input.text==='1 sec.';
+      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='provider')return new Response('Unavailable',{status:503});
+      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='odd_pcm')return new Response(new Uint8Array(3));
+      if(acknowledgment && options.VOICE_TEST_ACK_FAILURE==='empty_pcm')return new Response(new Uint8Array());
+      const sample=acknowledgment?1000:input.text==='Hello, how can I help?'?0:2000;
+      return new Response(new Int16Array(320).fill(sample).buffer,{headers:{'content-type':'audio/pcm'}});
+    } finally {activeTTS--;}
   }
   const messages=input.messages as Array<{role:string;content:string}>;
   const caller=messages.at(-1)!.content;
   if (caller==='slow model') await new Promise(resolve=>setTimeout(resolve,200));
+  if(options.VOICE_TEST_REPLY_DELAY_MS)await new Promise(resolve=>setTimeout(resolve,Number(options.VOICE_TEST_REPLY_DELAY_MS)));
   if (caller==='missing usage') return {response:'Unknown usage'};
   if (caller==='cause model failure') throw new Error('Fixture inference unavailable');
-  return {response:`I can take a message: ${caller}`,usage:{prompt_tokens:100,completion_tokens:20}};
-}};
+  return {response:`I can take a message: ${caller}${options.VOICE_TEST_MULTI_SENTENCE==='true'?' I will keep this information for the team.':''}`,usage:{prompt_tokens:100,completion_tokens:20}};
+  }};
+}
 export class VoiceBillingAccount extends DurableObject<Env> {
   private controller: ContainerAccountController;
   constructor(ctx: DurableObjectState,env:Env) {
@@ -64,7 +82,7 @@ export class ReceptionistCall extends BaseCall {
       };
       const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
     }});
-    super(ctx,{...env,DB,RECEPTIONIST_CALL,AI:ai} as unknown as Env);
+    super(ctx,{...env,DB,RECEPTIONIST_CALL,AI:fixtureAI(env)} as unknown as Env);
     this.faults=faults;
   }
   protected async hangupPhone(_callSid:string) {
@@ -94,4 +112,4 @@ export default { async fetch(request: Request,env: Env,ctx: ExecutionContext) {
   if(fault){await (env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(fault[1])) as unknown as ReceptionistCall).stageFinalizationOutage();return new Response(null,{status:204});}
   const match=new URL(request.url).pathname.match(/^\/__test_purge\/(.+)$/);
   if(match){await env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(match[1])).purgeCall();return new Response(null,{status:204});}
-  return handleVoiceRequest(request,{...env,AI:ai} as unknown as Env,ctx); } };
+  return handleVoiceRequest(request,{...env,AI:fixtureAI(env)} as unknown as Env,ctx); } };

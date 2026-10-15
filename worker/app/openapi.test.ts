@@ -770,6 +770,10 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.equal(agentBody.properties.greeting.maxLength, 500);
   assert.equal(agentBody.properties.instructions.maxLength, 8000);
   assert.deepEqual(agentBody.properties.voice.enum, ['asteria', 'luna', 'athena']);
+  assert.deepEqual(agentBody.properties.voiceLogic.enum, ['original_no_reply', 'reply_right_away']);
+  assert.equal(agentBody.required.includes('voiceLogic'), false);
+  assert.equal(agentBody.properties.voiceLogic.default, 'original_no_reply');
+  assert.deepEqual(components.schemas.VoiceAgentConfig.properties.voiceLogic.enum, ['original_no_reply', 'reply_right_away']);
   assert.deepEqual(agentBody.properties.transferNumber.type, 'null');
   assert.equal(paths['/voice/calls'].get.responses[200].content['application/json'].schema.properties.calls.maxItems, 50);
   assert.equal(components.schemas.VoiceCall.properties.transcript.maxItems, 121);

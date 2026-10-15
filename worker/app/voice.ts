@@ -49,10 +49,10 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       const parsed = voiceAgentInput.safeParse(await body(request));
       if (!parsed.success) return authJson({error:'invalid_request'},400,cors);
       const input = parsed.data;
-      await env.DB.prepare(`INSERT INTO voice_agents(id,user_id,name,business_name,greeting,instructions,voice,updated_at)
-        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,business_name=excluded.business_name,
-        greeting=excluded.greeting,instructions=excluded.instructions,voice=excluded.voice,updated_at=excluded.updated_at`)
-        .bind(crypto.randomUUID(),user.id,input.name,input.businessName,input.greeting,input.instructions,input.voice,new Date().toISOString()).run();
+      await env.DB.prepare(`INSERT INTO voice_agents(id,user_id,name,business_name,greeting,instructions,voice,voice_logic,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,business_name=excluded.business_name,
+        greeting=excluded.greeting,instructions=excluded.instructions,voice=excluded.voice,voice_logic=excluded.voice_logic,updated_at=excluded.updated_at`)
+        .bind(crypto.randomUUID(),user.id,input.name,input.businessName,input.greeting,input.instructions,input.voice,input.voiceLogic,new Date().toISOString()).run();
       return authJson({agent:publicAgent((await readAgent(env,user.id))!)},200,cors);
     }
     if (url.pathname === '/voice/calls') {

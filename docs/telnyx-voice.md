@@ -20,6 +20,17 @@ receptionist's name, business, greeting, instructions and voice. If the fields
 are editable but **Save receptionist** is disabled, the receptionist is already
 saved and there are no changes to save. Editing a field enables the button.
 
+Keep **Voice logic** set to `original_no_reply` for production. To test the
+optional spoken cue, select `reply_right_away` and save before starting a new
+call. It says “1 sec” once when the caller's turn finishes, then gives the normal
+reply. The clip is prepared once during call setup using the saved voice, and
+reused for that call. If preparation fails, the call continues without the cue.
+Text calls and calls already in progress keep their existing behavior.
+
+Apply `047_voice_logic.sql` before deploying this setting. It defaults all
+existing agents to `original_no_reply`; omitted `voiceLogic` values in PUT
+requests also select that default.
+
 Open **Phone connection** and copy the **Incoming call webhook**. The UUID at
 the end of `/voice/twilio/incoming/UUID` is your `agent.id`. For Telnyx, use the
 same UUID with `/voice/telnyx/incoming/UUID` as shown in step 3.
@@ -36,7 +47,7 @@ const response = await fetch('https://api.mainbrella.com/voice/agent', {
     name: 'Maya', businessName: 'Your business',
     greeting: 'Thanks for calling. How can I help?',
     instructions: 'Answer using these business details: REPLACE WITH YOUR DETAILS.',
-    voice: 'asteria', transferNumber: null,
+    voice: 'asteria', voiceLogic: 'original_no_reply', transferNumber: null,
   }),
 });
 console.log(response.status, await response.json());

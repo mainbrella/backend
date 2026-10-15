@@ -7,6 +7,7 @@ import { VoiceClient, type VoiceTransport } from '@cloudflare/voice/client';
 import { getExpectedTwilioSignature } from 'twilio/lib/webhooks/webhooks.js';
 import { TELNYX_TEST_ACCOUNT, TELNYX_TEST_BINDINGS, TELNYX_TEST_CALL, TELNYX_TEST_CONNECTION, TELNYX_TEST_SIP, telnyxTestSignature } from '../app/voice-telnyx-test-helpers';
 import { hashToken } from '../app/auth-core';
+import { pcmToTelnyx } from '../lib/voice-telnyx';
 
 async function runtime(t: test.TestContext, bindings: Record<string,string> = {}) {
   const result=await build({entryPoints:[new URL('../fixtures/voice-runtime.ts',import.meta.url).pathname],bundle:true,write:false,
@@ -17,7 +18,7 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
     bindings:{VOICE_ENABLED:'true',VOICE_PHONE_MICRO_USD_PER_MINUTE:'12500',VOICE_PUBLIC_ORIGIN:'https://api.mainbrella.com',TWILIO_AUTH_TOKEN:'voice-test-twilio-secret',TWILIO_ACCOUNT_SID:'AC'+'a'.repeat(32),TWILIO_PHONE_NUMBER:'+15551234567',TWILIO_AGENT_ID:'11111111-1111-4111-8111-111111111111',...bindings}}]}));
   t.after(()=>mf.dispose());
   const db=await mf.getD1Database('DB');
-  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip','046_voice_telnyx']) {
+  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip','046_voice_telnyx','047_voice_logic']) {
     const statements=readFileSync(new URL(`../../migrations/${migration}.sql`,import.meta.url),'utf8').split(';').map(value=>value.trim()).filter(Boolean);
     for (const statement of statements) await db.prepare(statement).run();
   }
@@ -34,7 +35,8 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
   const funding=await request('/__test_billing/funding','POST',{id:'pi_voice',customerId:'cus_voice',amountCents:500,
     refundedCents:0,disputed:false,createdAt:fundedAt,kind:'topup'});
   assert.equal(funding.status,200,await funding.clone().text());
-  const saved=await request('/voice/agent','PUT',{name:'Maya',businessName:'Test workshop',greeting:'Hello, how can I help?',instructions:'Take a message. Open weekdays.',voice:'asteria',transferNumber:null});
+  const config={name:'Maya',businessName:'Test workshop',greeting:'Hello, how can I help?',instructions:'Take a message. Open weekdays.',voice:'asteria',transferNumber:null};
+  const saved=await request('/voice/agent','PUT',config);
   assert.equal(saved.status,200,await saved.clone().text());
   await db.prepare("UPDATE voice_agents SET id='11111111-1111-4111-8111-111111111111'").run();
   async function create(channel='text') {
@@ -42,7 +44,11 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
     assert.equal(response.status,201,await response.clone().text());
     return response.json() as Promise<any>;
   }
-  return {mf,db,headers,request,create,fundedAt};
+  async function setVoiceLogic(voiceLogic:'original_no_reply'|'reply_right_away') {
+    const response=await request('/voice/agent','PUT',{...config,voiceLogic});
+    assert.equal(response.status,200,await response.clone().text());
+  }
+  return {mf,db,headers,request,create,setVoiceLogic,fundedAt};
 }
 async function until(predicate:()=>boolean|Promise<boolean>,message:string,timeout=8000) {
   const deadline=Date.now()+timeout;
@@ -64,6 +70,44 @@ function clientTransport(mf: Miniflare,url: string,headers: Record<string,string
     disconnect(){socket?.close();},sendJSON(value){frames.push(String(value.type));socket.send(JSON.stringify(value));},sendBinary(data){socket.send(data);},
   };
   return {transport,frames};
+}
+
+async function browserCall(t:test.TestContext,f:Awaited<ReturnType<typeof runtime>>) {
+  const created=await f.create('browser');
+  const response=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
+  assert.equal(response.status,101);
+  const ws=response.webSocket!;const messages:any[]=[];const audio:number[]=[];
+  ws.addEventListener('message',event=>{
+    if(typeof event.data==='string')messages.push(JSON.parse(event.data));
+    else audio.push(new DataView(event.data as ArrayBuffer).getInt16(0,true));
+  });
+  ws.accept();t.after(()=>ws.close());ws.send(JSON.stringify({type:'start_call'}));
+  await until(()=>audio.length===1,'Voice greeting missing');
+  return {ws,messages,audio,callId:created.call.id as string};
+}
+
+async function telnyxCall(t:test.TestContext,f:Awaited<ReturnType<typeof runtime>>) {
+  const body=new URLSearchParams({AccountSid:TELNYX_TEST_ACCOUNT,ConnectionId:TELNYX_TEST_CONNECTION,CallSid:TELNYX_TEST_CALL,
+    To:TELNYX_TEST_BINDINGS.TELNYX_PHONE_NUMBER}).toString();
+  const incoming=await f.mf.dispatchFetch('https://api.mainbrella.com/voice/telnyx/incoming/11111111-1111-4111-8111-111111111111',{
+    method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',...telnyxTestSignature(body)},body});
+  assert.equal(incoming.status,200);
+  const xml=await incoming.text(),wssUrl=xml.match(/<Stream url="([^"]+)"/)![1],token=xml.match(/name="token" value="([^"]+)"/)![1];
+  const response=await f.mf.dispatchFetch(wssUrl.replace('wss:','https:'),{headers:{Upgrade:'websocket',...telnyxTestSignature(wssUrl)}});
+  assert.equal(response.status,101);
+  const ws=response.webSocket!;const messages:any[]=[];const audio:string[]=[];
+  ws.addEventListener('message',event=>{
+    const message=JSON.parse(String(event.data));messages.push(message);
+    if(message.event==='media')audio.push(message.media.payload);
+  });
+  ws.accept();t.after(()=>ws.close());
+  const streamId=crypto.randomUUID();
+  ws.send(JSON.stringify({event:'start',stream_id:streamId,start:{call_control_id:TELNYX_TEST_CALL,user_id:TELNYX_TEST_ACCOUNT,
+    media_format:{encoding:'PCMU',sample_rate:8000,channels:1},custom_parameters:{token}}}));
+  await until(()=>audio.length===1,'Telnyx greeting missing');
+  const speak=()=>ws.send(JSON.stringify({event:'media',stream_id:streamId,media:{track:'inbound',payload:Buffer.alloc(160,255).toString('base64')}}));
+  const stop=()=>ws.send(JSON.stringify({event:'stop',stream_id:streamId}));
+  return {ws,messages,audio,speak,stop,callId:wssUrl.split('/').at(-1)!};
 }
 
 test('installed VoiceClient completes a text turn through the real Agent and persists transcript',async t=>{
@@ -119,93 +163,86 @@ test('installed VoiceClient browser start accepts PCM, raw PCM greeting and spee
   await f.request(`/voice/calls/${created.call.id}/end`,'POST');
   const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).all() as any;
   assert.ok(usage.results.every((row:any)=>row.status==='settled'));
+  assert.equal(usage.results.filter((row:any)=>row.model==='@cf/deepgram/aura-1').length,2,'Default calls synthesize only the greeting and answer');
   assert.deepEqual(new Set(usage.results.map((row:any)=>row.model)),new Set(['@cf/deepgram/flux','@cf/deepgram/aura-1','@cf/meta/llama-3.3-70b-instruct-fp8-fast']));
   const stt=usage.results.find((row:any)=>row.model==='@cf/deepgram/flux');
   assert.equal(JSON.parse(stt.usage_json).audioBytes,640);assert.equal(stt.cost_micro_usd,5);
 });
 
-<<<<<<< Updated upstream
-=======
-test('slow voice turns play short acknowledgments before the answer, while text turns stay unchanged',async t=>{
-  const f=await runtime(t);
-  const voice=await f.create('browser');
-  const text=await f.create('text');
-  const {transport}=clientTransport(f.mf,text.websocketUrl,f.headers);
-  const client=new VoiceClient({agent:'ReceptionistCall',transport});
-  t.after(()=>client.disconnect());client.connect();
+test('reply_right_away plays one cached cue before each whole speech reply without changing conversation history',async t=>{
+  const f=await runtime(t,{VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_MULTI_SENTENCE:'true',VOICE_TEST_REPLY_DELAY_MS:'500',
+    VOICE_TEST_REJECT_TTS_OVERLAP:'true',VOICE_TEST_TTS_DELAY_MS:'30'});
+  await f.setVoiceLogic('reply_right_away');
+  const call=await browserCall(t,f);
+  assert.deepEqual(call.audio,[0],'Preparation is silent and only the greeting plays before speech');
+  for(let turn=0;turn<2;turn++) {
+    if(turn)await new Promise(resolve=>setTimeout(resolve,800));
+    call.ws.send(new Uint8Array(640).buffer);
+    await until(()=>call.audio.length===2+turn*2,'Immediate cue missing',400);
+    assert.equal(call.audio.at(-1),1000);
+    const before=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
+    assert.equal(before.call.transcript.filter((message:any)=>message.role==='assistant').length,turn+1,'Cue must arrive before the delayed answer');
+    await until(()=>call.audio.length===3+turn*2,'Whole speech reply missing');
+    await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Speech history missing');
+  }
+  assert.deepEqual(call.audio,[0,1000,2000,1000,2000],'Each cue is followed by exactly one complete answer buffer');
+  assert.ok(!call.messages.some(message=>message.type==='error'||message.type==='transcript_delta'));
+  const inspected=await (await f.request(`/__test_inspect/${call.callId}`)).json() as any;
+  assert.equal(inspected.state.closed,false);
+  assert.ok(inspected.history.every((message:any)=>!message.content.includes('1 sec.')),'Audio cues must not become model conversation history');
+  assert.equal((await f.request(`/voice/calls/${call.callId}/end`,'POST')).status,200);
+  const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
+  assert.equal(usage.results.length,4,'One preparation, one greeting, and one TTS request per complete answer');
+  assert.ok(usage.results.every((row:any)=>row.status==='settled'));
+  assert.equal(usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,1,'Replaying the cue must not call or bill the provider again');
+});
+
+test('reply_right_away leaves text tests free of acknowledgment audio and extra inference',async t=>{
+  const f=await runtime(t);await f.setVoiceLogic('reply_right_away');
+  const created=await f.create('text');
+  const {transport}=clientTransport(f.mf,created.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});t.after(()=>client.disconnect());client.connect();
   await until(()=>client.transcript.length===1,'Text greeting missing');
-  const connected=await f.mf.dispatchFetch(voice.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
-  const ws=connected.webSocket!;
-  const messages:any[]=[];
-  let audioFrames=0;
-  ws.addEventListener('message',event=>{
-    if(typeof event.data==='string') messages.push(JSON.parse(event.data));
-    else audioFrames++;
-  });
-  ws.accept();t.after(()=>ws.close());
-  ws.send(JSON.stringify({type:'start_call'}));
-  await until(()=>audioFrames===1,'Voice greeting missing');
-  messages.length=0;audioFrames=0;
-  ws.send(JSON.stringify({type:'text_message',text:'waiting model'}));
-  client.sendText('waiting model');
-  await until(()=>audioFrames===1,'Acknowledgment audio missing');
-  assert.ok(messages.some(message=>message.type==='transcript_delta'&&message.text==='Mm-hmm. '));
-  assert.ok(!messages.some(message=>message.type==='transcript_end'),'Acknowledgment must play before the answer is ready');
-  await until(()=>audioFrames===2,'Holding phrase audio missing');
-  assert.ok(messages.some(message=>message.type==='transcript_delta'&&message.text==='One moment. '));
-  assert.ok(!messages.some(message=>message.type==='transcript_end'));
-  await until(()=>messages.some(message=>message.type==='transcript_end'),'Voice answer missing');
-  await until(()=>audioFrames===3,'Voice answer audio missing');
-  const expected='Mm-hmm. One moment. I can take a message: waiting model';
-  assert.equal(messages.find(message=>message.type==='transcript_end').text,expected);
-  await until(()=>client.transcript.at(-1)?.text==='I can take a message: waiting model','Text answer missing');
-  assert.equal(client.transcript.length,3,'Text turns must not include acknowledgments');
-  await until(async()=>{
-    const detail=await (await f.request(`/voice/calls/${voice.call.id}`)).json() as any;
-    return detail.call.transcript.at(-1)?.text===expected;
-  },'Spoken acknowledgments and answer not persisted together');
-  await f.request(`/voice/calls/${voice.call.id}/end`,'POST');
-  await f.request(`/voice/calls/${text.call.id}/end`,'POST');
-  const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(voice.call.id).all() as any;
-  const tts=usage.results.filter((row:any)=>row.model==='@cf/deepgram/aura-1');
-  assert.equal(tts.length,5,'Greeting, acknowledgment preparation, holding phrase, answer and next acknowledgment should be metered once');
-  assert.ok(tts.every((row:any)=>row.status==='settled'));
+  client.sendText('Please take a message.');
+  await until(()=>client.transcript.at(-1)?.text==='I can take a message: Please take a message.','Text answer missing');
+  assert.equal(client.error,null);assert.equal(client.transcript.length,3);
+  await f.request(`/voice/calls/${created.call.id}/end`,'POST');
+  const usage=await f.db.prepare('SELECT model,status FROM voice_usage WHERE call_id=?').bind(created.call.id).all() as any;
+  assert.deepEqual(usage.results,[{model:'@cf/meta/llama-3.3-70b-instruct-fp8-fast',status:'settled'}]);
 });
 
-test('interrupting an acknowledgment cancels later fillers and the stale answer',async t=>{
-  const f=await runtime(t);const created=await f.create('browser');
-  const connected=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
-  const ws=connected.webSocket!;const messages:any[]=[];
-  let audioFrames=0;
-  ws.addEventListener('message',event=>{
-    if(typeof event.data==='string') messages.push(JSON.parse(event.data));
-    else audioFrames++;
-  });
-  ws.accept();t.after(()=>ws.close());
-  ws.send(JSON.stringify({type:'start_call'}));
-  await until(()=>audioFrames===1,'Greeting missing');
-  messages.length=0;audioFrames=0;
-  ws.send(JSON.stringify({type:'text_message',text:'waiting model'}));
-  await until(()=>audioFrames===1,'Acknowledgment missing');
-  messages.length=0;
-  ws.send(JSON.stringify({type:'interrupt'}));
-  await until(()=>messages.some(message=>message.type==='status'&&message.status==='listening'),'Turn was not interrupted');
-  // A fresh speech turn reaches the Agent after capture and STT latency; keep
-  // this text-protocol fixture outside the 750ms duplicate-turn guard too.
-  await new Promise(resolve=>setTimeout(resolve,800));
-  ws.send(JSON.stringify({type:'text_message',text:'New question'}));
-  await until(()=>messages.some(message=>message.type==='transcript_end'&&message.text==='I can take a message: New question'),'New answer missing');
+test('reply_right_away barge-in cancels the stale reply, accepts the next speech turn, and stops audio after hangup',async t=>{
+  const f=await runtime(t,{VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_REPLY_DELAY_MS:'1200'});
+  await f.setVoiceLogic('reply_right_away');const call=await browserCall(t,f);
+  call.ws.send(new Uint8Array(640).buffer);
+  await until(()=>call.audio.length===2,'First acknowledgment missing');
   await until(async()=>{
-    const rows=await f.db.prepare("SELECT status FROM voice_usage WHERE call_id=? AND model<>'@cf/deepgram/flux'").bind(created.call.id).all() as any;
+    const rows=await f.db.prepare("SELECT id FROM voice_usage WHERE call_id=? AND model='@cf/meta/llama-3.3-70b-instruct-fp8-fast' AND status='running'").bind(call.callId).all() as any;
+    return rows.results.length===1;
+  },'First inference not started');
+  // Replying immediately to the cue must interrupt the old turn, not trip the
+  // original flavor's 750 ms duplicate-turn hangup guard.
+  call.ws.send(new Uint8Array(640).buffer);
+  await until(()=>call.audio.length===3,'Second acknowledgment missing');
+  assert.ok(call.messages.some(message=>message.type==='playback_interrupt'));
+  await until(()=>call.audio.length===4,'Replacement reply missing');
+  assert.deepEqual(call.audio,[0,1000,1000,2000],'Interrupted reply must not play after the replacement cue');
+  const replies=call.messages.filter(message=>message.type==='transcript_end').map(message=>message.text);
+  assert.ok(!replies.includes('I can take a message: Could I leave a message?'));
+  assert.ok(replies.includes('I can take a message: Could I change that message?'));
+  call.ws.send(new Uint8Array(640).buffer);
+  await until(()=>call.audio.length===5,'Final acknowledgment missing');
+  await f.request(`/voice/calls/${call.callId}/end`,'POST');
+  await until(async()=>{
+    const rows=await f.db.prepare('SELECT status FROM voice_usage WHERE call_id=?').bind(call.callId).all() as any;
     return rows.results.every((row:any)=>row.status==='settled');
-  },'Interrupted inference did not settle');
-  assert.equal(audioFrames,2,'Only the acknowledgment and the new answer should play');
-  assert.ok(!messages.some(message=>message.type==='transcript_delta'&&message.text.includes('One moment.')));
-  assert.ok(!messages.some(message=>message.type==='transcript_end'&&message.text.includes('waiting model')));
-  assert.equal((await f.request(`/voice/calls/${created.call.id}/end`,'POST')).status,200);
+  },'Interrupted or ended inference did not settle');
+  assert.deepEqual(call.audio,[0,1000,1000,2000,1000],'Hanging up while the model is working must suppress its answer');
+  assert.ok(!call.messages.some(message=>message.type==='error'));
+  const detail=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
+  assert.equal(detail.call.status,'completed');
 });
 
->>>>>>> Stashed changes
 test('Agent denies SDK state mutation and a second socket, and records model failures',async t=>{
   const f=await runtime(t);const created=await f.create();
   const response=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
@@ -443,6 +480,58 @@ for(const transport of ['pstn','sip'] as const) {
     assert.equal(state.state.phoneProvider,'telnyx');assert.equal(state.state.phoneEnded,true);
     const ledger=await f.db.prepare("SELECT payload FROM accounting_ledger WHERE event_type='inference' AND json_extract(payload,'$.model')=?").bind(model).all() as any;
     assert.equal(ledger.results.length,1);assert.equal(JSON.parse(ledger.results[0].payload).providerCostMicroUsd,transport==='sip'?3000:10000);
+  });
+}
+
+test('Telnyx reply_right_away keeps the phone open through cached cues and ordered complete replies',async t=>{
+  const f=await runtime(t,{...TELNYX_TEST_BINDINGS,TELNYX_AGENT_ID:'11111111-1111-4111-8111-111111111111',
+    VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_MULTI_SENTENCE:'true',VOICE_TEST_REPLY_DELAY_MS:'500',
+    VOICE_TEST_REJECT_TTS_OVERLAP:'true',VOICE_TEST_TTS_DELAY_MS:'30'});
+  await f.setVoiceLogic('reply_right_away');const call=await telnyxCall(t,f);
+  const payload=(sample:number)=>pcmToTelnyx(new Int16Array(320).fill(sample).buffer)[0];
+  for(let turn=0;turn<2;turn++) {
+    call.speak();
+    await until(()=>call.audio.length===2+turn*2,'Telnyx immediate cue missing',400);
+    assert.equal(call.audio.at(-1),payload(1000));
+    await until(()=>call.audio.length===3+turn*2,'Telnyx answer missing');
+    await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Telnyx transcript missing');
+    const detail=await (await f.request(`/voice/calls/${call.callId}`)).json() as any;
+    assert.equal(detail.call.status,'active','An acknowledgment must not hang up the call');
+    assert.ok(!detail.call.transcript.some((message:any)=>message.text.includes('1 sec.')));
+  }
+  assert.deepEqual(call.audio,[0,1000,2000,1000,2000].map(payload),'Telnyx must receive each cue before its answer');
+  assert.ok(call.audio.every(frame=>Buffer.from(frame,'base64').length===160));
+  const beforeStop=await (await f.request(`/__test_inspect/${call.callId}`)).json() as any;
+  assert.notEqual(beforeStop.state.phoneEnded,true);
+  call.stop();
+  await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.status==='completed','Telnyx normal hangup failed');
+  const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
+  assert.equal(usage.results.length,4);
+  assert.ok(usage.results.every((row:any)=>row.status==='settled'));
+  assert.equal(usage.results.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,1);
+});
+
+for(const failure of ['provider','odd_pcm','empty_pcm']) {
+  test(`Telnyx reply_right_away skips ${failure} cue failures without closing this call or sibling calls`,async t=>{
+    const f=await runtime(t,{...TELNYX_TEST_BINDINGS,TELNYX_AGENT_ID:'11111111-1111-4111-8111-111111111111',VOICE_TEST_ACK_FAILURE:failure,
+      VOICE_TEST_MULTI_TURN:'true'});
+    await f.setVoiceLogic('reply_right_away');const sibling=await f.create('text');const call=await telnyxCall(t,f);
+    for(let turn=0;turn<2;turn++) {
+      call.speak();
+      await until(()=>call.audio.length===2+turn,'Normal answer missing after failed cue');
+      await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.transcript.length===3+turn*2,'Transcript missing after failed cue');
+    }
+    assert.deepEqual(call.audio,[0,2000,2000].map(sample=>pcmToTelnyx(new Int16Array(320).fill(sample).buffer)[0]));
+    const inspected=await (await f.request(`/__test_inspect/${call.callId}`)).json() as any;
+    assert.equal(inspected.state.closed,false);assert.notEqual(inspected.state.phoneEnded,true);
+    assert.equal((await (await f.request(`/voice/calls/${sibling.call.id}`)).json() as any).call.status,'active');
+    const usage=await f.db.prepare("SELECT status FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/aura-1'").bind(call.callId).all() as any;
+    assert.equal(usage.results.length,4,'Failed optional preparation must not retry on later turns');
+    assert.equal(usage.results.filter((row:any)=>row.status==='settled').length,3,'Normal greeting and replies stay metered');
+    assert.equal(usage.results.filter((row:any)=>row.status==='running').length,1,'Unknown provider usage retains its reservation');
+    call.stop();
+    await until(async()=>((await (await f.request(`/voice/calls/${call.callId}`)).json()) as any).call.status==='completed','Telnyx normal hangup failed');
+    await f.request(`/voice/calls/${sibling.call.id}/end`,'POST');
   });
 }
 

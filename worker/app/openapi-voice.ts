@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
 
 const voice = z.enum(['asteria', 'luna', 'athena']);
+const voiceLogic = z.enum(['original_no_reply', 'reply_right_away']).describe('original_no_reply keeps normal replies. reply_right_away adds a single spoken "1 sec" cue after each completed spoken turn, then the normal reply. Text calls are unchanged; the setting applies to new calls.');
 const channel = z.enum(['browser', 'text', 'phone']);
 const headers = z.object({ Origin: z.string().optional() });
 const callId = z.object({ callId: z.string().min(1).max(128) });
@@ -9,7 +10,7 @@ const agentId = z.object({ agentId: z.string().min(1).max(128) });
 
 const agent = z.object({
   id: z.string(), name: z.string(), businessName: z.string(), greeting: z.string(), instructions: z.string(),
-  voice, transferNumber: z.null(), updatedAt: z.iso.datetime(),
+  voice, voiceLogic, transferNumber: z.null(), updatedAt: z.iso.datetime(),
 }).openapi('VoiceAgentConfig');
 const call = z.object({
   id: z.string(), channel, phoneProvider: z.enum(['twilio','telnyx']).nullable().describe('Telephony provider; null for browser/text calls. Historical phone calls use twilio.'), phoneTransport: z.enum(['pstn', 'sip']).nullable().describe('Transport for phone calls; null for browser/text calls. Historical phone calls use pstn.'), status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
@@ -38,7 +39,7 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
     description: 'Agent fields are bounded by the request schema. Number transfer is not supported; CRM and calendar integrations are not available.',
     request: { headers, ...requestBody(z.object({
       name: z.string().min(1).max(80), businessName: z.string().min(1).max(120), greeting: z.string().min(1).max(500),
-      instructions: z.string().min(1).max(8000), voice, transferNumber: z.null(),
+      instructions: z.string().min(1).max(8000), voice, voiceLogic: voiceLogic.default('original_no_reply'), transferNumber: z.null(),
     }).strict()) },
     responses: { 200: jsonResponse(z.object({ agent })), ...failures },
   }, handler);

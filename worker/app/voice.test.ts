@@ -31,6 +31,7 @@ async function fixture(t: TestContext) {
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/043_voice_receptionist.sql', import.meta.url)), 'utf8'));
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/045_voice_sip.sql', import.meta.url)), 'utf8'));
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/046_voice_telnyx.sql', import.meta.url)), 'utf8'));
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/047_voice_logic.sql', import.meta.url)), 'utf8'));
   const billing=await voiceBillingFixture(f.env,f.sqlite,USER_ONE);
   f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
   f.env.AI = {} as Ai;
@@ -78,7 +79,7 @@ const input = (overrides: Record<string, unknown> = {}) => ({
 async function saveAgent(f: Awaited<ReturnType<typeof fixture>>, session = SESSION_ONE, overrides: Record<string, unknown> = {}) {
   const response = await handleRequest(request('/voice/agent', 'PUT', input(overrides), { session }), f.env);
   assert.equal(response.status, 200);
-  return (await response.json() as { agent: { id: string; name: string } }).agent;
+  return (await response.json() as { agent: { id: string; name: string; voiceLogic: string } }).agent;
 }
 
 function signedForm(path: string, fields: Record<string, string>, url = `${PUBLIC_ORIGIN}${path}`) {
@@ -106,21 +107,37 @@ test('agent save, read, account isolation, stable ID and strict field limits', a
   assert.deepEqual(await (await handleRequest(request('/voice/agent'), f.env)).json(), { agent: null });
   const created = await saveAgent(f);
   assert.equal(created.name, 'Aster');
+  assert.equal(created.voiceLogic, 'original_no_reply');
   const other = await handleRequest(request('/voice/agent', 'GET', undefined, { session: SESSION_TWO }), f.env);
   assert.deepEqual(await other.json(), { agent: null });
-  const updated = await saveAgent(f, SESSION_ONE, { name: 'Luna', voice: 'luna' });
+  const updated = await saveAgent(f, SESSION_ONE, { name: 'Luna', voice: 'luna', voiceLogic: 'reply_right_away' });
   assert.equal(updated.id, created.id);
+  assert.equal(updated.voiceLogic, 'reply_right_away');
   assert.equal((await saveAgent(f, SESSION_TWO)).id === created.id, false);
-  const saved = f.sqlite.prepare('SELECT id,voice FROM voice_agents WHERE user_id=?').get(USER_ONE) as { id: string; voice: string };
+  const saved = f.sqlite.prepare('SELECT id,voice,voice_logic FROM voice_agents WHERE user_id=?').get(USER_ONE) as { id: string; voice: string; voice_logic: string };
   assert.equal(saved.id, created.id);
   assert.equal(saved.voice, 'luna');
+  assert.equal(saved.voice_logic, 'reply_right_away');
   for (const bad of [
-    input({ transferNumber: '+15550001111' }), input({ voice: 'unsupported' }), input({ name: 'x'.repeat(81) }),
+    input({ transferNumber: '+15550001111' }), input({ voice: 'unsupported' }), input({ voiceLogic: 'unsupported' }), input({ name: 'x'.repeat(81) }),
     input({ businessName: 'x'.repeat(121) }), input({ greeting: 'x'.repeat(501) }), input({ instructions: 'x'.repeat(8001) }),
     { ...input(), extra: true }, input({ name: '' }),
   ]) {
     assert.equal((await handleRequest(request('/voice/agent', 'PUT', bad), f.env)).status, 400);
   }
+});
+
+test('voice logic migration defaults existing agent rows', async t => {
+  const f = await paidContainerFixture(t);
+  t.after(() => f.close());
+  for (const migration of ['043_voice_receptionist', '045_voice_sip', '046_voice_telnyx']) {
+    f.sqlite.exec(readFileSync(fileURLToPath(new URL(`../../migrations/${migration}.sql`, import.meta.url)), 'utf8'));
+  }
+  f.sqlite.prepare(`INSERT INTO voice_agents(id,user_id,name,business_name,greeting,instructions,voice,updated_at)
+    VALUES(?,?,?,?,?,?,?,?)`).run(crypto.randomUUID(), USER_ONE, 'Legacy', 'Business', 'Hello', 'Instructions', 'asteria', new Date().toISOString());
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/047_voice_logic.sql', import.meta.url)), 'utf8'));
+  const existing = f.sqlite.prepare('SELECT voice_logic FROM voice_agents WHERE user_id=?').get(USER_ONE) as { voice_logic: string };
+  assert.equal(existing.voice_logic, 'original_no_reply');
 });
 
 test('config reflects enablement and telephony is mapped only to its configured agent', async t => {
@@ -185,7 +202,7 @@ test('SIP destination parsing preserves the called user and rejects ambiguous or
 
 test('text and browser calls initialize with frozen config, then list, detail and end remain account-scoped', async t => {
   const f = await fixture(t);
-  const agent = await saveAgent(f);
+  const agent = await saveAgent(f, SESSION_ONE, { voiceLogic: 'reply_right_away' });
   const browserResponse = await handleRequest(request('/voice/calls', 'POST', { channel: 'browser' }), f.env);
   assert.equal(browserResponse.status, 201);
   const browserBody = await browserResponse.json() as any;
@@ -196,8 +213,10 @@ test('text and browser calls initialize with frozen config, then list, detail an
   assert.match(browserBody.websocketUrl, /^wss:/);
   const snapshot = f.sqlite.prepare('SELECT config_json FROM voice_calls WHERE id=?').get(browser.id) as { config_json: string };
   assert.equal(JSON.parse(snapshot.config_json).name, 'Aster');
-  await saveAgent(f, SESSION_ONE, { name: 'Updated later' });
+  assert.equal(JSON.parse(snapshot.config_json).voiceLogic, 'reply_right_away');
+  await saveAgent(f, SESSION_ONE, { name: 'Updated later', voiceLogic: 'original_no_reply' });
   assert.equal(JSON.parse(snapshot.config_json).name, 'Aster');
+  assert.equal(JSON.parse(snapshot.config_json).voiceLogic, 'reply_right_away');
   const textResponse = await handleRequest(request('/voice/calls', 'POST', { channel: 'text' }), f.env);
   assert.equal(textResponse.status, 201);
   const textCall = (await textResponse.json() as any).call;
