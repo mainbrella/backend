@@ -12,6 +12,7 @@ import { cleanupDeletedBuildGit } from './lib/build-git';
 import { reconcileBuildTurns } from './app/build';
 
 export { AppState };
+export { ReceptionistCall } from './durable-objects/receptionist-call';
 export { ContainerAccount } from "./durable-objects/container-account";
 export { AccountActivity } from './durable-objects/account-activity';
 export { BuildWorkflow } from './workflows/build';

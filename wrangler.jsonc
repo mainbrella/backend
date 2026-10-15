@@ -27,6 +27,8 @@
 	},
 	"vars": {
 		"NAMECOM_ENABLED": "true",
+		"VOICE_ENABLED": "true",
+		"VOICE_PUBLIC_ORIGIN": "https://api.mainbrella.com",
 		"NAME_DOT_COM_USERNAME": "mainbrella",
 		"NAMECOM_MARKUP_BPS": "0",
 		"BUILD_ENABLED": "true",
@@ -88,6 +90,7 @@
 	],
 	"durable_objects": {
 		"bindings": [
+			{ "name": "RECEPTIONIST_CALL", "class_name": "ReceptionistCall" },
 			{
 				"name": "ACCOUNT_ACTIVITY",
 				"class_name": "AccountActivity"
@@ -104,6 +107,7 @@
 		]
 	},
 	"exports": {
+		"ReceptionistCall": { "type": "durable-object", "storage": "sqlite" },
 		"AccountActivity": {
 			"type": "durable-object",
 			"storage": "sqlite"

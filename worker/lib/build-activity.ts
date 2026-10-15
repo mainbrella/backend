@@ -94,3 +94,66 @@ export function buildAppStream(request: Request, read: () => Promise<{ app: { ac
   });
   return new Response(stream, { headers: { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
+
+/** One account stream carries inventory and progress for every running app. */
+export function buildAccountStream(
+  request: Request,
+  readApps: () => Promise<Array<{ id: string; activeTurnId: string | null }>>,
+  readApp: (id: string) => Promise<{ app: unknown } | null>,
+  cors: Record<string, string>,
+) {
+  const encoder = new TextEncoder();
+  let stopped = false;
+  let wake: (() => void) | undefined;
+  const stop = () => { stopped = true; wake?.(); };
+  request.signal.addEventListener('abort', stop, { once: true });
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let previousApps = '';
+      let previouslyActive = new Set<string>();
+      const previousDetails = new Map<string, string>();
+      const deadline = Date.now() + 55_000;
+      let lastHeartbeat = Date.now();
+      try {
+        while (!stopped && !request.signal.aborted && Date.now() < deadline) {
+          const apps = await readApps();
+          if (stopped) break;
+          const inventory = JSON.stringify({ apps });
+          if (inventory !== previousApps) {
+            controller.enqueue(encoder.encode(`event: apps\ndata: ${inventory}\n\n`));
+            previousApps = inventory;
+          }
+          const active = new Set(apps.filter(app => app.activeTurnId).map(app => app.id));
+          for (const id of new Set([...active, ...previouslyActive])) {
+            const snapshot = await readApp(id);
+            if (stopped) break;
+            if (!snapshot) { previousDetails.delete(id); continue; }
+            const data = JSON.stringify(snapshot);
+            if (data !== previousDetails.get(id)) {
+              controller.enqueue(encoder.encode(`event: app\ndata: ${data}\n\n`));
+              previousDetails.set(id, data);
+            }
+            if (!active.has(id)) previousDetails.delete(id);
+          }
+          if (stopped) break;
+          previouslyActive = active;
+          if (Date.now() - lastHeartbeat >= 15_000) {
+            controller.enqueue(encoder.encode(': keep-alive\n\n'));
+            lastHeartbeat = Date.now();
+          }
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(() => { wake = undefined; resolve(); }, 750);
+            wake = () => { clearTimeout(timer); resolve(); };
+          });
+        }
+        if (!stopped) controller.close();
+      } catch {
+        if (!stopped) controller.error(new Error('Build progress unavailable'));
+      } finally {
+        stop(); request.signal.removeEventListener('abort', stop);
+      }
+    },
+    cancel: stop,
+  });
+  return new Response(stream, { headers: { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+}

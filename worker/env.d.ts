@@ -1,6 +1,12 @@
 // Legacy application modules support these optional integrations. Keep their
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
+  VOICE_ENABLED?: string;
+  VOICE_PUBLIC_ORIGIN?: string;
+  TWILIO_AUTH_TOKEN?: string;
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_PHONE_NUMBER?: string;
+  TWILIO_AGENT_ID?: string;
   NAMECOM_ENABLED?: string;
   NAME_DOT_COM_USERNAME?: string;
   NAME_DOT_COM_DEV_USERNAME?: string;

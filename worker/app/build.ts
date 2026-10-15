@@ -12,7 +12,7 @@ import { previewsConfigured } from '../lib/preview-routing';
 import { BUILD_MODEL, BUILD_MAX_APPS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema,
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
-import { buildAppStream, type BuildActivityRow } from '../lib/build-activity';
+import { buildAccountStream, buildAppStream, type BuildActivityRow } from '../lib/build-activity';
 import { localCodexConfigured } from '../lib/build-codex';
 import { BUILD_AI_MARKUP_PERCENT, buildTokenPrices } from '../lib/build-pricing';
 import { settleReportedBuildUsage } from '../lib/build-billing';
@@ -142,7 +142,7 @@ function turnInsert(env: Env, appId: string, userId: string, turnId: string, key
 }
 
 export async function handleBuildRequest(request: Request, env: Env): Promise<Response> {
-  if (request.method === 'GET' && storageMetered(env) && /\/build\/apps\//.test(new URL(request.url).pathname)) {
+  if (request.method === 'GET' && storageMetered(env) && (/\/build\/apps\//.test(new URL(request.url).pathname) || new URL(request.url).pathname === '/build/events')) {
     const cors = authCorsHeaders(request);
     if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
     const user = await currentUser(env, request);
@@ -163,6 +163,19 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
+  if (url.pathname === '/build/events') {
+    if (request.method !== 'GET') return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, OPTIONS' });
+    if (url.search) return authJson({ error: 'invalid_request' }, 400, cors);
+    const user = await currentUser(env, request);
+    if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    return buildAccountStream(request, async () => {
+      const { results } = await env.DB.prepare('SELECT * FROM build_apps WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT 50').bind(user.id).all<BuildAppRow>();
+      return results.map(row => publicApp(row));
+    }, async id => {
+      try { return await detail(env, user.id, id); }
+      catch (error) { if (error instanceof BuildError && error.status === 404) return null; throw error; }
+    }, cors);
+  }
   const diagnostic = /^\/build\/apps\/([a-f0-9-]{36})\/turns\/([a-f0-9-]{36})\/diagnostics$/.exec(url.pathname);
   const match = diagnostic ? [diagnostic[0], 'apps', diagnostic[1], 'diagnostics', diagnostic[2]] : /^\/build\/(config|apps)(?:\/([a-f0-9-]{36})(?:\/(turns|resume|stop|source|files|file|export|events|images|versions|repository|restore)(?:\/([a-f0-9-]{36}|[a-f0-9]{40}))?)?)?$/.exec(url.pathname);
   if (!match || match[2] && !validExecutionId(match[2]) || match[1] === 'config' && match[2]
@@ -361,7 +374,7 @@ async function buildRequest(request: Request, env: Env): Promise<Response> {
     if (message.includes('github_project_busy')) return authJson({ error: 'github_project_busy' }, 409, cors);
     if (message.includes('build_busy') || message.includes('revision_conflict')) return authJson({ error: message.includes('revision_conflict') ? 'revision_conflict' : 'build_busy' }, 409, cors);
     if (['build_app_limit', 'build_turn_limit'].some(code => message.includes(code))) return authJson({ error: message.includes('build_turn_limit') ? 'build_turn_limit' : 'build_app_limit' }, 429, cors);
-    if (/UNIQUE constraint failed: build_turns\.user_id/.test(message)) return authJson({ error: 'build_busy' }, 409, cors);
+    if (/UNIQUE constraint failed: build_turns\.app_id/.test(message)) return authJson({ error: 'build_busy' }, 409, cors);
     if (/UNIQUE constraint failed/.test(message)) return authJson({ error: 'submission_conflict' }, 409, cors);
     if (error instanceof SyntaxError || message === 'invalid_request') return authJson({ error: 'invalid_request' }, 400, cors);
     if (message === 'request_too_large') return authJson({ error: message }, 413, cors);

@@ -40,6 +40,7 @@ import { registerAcquisitionRoutes } from './openapi-acquisition';
 import { registerBuildRoutes } from './openapi-build';
 import { forward, type LegacyHandler } from "./openapi-shared";
 import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
+import { registerVoiceRoutes } from './openapi-voice';
 
 // Independent service documents keep infrastructure routes off the customer API.
 export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: LegacyHandler) {
@@ -62,7 +63,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
       openapi: "3.1.0",
       info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API. Admin and marketing endpoints retain this origin and are forwarded to independently deployed Workers." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
-      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Secrets", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build"].map(name => ({ name })),
+      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Secrets", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build", "Voice"].map(name => ({ name })),
     },
   });
   const securitySchemes = {
@@ -74,6 +75,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
     imageBuild: { type: "http", scheme: "bearer", description: "Trusted image build service secret." },
     stripeSignature: { type: "apiKey", in: "header", name: "Stripe-Signature" },
     monitoring: { type: 'http', scheme: 'bearer', description: 'Dedicated MONITORING_SECRET; operational observations and incidents only.' },
+    twilioSignature: { type: 'apiKey', in: 'header', name: 'X-Twilio-Signature', description: 'Twilio request signature; validated against the configured Twilio auth token.' },
   } as const;
   for (const [name, scheme] of Object.entries(securitySchemes)) {
     api.registry.registerComponent("securitySchemes", name, scheme);
@@ -83,6 +85,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerGithubBuildRoutes(api, handler);
   registerProjectGithubRoutes(api, handler);
   registerBuildRoutes(api, handler);
+  registerVoiceRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);

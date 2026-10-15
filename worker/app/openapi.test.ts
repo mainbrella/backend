@@ -18,7 +18,7 @@ const endpointMethods: Record<string, string[]> = {
   '/github/build/config': ['get'], '/github/build/connect': ['post'], '/github/build/connection': ['get'],
   '/github/build/callback': ['get'], '/github/build/setup': ['get'], '/github/build/repositories': ['get'], '/projects/github': ['get', 'put'],
   '/projects/github/storage': ['delete'],
-  '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
+  '/build/config': ['get'], '/build/apps': ['get', 'post'], '/build/events': ['get'], '/build/apps/{appId}': ['get', 'patch', 'delete'],
   '/build/apps/{appId}/turns': ['post'], '/build/apps/{appId}/resume': ['post'], '/build/apps/{appId}/stop': ['post'],
   '/build/apps/{appId}/source': ['get'], '/build/apps/{appId}/export': ['get'], '/build/apps/{appId}/events': ['get'],
   '/build/apps/{appId}/files': ['get'], '/build/apps/{appId}/file': ['get'],
@@ -26,6 +26,9 @@ const endpointMethods: Record<string, string[]> = {
   '/build/apps/{appId}/turns/{turnId}/diagnostics': ['get'],
   '/build/apps/{appId}/versions': ['get'], '/build/apps/{appId}/versions/{versionId}': ['get'],
   '/build/apps/{appId}/restore': ['post'], '/build/apps/{appId}/repository': ['get'],
+  '/voice/config': ['get'], '/voice/agent': ['get', 'put'], '/voice/calls': ['get', 'post'],
+  '/voice/calls/{callId}': ['get'], '/voice/calls/{callId}/end': ['post'], '/voice/calls/{callId}/connect': ['get'],
+  '/voice/twilio/incoming/{agentId}': ['post'], '/voice/twilio/media/{callId}': ['get'],
   '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
   '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
@@ -363,6 +366,12 @@ test('Build configuration describes the opt-in local Codex provider and preserve
   }
   const creation = paths['/build/apps'].post.requestBody.content['application/json'].schema.properties;
   assert.equal(creation.model.type, 'string'); assert.equal(creation.effort.type, 'string');
+  const accountStream = paths['/build/events'].get;
+  assert.equal(accountStream.operationId, 'streamBuildAccount');
+  assert.deepEqual(accountStream.security, [{ cookieAuth: [] }]);
+  assert.ok(accountStream.responses[200].content['text/event-stream']);
+  assert.match(accountStream.description, /six starts per minute and two concurrent streams per account/);
+  assert.match(paths['/build/apps'].post.description, /separate apps may build concurrently/);
 });
 
 test('project hosting schemas describe local aliases and simulated DNS and TLS', async () => {
@@ -746,4 +755,29 @@ test('Storage schemas expose 30-day warnings, exact deletion dates, exports and 
   assert.ok(repository.responses[429]);
   assert.match(repository.description, /two concurrent exports/);
   assert.ok(paths['/build/apps/{appId}'].get.responses[200].content['application/json'].schema.properties.app.allOf[1].properties.retention);
+});
+
+test('AI receptionist schemas describe bounded configuration, calls, and signed provider WebSockets', async () => {
+  const { paths, components } = await document();
+  assert.deepEqual(paths['/voice/agent'].put.security, [{ cookieAuth: [] }]);
+  const agentBody = paths['/voice/agent'].put.requestBody.content['application/json'].schema;
+  assert.deepEqual(agentBody.required, ['name', 'businessName', 'greeting', 'instructions', 'voice', 'transferNumber']);
+  assert.equal(agentBody.additionalProperties, false);
+  assert.equal(agentBody.properties.name.maxLength, 80);
+  assert.equal(agentBody.properties.businessName.maxLength, 120);
+  assert.equal(agentBody.properties.greeting.maxLength, 500);
+  assert.equal(agentBody.properties.instructions.maxLength, 8000);
+  assert.deepEqual(agentBody.properties.voice.enum, ['asteria', 'luna', 'athena']);
+  assert.deepEqual(agentBody.properties.transferNumber.type, 'null');
+  assert.equal(paths['/voice/calls'].get.responses[200].content['application/json'].schema.properties.calls.maxItems, 50);
+  assert.equal(components.schemas.VoiceCall.properties.transcript.maxItems, 60);
+  assert.ok(paths['/voice/calls/{callId}/connect'].get.responses[101]);
+  assert.deepEqual(paths['/voice/calls/{callId}/connect'].get.security, [{ cookieAuth: [] }]);
+  assert.ok(paths['/voice/twilio/media/{callId}'].get.responses[101]);
+  assert.deepEqual(paths['/voice/twilio/media/{callId}'].get.security, [{ twilioSignature: [] }]);
+  assert.deepEqual(paths['/voice/twilio/incoming/{agentId}'].post.security, [{ twilioSignature: [] }]);
+  assert.equal(paths['/voice/twilio/incoming/{agentId}'].post.requestBody.content['application/x-www-form-urlencoded'].schema.additionalProperties.type, 'string');
+  assert.ok(components.securitySchemes.twilioSignature);
+  assert.match(paths['/voice/agent'].put.description, /CRM and calendar/);
+  assert.match(paths['/voice/calls'].post.description, /15 minutes/);
 });

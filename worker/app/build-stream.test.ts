@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { startCodexBridge } from '../../scripts/codex-bridge.mjs';
 import { readBuildInference, buildInference, buildFirstVersionPrompt, type BuildToolCall } from '../lib/build-ai';
-import { buildAppStream, saveBuildActivity, buildToolDraftLabel, buildToolLabel } from '../lib/build-activity';
+import { buildAccountStream, buildAppStream, saveBuildActivity, buildToolDraftLabel, buildToolLabel } from '../lib/build-activity';
 import { handleBuildRequest, failBuildTurn, buildConfigured } from './build';
 import { buildModels, resolveBuildModel, buildReasoningOptions } from '../lib/build-models';
 import { buildTokenPrices } from '../lib/build-pricing';
@@ -117,7 +117,7 @@ test('inference stream failures retain provider codes and messages as failure de
 async function fixture(t: Parameters<typeof paidContainerFixture>[0]) {
   const f = await paidContainerFixture(t); t.after(() => f.close());
   f.env.DB.batch = (async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))) as D1Database['batch'];
-  for (const migration of ['014_projects.sql', '015_project_domain.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql', '035_project_github.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
+  for (const migration of ['014_projects.sql', '015_project_domain.sql', '023_build.sql', '024_build_activity.sql', '025_build_images.sql', '027_build_model_effort.sql', '028_build_operations.sql', '029_remove_build_daily_limit.sql', '030_build_git.sql', '034_shared_projects.sql', '035_project_github.sql', '042_build_concurrent_apps.sql']) f.sqlite.exec(readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'));
   const billing = await buildBillingFixture(f.env, f.sqlite, USER_ONE);
   const appId = crypto.randomUUID(), turnId = crypto.randomUUID(), now = new Date().toISOString();
   f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
@@ -769,6 +769,104 @@ test('disconnecting the progress stream stops snapshot reads', async () => {
   assert.equal(reads, 1);
   assert.equal(buildToolLabel('write_file', '{"path":"src/App.tsx","content":"partial'), 'Write src/App.tsx');
   assert.equal(buildToolLabel('run_command', '{"command":"npm run build"}'), 'Type-check and compile');
+});
+
+test('separate apps can build concurrently while each app retains its busy and idempotency guards', async t => {
+  const f = await fixture(t);
+  const dispatched: string[] = [];
+  Object.assign(f.env, { BUILD_ENABLED: 'true', AI: {}, PREVIEWS_ENABLED: 'true', PREVIEW_DOMAIN: 'mainbrella.dev', PREVIEW_ROUTES: {},
+    BUILD_WORKFLOW: { async create({ id }: { id: string }) { dispatched.push(id); } } });
+  const submit = (path: string, key: string, body: unknown) => handleBuildRequest(new Request(`https://api.mainbrella.com/build/${path}`, {
+    method: 'POST', headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${SESSION_ONE}`,
+      'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body),
+  }), f.env);
+  const second = await submit('apps', 'second-app', { prompt: 'A calendar website' });
+  assert.equal(second.status, 202, await second.clone().text());
+  const { app } = await second.json() as any;
+  assert.notEqual(app.id, f.appId);
+  assert.ok(app.activeTurnId);
+  assert.equal(dispatched.length, 1);
+  assert.equal((f.sqlite.prepare("SELECT COUNT(*) AS count FROM build_turns WHERE user_id = ? AND status IN ('queued','running')").get(USER_ONE) as any).count, 2);
+  const retry = await submit('apps', 'second-app', { prompt: 'A calendar website' });
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json() as any).app.id, app.id);
+  assert.ok(dispatched.every(id => id === app.activeTurnId), 'a queued retry may reconcile the same Workflow ID');
+  assert.equal((f.sqlite.prepare('SELECT COUNT(*) AS count FROM build_turns WHERE app_id = ?').get(app.id) as any).count, 1);
+  const busy = await submit(`apps/${f.appId}/turns`, 'same-app', { mode: 'build', revision: 0, prompt: 'Change the theme' });
+  assert.equal(busy.status, 409);
+  assert.deepEqual(await busy.json(), { error: 'build_busy' });
+  assert.throws(() => f.sqlite.prepare(`INSERT INTO build_turns (id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at)
+    VALUES (?,?,?,?,?,'build',0,'running','Building',?,?)`).run(crypto.randomUUID(), f.appId, USER_ONE, 'index-race', 'Try again', BUILD_MODEL, new Date().toISOString()),
+    /build_busy|UNIQUE constraint failed: build_turns.app_id/);
+});
+
+test('account stream is owner scoped and sends active progress, completion, and later inventory changes', async t => {
+  const f = await fixture(t);
+  const secondId = crypto.randomUUID(), secondTurn = crypto.randomUUID(), now = new Date().toISOString();
+  f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+    .run(secondId, USER_ONE, 'second-active', 'Another site', 'Another site', '{}', now, now);
+  f.sqlite.prepare(`INSERT INTO build_turns (id,app_id,user_id,request_key,prompt,mode,base_revision,status,stage,model,created_at)
+    VALUES (?,?,?,?,?,'build',0,'running','Building',?,?)`).run(secondTurn, secondId, USER_ONE, 'second-turn', 'Another site', BUILD_MODEL, now);
+  f.sqlite.prepare('UPDATE build_apps SET active_turn_id = ? WHERE id = ?').run(secondTurn, secondId);
+  const streamRequest = (session: string) => new Request('https://api.mainbrella.com/build/events', {
+    headers: { Origin: 'https://mainbrella.com', Cookie: `mainbrella_session=${session}` },
+  });
+  assert.equal((await handleBuildRequest(streamRequest('expired'), f.env)).status, 401);
+  const other = await handleBuildRequest(streamRequest(SESSION_TWO), f.env);
+  const otherReader = other.body!.getReader();
+  assert.deepEqual(JSON.parse(new TextDecoder().decode((await otherReader.read()).value).split('data: ')[1]), { apps: [] });
+  await otherReader.cancel();
+
+  const response = await handleBuildRequest(streamRequest(SESSION_ONE), f.env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/event-stream');
+  const reader = response.body!.getReader();
+  const read = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([reader.read(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Timed out waiting for account event')), 4_000);
+      })]);
+      return new TextDecoder().decode(result.value);
+    } finally { clearTimeout(timer); }
+  };
+  const inventory = await read();
+  assert.match(inventory, /^event: apps/);
+  assert.deepEqual(new Set(JSON.parse(inventory.split('data: ')[1]).apps.map((app: any) => app.id)), new Set([f.appId, secondId]));
+  assert.ok(!inventory.includes('turns'));
+  const progress = [await read(), await read()];
+  assert.ok(progress.every(event => event.startsWith('event: app')));
+  assert.deepEqual(new Set(progress.map(event => JSON.parse(event.split('data: ')[1]).app.id)), new Set([f.appId, secondId]));
+  assert.ok(progress.every(event => JSON.parse(event.split('data: ')[1]).app.turns[0].status === 'running'));
+  await saveBuildActivity(f.env, f.params, 0, { id: 'ai-0', type: 'message', text: 'Working on it', status: 'running' });
+  assert.match(await read(), /Working on it/);
+  await failBuildTurn(f.env, { id: f.turnId, app_id: f.appId, user_id: USER_ONE }, 'build_failed');
+  const completion = await read();
+  assert.match(completion, /^event: apps/);
+  const completedInventory = JSON.parse(completion.split('data: ')[1]).apps;
+  assert.equal(completedInventory.find((app: any) => app.id === f.appId).activeTurnId, null);
+  assert.equal(completedInventory.find((app: any) => app.id === secondId).activeTurnId, secondTurn);
+  const finalApp = await read();
+  assert.equal(JSON.parse(finalApp.split('data: ')[1]).app.turns[0].status, 'failed');
+
+  const newId = crypto.randomUUID();
+  f.sqlite.prepare('INSERT INTO build_apps (id,user_id,create_key,initial_prompt,name,source_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+    .run(newId, USER_ONE, 'later-app', 'Later', 'Later', '{}', now, now);
+  const later = await read();
+  assert.match(later, /^event: apps/);
+  assert.ok(JSON.parse(later.split('data: ')[1]).apps.some((app: any) => app.id === newId));
+  await reader.cancel();
+});
+
+test('canceling an idle account stream stops polling', async () => {
+  let reads = 0;
+  const response = buildAccountStream(new Request('https://api.test/build/events'), async () => { reads++; return []; }, async () => null, {});
+  const reader = response.body!.getReader();
+  assert.match(new TextDecoder().decode((await reader.read()).value), /^event: apps/);
+  await reader.cancel();
+  const afterCancel = reads;
+  await new Promise(resolve => setTimeout(resolve, 850));
+  assert.equal(reads, afterCancel);
 });
 
 test('the agent streams and saves edits before allocating a sandbox, including file deletion', async t => {
