@@ -206,10 +206,16 @@ export class PrepaidWallet {
   }
   inference(state, input) {
     const integer = value => Number.isSafeInteger(value) && value >= 0;
-    if (!input || !['reserve', 'settle'].includes(input.action) || typeof input.id !== 'string'
+    if (!input || !['reserve', 'settle', 'check'].includes(input.action) || typeof input.id !== 'string'
       || !/^[a-f0-9-]{36}:[A-Za-z0-9_-]{1,128}$/.test(input.id)) throw new Error('invalid_request');
     if (!state.wallet) throw new Error('insufficient_balance');
     const wallet = state.wallet, records = wallet.inference ??= {}, previous = records[input.id];
+    if (input.action === 'check') {
+      const m = this.metrics(state);
+      if (wallet.fundingRevoked || m.remaining <= 0) throw new Error('insufficient_balance');
+      if ((state.spendLimitCents ?? 500) * UNIT_MS_PER_CENT - m.monthly - m.monthReserved <= 0) throw new Error('spend_limit_exceeded');
+      return;
+    }
     if (input.action === 'reserve') {
       if (!integer(input.reservedMicroUsd) || input.reservedMicroUsd > 100000000 || !integer(input.createdAt)
         || typeof input.model !== 'string' || typeof input.appId !== 'string' || typeof input.turnId !== 'string') throw new Error('invalid_request');

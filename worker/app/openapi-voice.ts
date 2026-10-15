@@ -43,9 +43,9 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }, handler);
   register(api, 'post', '/voice/calls', {
     ...common, operationId: 'createVoiceCall', summary: 'Start a browser or text receptionist call',
-    description: 'Allows at most three concurrent active calls per account. Calls expire after 15 minutes and support up to 60 transcript turns. Phone calls are created by the telephony provider.',
+    description: 'Allows at most three concurrent active calls per account. Calls require prepaid credits. AI usage is charged at provider cost plus 50% with funds reserved before dispatch. Billing failures stop all active account calls; balance is checked every five seconds. Calls expire after 15 minutes and support up to 60 transcript turns. Phone calls are created by the telephony provider.',
     request: { headers, ...requestBody(z.object({ channel: z.enum(['browser', 'text']) }).strict()) },
-    responses: { 201: jsonResponse(z.object({ call, websocketUrl: z.string() })), ...errors(400, 401, 403, 409, 429, 503) },
+    responses: { 201: jsonResponse(z.object({ call, websocketUrl: z.string() })), ...errors(400, 401, 402, 403, 409, 429, 503) },
   }, handler);
   register(api, 'get', '/voice/calls', {
     ...common, operationId: 'listVoiceCalls', summary: 'List recent receptionist calls', request: { headers },
@@ -67,7 +67,7 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }, handler);
   register(api, 'post', '/voice/twilio/incoming/{agentId}', {
     operationId: 'receiveVoiceTwilioCall', tags: ['Voice'], summary: 'Receive a signed Twilio incoming call webhook', security: [{ twilioSignature: [] }],
-    description: 'Twilio form-encoded webhook authenticated with X-Twilio-Signature. The response is TwiML XML. Calls expire after 15 minutes and support up to 60 transcript turns.',
+    description: 'Twilio form-encoded webhook authenticated with X-Twilio-Signature. The response is TwiML XML; insufficient prepaid funds return a hangup response. Phone transport requires a configured provider rate, held for the 15-minute maximum then settled by rounded-up provider-reported minutes at cost plus 50%. Calls expire after 15 minutes and support up to 60 transcript turns.',
     request: { params: agentId, headers: z.object({ 'X-Twilio-Signature': z.string() }), body: { required: true, content: { 'application/x-www-form-urlencoded': { schema: z.record(z.string(), z.string()) } } } },
     responses: { 200: { description: 'TwiML response.', content: { 'application/xml': { schema: z.string() } } }, ...errors(400, 403, 404, 429, 503) },
   }, handler);

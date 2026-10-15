@@ -1,3 +1,4 @@
+import { billingError } from '../lib/voice-billing';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicCall, publicVoiceOrigin, readAgent, readCall, telephonyConfigured, VOICE_MODELS, voiceAgentInput, voiceEnabled, type VoiceCallRow } from '../lib/voice';
 import { handleTwilioRequest } from './voice-twilio';
@@ -59,9 +60,10 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       const call = await createCall(env,user.id,publicAgent(agent),input.channel);
       if (!call) return authJson({error:'voice_call_limit'},429,cors);
       try { await initializeCall(env,call); }
-      catch {
+      catch (error) {
         await env.DB.prepare("UPDATE voice_calls SET status='failed', ended_at=? WHERE id=?").bind(new Date().toISOString(),call.id).run();
-        return authJson({error:'voice_unavailable'},503,cors);
+        const code=billingError(error);
+        return authJson({error:code},code==='voice_billing_unavailable'?503:402,cors);
       }
       const websocketUrl = new URL(`/voice/calls/${call.id}/connect`,url.origin);
       websocketUrl.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -89,7 +91,9 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       return callStub(env,call.id).fetch(new Request('https://voice.internal/connect',{headers:{Upgrade:'websocket'}}));
     }
     return authJson({error:'method_not_allowed'},405,cors);
-  } catch {
+  } catch (error) {
+    const code=billingError(error);
+    if (code!=='voice_billing_unavailable') return authJson({error:code},402,cors);
     console.error('voice_unavailable');
     return authJson({error:'voice_unavailable'},503,cors);
   }

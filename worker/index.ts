@@ -1,3 +1,4 @@
+import { settleReportedVoiceUsage } from './lib/voice-billing';
 import { notifyStorageRetention } from './lib/r2-retention';
 import { reconcileDomainOrders } from './app/domains';
 import { checkStorageHealth } from './lib/r2-health';
@@ -25,6 +26,7 @@ export default {
     return handleRequest(request, env, ctx);
   },
   scheduled(_event, env, ctx) {
+    ctx.waitUntil(settleReportedVoiceUsage(env).catch(() => { console.error('voice_billing_reconciliation_failed'); }));
     ctx.waitUntil(reconcileDomainOrders(env).catch(() => { console.error('domain_reconciliation_failed'); }));
     ctx.waitUntil((async () => {
       await inventoryStoragePage(env);

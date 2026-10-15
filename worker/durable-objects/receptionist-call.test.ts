@@ -12,18 +12,27 @@ async function runtime(t: test.TestContext) {
     banner:{js:"import { createRequire } from 'node:module'; const require = createRequire('/voice-test.js');"},
     format:'esm',target:'es2022',platform:'browser',external:['cloudflare:*','node:*'],alias:{crypto:'node:crypto',url:'node:url',querystring:'node:querystring',path:'node:path'}});
   const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"voice-test",modules:true,script:result.outputFiles[0].text,compatibilityDate:'2026-09-18',compatibilityFlags:['nodejs_compat'],
-    d1Databases:['DB'],durableObjects:{RECEPTIONIST_CALL:{className:'ReceptionistCall',useSQLite:true}},
-    bindings:{VOICE_ENABLED:'true',VOICE_PUBLIC_ORIGIN:'https://api.mainbrella.com',TWILIO_AUTH_TOKEN:'voice-test-twilio-secret',TWILIO_ACCOUNT_SID:'AC'+'a'.repeat(32),TWILIO_PHONE_NUMBER:'+15551234567',TWILIO_AGENT_ID:'11111111-1111-4111-8111-111111111111'}}]}));
+    d1Databases:['DB'],durableObjects:{RECEPTIONIST_CALL:{className:'ReceptionistCall',useSQLite:true},CONTAINER_ACCOUNT:{className:'VoiceBillingAccount',useSQLite:true}},
+    bindings:{VOICE_ENABLED:'true',VOICE_PHONE_MICRO_USD_PER_MINUTE:'12500',VOICE_PUBLIC_ORIGIN:'https://api.mainbrella.com',TWILIO_AUTH_TOKEN:'voice-test-twilio-secret',TWILIO_ACCOUNT_SID:'AC'+'a'.repeat(32),TWILIO_PHONE_NUMBER:'+15551234567',TWILIO_AGENT_ID:'11111111-1111-4111-8111-111111111111'}}]}));
   t.after(()=>mf.dispose());
   const db=await mf.getD1Database('DB');
-  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist']) {
+  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing']) {
     const statements=readFileSync(new URL(`../../migrations/${migration}.sql`,import.meta.url),'utf8').split(';').map(value=>value.trim()).filter(Boolean);
     for (const statement of statements) await db.prepare(statement).run();
+  }
+  for (const migration of ['020_accounting_ledger','026_build_ai_billing']) {
+    const sql=readFileSync(new URL(`../../migrations/${migration}.sql`,import.meta.url),'utf8').replace(/^--.*$/gm,'');
+    const statements=sql.match(/\s*CREATE TRIGGER[\s\S]*?END;|\s*[^;]+;/g)!;
+    for (const statement of statements) await db.prepare(statement.trim()).run();
   }
   await db.prepare("INSERT INTO users(id,email,name,created_at) VALUES('voice-user','voice@example.com','Voice User',?)").bind(new Date().toISOString()).run();
   await db.prepare("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,'voice-user','2099-01-01T00:00:00.000Z')").bind(await hashToken('voice-test-session')).run();
   const headers={Cookie:'mainbrella_session=voice-test-session',Origin:'https://mainbrella.com','Content-Type':'application/json'};
   const request=(path:string,method='GET',body?:unknown)=>mf.dispatchFetch(`https://api.mainbrella.com${path}`,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});
+  const fundedAt=Date.now();
+  const funding=await request('/__test_billing/funding','POST',{id:'pi_voice',customerId:'cus_voice',amountCents:500,
+    refundedCents:0,disputed:false,createdAt:fundedAt,kind:'topup'});
+  assert.equal(funding.status,200,await funding.clone().text());
   const saved=await request('/voice/agent','PUT',{name:'Maya',businessName:'Test workshop',greeting:'Hello, how can I help?',instructions:'Take a message. Open weekdays.',voice:'asteria',transferNumber:null});
   assert.equal(saved.status,200,await saved.clone().text());
   await db.prepare("UPDATE voice_agents SET id='11111111-1111-4111-8111-111111111111'").run();
@@ -32,10 +41,10 @@ async function runtime(t: test.TestContext) {
     assert.equal(response.status,201,await response.clone().text());
     return response.json() as Promise<any>;
   }
-  return {mf,db,headers,request,create};
+  return {mf,db,headers,request,create,fundedAt};
 }
-async function until(predicate:()=>boolean|Promise<boolean>,message:string) {
-  const deadline=Date.now()+8000;
+async function until(predicate:()=>boolean|Promise<boolean>,message:string,timeout=8000) {
+  const deadline=Date.now()+timeout;
   while(Date.now()<deadline) { if(await predicate())return; await new Promise(resolve=>setTimeout(resolve,20)); }
   throw new Error(message);
 }
@@ -69,6 +78,10 @@ test('installed VoiceClient completes a text turn through the real Agent and per
   const beforePurge=await (await f.request(`/__test_inspect/${created.call.id}`)).json() as any;assert.equal(beforePurge.history.length,3);
   const ended=await f.request(`/voice/calls/${created.call.id}/end`,'POST');
   assert.equal((await ended.json() as any).call.status,'completed');
+  const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).all() as any;
+  assert.equal(usage.results.length,1);assert.equal(usage.results[0].status,'settled');assert.equal(usage.results[0].cost_micro_usd,113);
+  const ledger=await f.db.prepare("SELECT * FROM accounting_ledger WHERE event_type='inference' AND user_id='voice-user'").all() as any;
+  assert.equal(ledger.results.length,1);assert.equal(JSON.parse(ledger.results[0].payload).callId,created.call.id);
   assert.equal((await f.request(`/voice/calls/${created.call.id}/connect`)).status,409);
   assert.equal((await f.request(`/__test_purge/${created.call.id}`,'POST')).status,204);
   const purged=await (await f.request(`/__test_inspect/${created.call.id}`)).json() as any;assert.equal(purged.state,null);assert.deepEqual(purged.history,[]);
@@ -103,6 +116,11 @@ test('installed VoiceClient browser start accepts PCM, raw PCM greeting and spee
   assert.deepEqual(frames.slice(0,3),['hello','start_call','start_of_speech']);assert.equal(client.error,null);
   await until(async()=>{const result=await f.request(`/voice/calls/${created.call.id}`);return (await result.json() as any).call.transcript.length===3;},'Speech transcript not saved');
   await f.request(`/voice/calls/${created.call.id}/end`,'POST');
+  const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).all() as any;
+  assert.ok(usage.results.every((row:any)=>row.status==='settled'));
+  assert.deepEqual(new Set(usage.results.map((row:any)=>row.model)),new Set(['@cf/deepgram/flux','@cf/deepgram/aura-1','@cf/meta/llama-3.3-70b-instruct-fp8-fast']));
+  const stt=usage.results.find((row:any)=>row.model==='@cf/deepgram/flux');
+  assert.equal(JSON.parse(stt.usage_json).audioBytes,640);assert.equal(stt.cost_micro_usd,5);
 });
 
 test('Agent denies SDK state mutation and a second socket, and records model failures',async t=>{
@@ -151,6 +169,9 @@ test('signed Twilio WebSocket bridges μ-law through the real Agent and rejects 
   assert.equal((await f.mf.dispatchFetch(mediaUrl,{headers:{Upgrade:'websocket','X-Twilio-Signature':getExpectedTwilioSignature('voice-test-twilio-secret',mediaUrl,{})}})).status,404);
   ws.send(JSON.stringify({event:'stop',streamSid}));
   await until(async()=>{const result=await f.request(`/voice/calls/${callId}`);return (await result.json() as any).call.status==='completed';},'Twilio call not ended');
+  const usage=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='twilio-inbound'").bind(callId).first() as any;
+  assert.equal(usage.status,'settled');assert.equal(usage.reserved_micro_usd,281250);assert.equal(usage.cost_micro_usd,18750);
+  assert.equal(JSON.parse(usage.usage_json).minutes,1);
 });
 
 
@@ -175,4 +196,116 @@ test('explicit end retries failed transcript and final-status writes before sche
   assert.equal((await f.request(`/__test_purge/${created.call.id}`,'POST')).status,204);
   const retained=await (await f.request(`/voice/calls/${created.call.id}`)).json() as any;
   assert.deepEqual(retained.call.transcript,afterFailure.call.transcript);
+});
+
+test('wallet exhaustion stops every active channel and denies new calls',async t=>{
+  const f=await runtime(t);const first=await f.create('text');const second=await f.create('browser');
+  const agentId='11111111-1111-4111-8111-111111111111';
+  const url=`https://api.mainbrella.com/voice/twilio/incoming/${agentId}`;
+  const fields={AccountSid:'AC'+'a'.repeat(32),To:'+15551234567',CallSid:'CA'+'d'.repeat(32)};
+  const incoming=await f.mf.dispatchFetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',
+    'X-Twilio-Signature':getExpectedTwilioSignature('voice-test-twilio-secret',url,fields)},body:new URLSearchParams(fields).toString()});
+  assert.match(await incoming.text(),/<Stream/);
+  const sockets:any[]=[];const errors:string[]=[];
+  for (const created of [first,second]) {
+    const response=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
+    assert.equal(response.status,101);const ws=response.webSocket!;ws.accept();sockets.push(ws);
+    ws.addEventListener('message',(event:any)=>{if(typeof event.data==='string'){const message=JSON.parse(event.data);if(message.type==='error')errors.push(message.message);}});
+    if(created===second)ws.send(JSON.stringify({type:'start_call'}));
+  }
+  t.after(()=>sockets.forEach(ws=>ws.close()));
+  await until(async()=>{const usage=await f.db.prepare("SELECT count(*) AS count FROM voice_usage WHERE model='@cf/deepgram/aura-1' AND status='settled'").first() as any;return usage.count>0;},'Greeting not billed');
+  const revoked=await f.request('/__test_billing/funding','POST',{id:'pi_voice',customerId:'cus_voice',amountCents:500,
+    refundedCents:500,disputed:false,createdAt:f.fundedAt,kind:'topup'});
+  assert.equal(revoked.status,200);
+  await until(async()=>{const rows=await f.db.prepare("SELECT status FROM voice_calls").all() as any;
+    return rows.results.length===3&&rows.results.every((row:any)=>row.status==='failed');},'Account calls not stopped within balance polling interval');
+  assert.ok(errors.some(message=>/credit|billing/i.test(message)));
+  assert.equal((await f.request('/voice/calls','POST',{channel:'text'})).status,402);
+});
+
+test('a turn that cannot reserve its cost ends all sibling calls before inference',async t=>{
+  const f=await runtime(t);const first=await f.create();const second=await f.create();
+  const {transport}=clientTransport(f.mf,first.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});t.after(()=>client.disconnect());client.connect();
+  await until(()=>client.transcript.length===1,'Greeting missing');
+  // Leave $0.000001 available: the exact check succeeds, inference reservation fails.
+  const used=await f.request('/__test_billing/inference','POST',{action:'reserve',id:`${crypto.randomUUID()}:other`,
+    model:'other',appId:'other',turnId:'other',reservedMicroUsd:4_999_999,createdAt:Date.now()});
+  assert.equal(used.status,200);client.sendText('Cannot afford this response');
+  await until(async()=>{const rows=await f.db.prepare("SELECT status FROM voice_calls WHERE id IN (?,?)").bind(first.call.id,second.call.id).all() as any;
+    return rows.results.every((row:any)=>row.status==='failed');},'Sibling calls stayed active');
+  const rows=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(first.call.id).all() as any;
+  assert.equal(rows.results.length,1);assert.equal(rows.results[0].status,'denied');
+  assert.equal(JSON.parse(rows.results[0].usage_json).error,'insufficient_balance');
+});
+
+test('known provider usage is charged after a call ends during inference',async t=>{
+  const f=await runtime(t);const created=await f.create();const {transport}=clientTransport(f.mf,created.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});t.after(()=>client.disconnect());client.connect();
+  await until(()=>client.transcript.length===1,'Greeting missing');client.sendText('slow model');
+  await until(async()=>{const rows=await f.db.prepare("SELECT count(*) AS count FROM voice_usage WHERE call_id=? AND status='running'").bind(created.call.id).first() as any;return rows.count===1;},'Inference not dispatched');
+  assert.equal((await f.request(`/voice/calls/${created.call.id}/end`,'POST')).status,200);
+  await until(async()=>{const row=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).first() as any;
+    return row.status==='settled'&&row.cost_micro_usd===113;},'Interrupted provider usage not charged');
+});
+
+test('missing provider usage fails closed and retains the inference reservation',async t=>{
+  const f=await runtime(t);const created=await f.create();const {transport}=clientTransport(f.mf,created.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});t.after(()=>client.disconnect());client.connect();
+  await until(()=>client.transcript.length===1,'Greeting missing');client.sendText('missing usage');
+  await until(async()=>{const result=await f.request(`/voice/calls/${created.call.id}`);return (await result.json() as any).call.status==='failed';},'Unmetered call not stopped');
+  const usage=await f.db.prepare('SELECT * FROM voice_usage WHERE call_id=?').bind(created.call.id).first() as any;
+  assert.equal(usage.status,'running');assert.equal(usage.cost_micro_usd,null);
+  assert.ok(usage.reserved_micro_usd>0);
+});
+
+test('account cutoff retries sibling delivery across repeated outages',async t=>{
+  const f=await runtime(t);const first=await f.create();const second=await f.create();
+  assert.equal((await f.request(`/__test_stop_outage/stop/${first.call.id}`,'POST')).status,204);
+  const {transport}=clientTransport(f.mf,first.websocketUrl,f.headers);
+  const client=new VoiceClient({agent:'ReceptionistCall',transport});t.after(()=>client.disconnect());client.connect();
+  await until(()=>client.transcript.length===1,'Greeting missing');
+  const used=await f.request('/__test_billing/inference','POST',{action:'reserve',id:`${crypto.randomUUID()}:other`,
+    model:'other',appId:'other',turnId:'other',reservedMicroUsd:4_999_999,createdAt:Date.now()});
+  assert.equal(used.status,200);client.sendText('Unaffordable');
+  await until(async()=>{const result=await f.request(`/voice/calls/${first.call.id}`);return (await result.json() as any).call.status==='failed';},'First call not ended');
+  assert.equal((await (await f.request(`/voice/calls/${second.call.id}`)).json() as any).call.status,'active');
+  await until(async()=>{const result=await f.request(`/voice/calls/${second.call.id}`);return (await result.json() as any).call.status==='failed';},'Durable sibling retry did not finish',16000);
+});
+
+test('phone shutdown retries repeated provider outages before releasing the transport hold',async t=>{
+  const f=await runtime(t);const agentId='11111111-1111-4111-8111-111111111111';
+  const url=`https://api.mainbrella.com/voice/twilio/incoming/${agentId}`;
+  const fields={AccountSid:'AC'+'a'.repeat(32),To:'+15551234567',CallSid:'CA'+'e'.repeat(32)};
+  const response=await f.mf.dispatchFetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',
+    'X-Twilio-Signature':getExpectedTwilioSignature('voice-test-twilio-secret',url,fields)},body:new URLSearchParams(fields).toString()});
+  assert.match(await response.text(),/<Stream/);
+  const call=await f.db.prepare('SELECT * FROM voice_calls WHERE provider_call_id=?').bind(fields.CallSid).first() as any;
+  assert.equal((await f.request(`/__test_stop_outage/phone/${call.id}`,'POST')).status,204);
+  assert.equal((await f.request(`/voice/calls/${call.id}/end`,'POST')).status,503);
+  const pending=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='twilio-inbound'").bind(call.id).first() as any;
+  assert.equal(pending.status,'running');
+  await until(async()=>{const result=await f.request(`/voice/calls/${call.id}`);return (await result.json() as any).call.status==='completed';},'Durable provider shutdown retry did not finish',16000);
+  const settled=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='twilio-inbound'").bind(call.id).first() as any;
+  assert.equal(settled.status,'settled');assert.equal(settled.cost_micro_usd,18750);
+});
+
+test('speech windows settle all forwarded audio and a normal hangup keeps sibling calls active',async t=>{
+  const f=await runtime(t);const created=await f.create('browser');const sibling=await f.create();
+  const response=await f.mf.dispatchFetch(created.websocketUrl.replace('wss:','https:'),{headers:{...f.headers,Upgrade:'websocket'}});
+  const ws=response.webSocket!;ws.accept();t.after(()=>ws.close());
+  let audioReceived=false;ws.addEventListener('message',(event:any)=>{if(typeof event.data!=='string')audioReceived=true;});
+  ws.send(JSON.stringify({type:'start_call'}));
+  await until(()=>audioReceived,'Greeting missing');
+  for(let i=0;i<6;i++)ws.send(new ArrayBuffer(16000));
+  await new Promise(resolve=>setTimeout(resolve,1100));
+  for(let i=0;i<6;i++)ws.send(new ArrayBuffer(16000));
+  await until(async()=>{const inspected=await (await f.request(`/__test_inspect/${created.call.id}`)).json() as any;
+    return inspected.state.stt?.bytes===32000;},'Second audio window not metered');
+  assert.equal((await f.request(`/voice/calls/${created.call.id}/end`,'POST')).status,200);
+  const {results}=await f.db.prepare("SELECT * FROM voice_usage WHERE call_id=? AND model='@cf/deepgram/flux'").bind(created.call.id).all() as any;
+  assert.equal(results.length,2);assert.ok(results.every((row:any)=>row.status==='settled'));
+  assert.equal(results.reduce((sum:number,row:any)=>sum+JSON.parse(row.usage_json).audioBytes,0),192000);
+  assert.equal((await (await f.request(`/voice/calls/${sibling.call.id}`)).json() as any).call.status,'active');
 });

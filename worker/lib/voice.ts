@@ -1,3 +1,4 @@
+import { billingError, checkVoiceBalance, phoneRate, stopUserCalls } from './voice-billing';
 import { z } from 'zod';
 
 export const VOICE_MODELS = {
@@ -47,7 +48,9 @@ export function publicVoiceOrigin(env: Env): string | null {
   } catch { return null; }
 }
 export function telephonyConfigured(env: Env, agentId: string | null): boolean {
-  return voiceEnabled(env) && Boolean(publicVoiceOrigin(env) && env.TWILIO_AUTH_TOKEN &&
+  let priced=false;
+  try { phoneRate(env); priced=true; } catch {}
+  return priced && voiceEnabled(env) && Boolean(publicVoiceOrigin(env) && env.TWILIO_AUTH_TOKEN &&
     /^AC[a-f0-9]{32}$/i.test(env.TWILIO_ACCOUNT_SID || '') &&
     /^\+[1-9]\d{7,14}$/.test(env.TWILIO_PHONE_NUMBER || '') && agentId && env.TWILIO_AGENT_ID === agentId);
 }
@@ -57,11 +60,18 @@ export const callStub = (env: Env, id: string) => env.RECEPTIONIST_CALL.get(env.
 
 export async function expireCalls(env: Env, userId: string) {
   const expiredAt = new Date(Date.now() - MAX_CALL_MS).toISOString();
+  const {results}=await env.DB.prepare("SELECT id FROM voice_calls WHERE user_id=? AND status='active' AND started_at<=?").bind(userId,expiredAt).all<{id:string}>();
+  for (const call of results) {
+    const response=await callStub(env,call.id).fetch(new Request('https://voice.internal/end',{method:'POST'}));
+    if (!response.ok) throw new Error('voice_unavailable');
+  }
   await env.DB.prepare(`UPDATE voice_calls SET status='completed', ended_at=strftime('%Y-%m-%dT%H:%M:%fZ', started_at, '+15 minutes')
     WHERE user_id=? AND status='active' AND started_at<=?`).bind(userId, expiredAt).run();
 }
 export async function createCall(env: Env, userId: string, agent: VoiceAgentConfig, channel: VoiceCallRow['channel'],
   providerCallId: string | null = null, mediaTokenHash: string | null = null): Promise<VoiceCallRow | null> {
+  try { await checkVoiceBalance(env,userId); }
+  catch (error) { await stopUserCalls(env,userId); throw new Error(billingError(error)); }
   await expireCalls(env, userId);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -79,7 +89,10 @@ export async function initializeCall(env: Env, call: VoiceCallRow): Promise<void
   const response = await callStub(env,call.id).fetch(new Request('https://voice.internal/initialize', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({callId:call.id}),
   }));
-  if (!response.ok) throw new Error('voice_initialization_failed');
+  if (!response.ok) {
+    const data=await response.json().catch(()=>null) as {error?:string}|null;
+    throw new Error(data?.error || 'voice_initialization_failed');
+  }
 }
 export async function hashMediaToken(token: string): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))))

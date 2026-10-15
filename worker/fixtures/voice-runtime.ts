@@ -1,3 +1,6 @@
+import { DurableObject } from 'cloudflare:workers';
+import { ContainerAccountController } from '../../containers/container-account-core.js';
+import { appendAccountingEvent } from '../lib/accounting-ledger';
 // Deterministic Workers AI fixture: exercises the production Agent, STT/TTS
 // protocol and persistence without running paid inference during tests.
 import { ReceptionistCall as BaseCall } from '../durable-objects/receptionist-call';
@@ -17,13 +20,25 @@ const ai = { async run(model: string,input: Record<string,unknown>) {
   }
   const messages=input.messages as Array<{role:string;content:string}>;
   const caller=messages.at(-1)!.content;
+  if (caller==='slow model') await new Promise(resolve=>setTimeout(resolve,200));
+  if (caller==='missing usage') return {response:'Unknown usage'};
   if (caller==='cause model failure') throw new Error('Fixture inference unavailable');
-  return {response:`I can take a message: ${caller}`};
+  return {response:`I can take a message: ${caller}`,usage:{prompt_tokens:100,completion_tokens:20}};
 }};
+export class VoiceBillingAccount extends DurableObject<Env> {
+  private controller: ContainerAccountController;
+  constructor(ctx: DurableObjectState,env:Env) {
+    super(ctx,env);
+    this.controller=new ContainerAccountController(ctx,()=>{throw new Error('Unexpected compute');},Date.now,
+      undefined,undefined,undefined,event=>appendAccountingEvent(env,event));
+  }
+  fetch(request:Request) { return this.controller.fetch(request); }
+  alarm() { return this.controller.alarm(); }
+}
 export class ReceptionistCall extends BaseCall {
-  private faults: {transcript:number;final:number};
+  private faults: {transcript:number;final:number;phone:number;stop:number};
   constructor(ctx: DurableObjectState,env: Env) {
-    const faults={transcript:0,final:0};
+    const faults={transcript:0,final:0,phone:0,stop:0};
     const wrap=(statement:D1PreparedStatement,query:string):D1PreparedStatement=>new Proxy(statement,{
       get(target,key){
         if(key==='bind')return(...values:unknown[])=>wrap(target.bind(...values),query);
@@ -39,9 +54,24 @@ export class ReceptionistCall extends BaseCall {
       if(key==='prepare')return(query:string)=>wrap(target.prepare(query),query);
       const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
     }});
-    super(ctx,{...env,DB,AI:ai} as unknown as Env);
+    const RECEPTIONIST_CALL=new Proxy(env.RECEPTIONIST_CALL,{get(target,key){
+      if(key==='get')return(id:DurableObjectId)=>{
+        const stub=target.get(id);
+        return {fetch:async(request:Request)=>{
+          if(new URL(request.url).pathname==='/billing-stop'&&faults.stop>0){faults.stop--;throw new Error('Fixture sibling unavailable');}
+          return stub.fetch(request);
+        }};
+      };
+      const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+    }});
+    super(ctx,{...env,DB,RECEPTIONIST_CALL,AI:ai} as unknown as Env);
     this.faults=faults;
   }
+  protected async hangupPhone(_callSid:string) {
+    if(this.faults.phone>0){this.faults.phone--;throw new Error('Fixture Twilio outage');}
+    return {durationSeconds:1,billableMinutes:1};
+  }
+  async stageStopOutage(kind:'phone'|'stop') {this.faults[kind]=2;}
   async stageFinalizationOutage():Promise<void>{
     this.faults.transcript=1;this.faults.final=1;
     this.saveMessage('assistant','Saved locally while D1 was unavailable.');
@@ -49,8 +79,17 @@ export class ReceptionistCall extends BaseCall {
   }
 }
 export default { async fetch(request: Request,env: Env,ctx: ExecutionContext) {
+  const billing=new URL(request.url).pathname.match(/^\/__test_billing(\/.*)$/);
+  if(billing) {
+    return env.CONTAINER_ACCOUNT.get(env.CONTAINER_ACCOUNT.idFromName('account:voice-user')).fetch(new Request(`https://internal/billing${billing[1]}`,{
+      method:request.method,headers:{'x-mainbrella-user':'voice-user','content-type':'application/json'},
+      ...(request.method==='POST'?{body:await request.text()}:{}),
+    }));
+  }
   const inspect=new URL(request.url).pathname.match(/^\/__test_inspect\/(.+)$/);
   if(inspect){const stub=env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(inspect[1]));return Response.json({state:await stub.state,history:await stub.getConversationHistory(121),schedules:await stub.listSchedules()});}
+  const stopFault=new URL(request.url).pathname.match(/^\/__test_stop_outage\/(phone|stop)\/(.+)$/);
+  if(stopFault){await (env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(stopFault[2])) as unknown as ReceptionistCall).stageStopOutage(stopFault[1] as 'phone'|'stop');return new Response(null,{status:204});}
   const fault=new URL(request.url).pathname.match(/^\/__test_finalization_outage\/(.+)$/);
   if(fault){await (env.RECEPTIONIST_CALL.get(env.RECEPTIONIST_CALL.idFromName(fault[1])) as unknown as ReceptionistCall).stageFinalizationOutage();return new Response(null,{status:204});}
   const match=new URL(request.url).pathname.match(/^\/__test_purge\/(.+)$/);

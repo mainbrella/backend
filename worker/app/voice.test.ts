@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { getExpectedTwilioSignature } from 'twilio/lib/webhooks/webhooks.js';
 import { handleRequest } from './router';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE, USER_TWO } from './paid-container-test-helpers';
-import { pcmToTwilio, twilioToPCM } from '../lib/voice-telephony';
+import { voiceBillingFixture } from './voice-billing-test-helpers';
+import { hangupTwilioCall, pcmToTwilio, twilioToPCM } from '../lib/voice-telephony';
 
 const API = 'https://api.mainbrella.com';
 const ORIGIN = 'https://mainbrella.com';
@@ -24,6 +25,8 @@ async function fixture(t: TestContext) {
   const f = await paidContainerFixture(t);
   t.after(() => f.close());
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/043_voice_receptionist.sql', import.meta.url)), 'utf8'));
+  const billing=await voiceBillingFixture(f.env,f.sqlite,USER_ONE);
+  f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
   f.env.AI = {} as Ai;
   f.env.VOICE_ENABLED = 'true';
   f.env.VOICE_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
@@ -36,7 +39,7 @@ async function fixture(t: TestContext) {
     get(name: string) { return { async fetch(request: Request) {
       calls.push({ name, request });
       const path = new URL(request.url).pathname;
-      if (path === '/end') {
+      if (path === '/end' || path === '/billing-stop') {
         await f.env.DB.prepare("UPDATE voice_calls SET status='completed',ended_at=? WHERE id=? AND status='active'")
           .bind(new Date().toISOString(), name).run();
       }
@@ -44,7 +47,7 @@ async function fixture(t: TestContext) {
       return Response.json({ ok: true });
     } }; },
   } as unknown as Env['RECEPTIONIST_CALL'];
-  return { ...f, calls };
+  return { ...f, calls, billing };
 }
 
 function request(path: string, method = 'GET', body?: unknown, options: { session?: string | null; origin?: string | null; headers?: Record<string, string> } = {}) {
@@ -252,4 +255,56 @@ test('Twilio μ-law conversion produces bounded 16 kHz PCM and valid 8 kHz frame
   assert.equal(twilioToPCM(btoa(String.fromCharCode(...new Uint8Array(8000).fill(0xff)))).byteLength, 8000 * 4);
   assert.throws(() => twilioToPCM(btoa(String.fromCharCode(...new Uint8Array(8001)))), /audio_frame_too_large/);
   assert.throws(() => pcmToTwilio(new ArrayBuffer(3)), /invalid_pcm_audio/);
+});
+
+test('unfunded calls fail before allocation and stop all existing owned calls',async t=>{
+  const f=await fixture(t);await saveAgent(f);
+  const started=await handleRequest(request('/voice/calls','POST',{channel:'text'}),f.env);
+  assert.equal(started.status,201);
+  const id=(await started.json() as any).call.id;
+  const state=f.billing.stored.get('containerAccount') as any;
+  state.wallet.fundings.pi_voice.refundedCents=500;
+  f.billing.stored.set('containerAccount',state);
+  for (const channel of ['text','browser']) {
+    const response=await handleRequest(request('/voice/calls','POST',{channel}),f.env);
+    assert.equal(response.status,402);
+    assert.equal((await response.json() as any).error,'insufficient_balance');
+  }
+  assert.ok(f.calls.some(call=>call.name===id&&new URL(call.request.url).pathname==='/billing-stop'));
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,1);
+  assert.equal((await handleRequest(request('/voice/calls','POST',{channel:'text'},{session:SESSION_TWO}),f.env)).status,409);
+});
+
+test('unfunded signed phone calls return Hangup without allocating a session',async t=>{
+  const f=await fixture(t);const agent=await saveAgent(f);f.env.TWILIO_AGENT_ID=agent.id;
+  const state=f.billing.stored.get('containerAccount') as any;
+  state.wallet.fundings.pi_voice.refundedCents=500;f.billing.stored.set('containerAccount',state);
+  const response=await handleRequest(signedForm(`/voice/twilio/incoming/${agent.id}`,{
+    AccountSid:ACCOUNT_SID,CallSid:CALL_SID,To:PHONE_NUMBER,
+  }),f.env);
+  assert.equal(response.status,200);assert.match(await response.text(),/<Hangup \/>/);
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,0);
+});
+
+
+test('phone shutdown completes the provider call with authenticated Twilio API and retries errors',async()=>{
+  const env={TWILIO_ACCOUNT_SID:ACCOUNT_SID,TWILIO_AUTH_TOKEN:AUTH_TOKEN} as Env;
+  await hangupTwilioCall(env,CALL_SID,(async(url,init)=>{
+    assert.equal(url,`https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT_SID}/Calls/${CALL_SID}.json`);
+    assert.equal(init?.method,'POST');assert.equal(String(init?.body),'Status=completed');
+    assert.equal((init?.headers as Record<string,string>).authorization,`Basic ${btoa(`${ACCOUNT_SID}:${AUTH_TOKEN}`)}`);
+    return Response.json({sid:CALL_SID,status:'completed',duration:'61'});
+  }) as typeof fetch);
+  await assert.rejects(hangupTwilioCall(env,CALL_SID,(async()=>new Response(null,{status:503})) as typeof fetch),/voice_telephony_stop_failed/);
+});
+
+
+test('phone billing recovers provider duration after a lost hangup acknowledgement',async()=>{
+  const env={TWILIO_ACCOUNT_SID:ACCOUNT_SID,TWILIO_AUTH_TOKEN:AUTH_TOKEN} as Env;let requests=0;
+  const usage=await hangupTwilioCall(env,CALL_SID,(async(_url,init)=>{
+    requests++;
+    return init?.method==='POST'?new Response(null,{status:400}):Response.json({sid:CALL_SID,status:'completed',duration:'61'});
+  }) as typeof fetch);
+  assert.equal(requests,2);assert.deepEqual(usage,{durationSeconds:61,billableMinutes:2});
+  await assert.rejects(hangupTwilioCall(env,CALL_SID,(async()=>Response.json({sid:CALL_SID,status:'completed',duration:null})) as typeof fetch),/voice_telephony_usage_pending/);
 });

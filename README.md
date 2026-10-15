@@ -199,7 +199,7 @@ return 409 `recipient_unsubscribed`; preference lookup failures return 503
 The receptionist API is enabled by `VOICE_ENABLED=true` and the SQLite-backed
 `RECEPTIONIST_CALL` Durable Object binding (`ReceptionistCall`) in
 `wrangler.jsonc`. Set `VOICE_PUBLIC_ORIGIN` to the exact public HTTPS API origin.
-Apply migration `043_voice_receptionist.sql` before using the API:
+Apply migrations through `044_voice_billing.sql` before using the API:
 
 ```sh
 npm run db:migrate:local
@@ -235,7 +235,11 @@ Inbound phone support requires manually provisioning an existing Twilio number;
 this service does not buy numbers. Set `TWILIO_AUTH_TOKEN` as a Wrangler secret
 and configure `TWILIO_ACCOUNT_SID`, `TWILIO_PHONE_NUMBER` (E.164), and
 `TWILIO_AGENT_ID` (the saved agent's ID) as variables, alongside
-`VOICE_PUBLIC_ORIGIN`.
+`VOICE_PUBLIC_ORIGIN`. Also set `VOICE_PHONE_MICRO_USD_PER_MINUTE` to the
+provider's total per-minute cost in micro-USD for this number (include inbound
+voice and Media Streams). No default rate is assumed; phone calling stays
+unavailable without it. This rate excludes our markup. For example, a combined
+$0.0125/minute provider tariff is `12500`; verify your actual number's tariff.
 `GET /voice/config` returns the mapped phone number and per-agent `webhookUrl`;
 configure that URL as the number's Twilio Voice webhook using HTTP POST. The
 incoming form webhook and media WebSocket handshake are checked with Twilio's
@@ -251,7 +255,33 @@ lifetime; raw audio recordings are not stored. Temporary Agent SQLite history an
 business configuration are purged 60 seconds after a call ends, after in-flight
 inference and transcript writes settle; D1 call history remains available. There is no transcript deletion
 control yet, so production operators must account for transcript retention when
-setting their data-retention policy. No service cost estimate is declared here.
+setting their data-retention policy.
+
+Voice uses the owner's prepaid wallet for all three channels, with the existing
+50% AI markup. Each Llama request reserves an input-byte upper bound plus the
+256-token output limit, then settles reported input/cached/output tokens. Aura
+charges input characters, including the greeting; Flux reserves five seconds of
+16 kHz PCM at a time and settles the audio bytes forwarded. Rates are taken from
+[Cloudflare Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
+Phone transport reserves the 15-minute maximum at the configured rate, then
+settles rounded-up minutes from Twilio’s reported duration and releases the unused
+hold. Missing provider duration retains the hold until a retry obtains it. Number rental
+is outside this per-call tariff.
+
+Credits and spending limits are checked before allocation, connection and paid
+inference, and every five seconds while active. A failed reservation or balance
+check ends all active account calls. Account-wide stops retry durably; phone
+shutdown also explicitly completes the Twilio call through its API, with retries.
+The media stream's following `<Hangup />` remains a second shutdown path.
+
+`voice_usage` retains per-operation financial receipts without cascading call
+or user foreign keys. Each settled receipt writes an `inference` event to the
+existing append-only `accounting_ledger`, including the user, call, agent,
+channel, model, provider cost, markup and charge. Wallet settlement and ledger
+outbox writes use the same receipt ID, so retries cannot double-charge. Scheduled
+work reconciles reported receipts. Unknown provider outcomes keep their hold for
+reconciliation and are never replayed. Transcript and call-history cleanup does
+not delete financial receipts.
 
 The automated Voice tests use deterministic AI fixtures and Miniflare to exercise
 API behavior, the Agent protocol, and transcript persistence. They do not qualify
@@ -262,7 +292,7 @@ relevant checks with:
 npm run type-check
 npm run test:openapi
 npm run docs:generate
-npx tsx --test worker/app/voice.test.ts worker/durable-objects/receptionist-call.test.ts
+npx tsx --test worker/app/voice.test.ts worker/app/voice-billing.test.ts worker/durable-objects/receptionist-call.test.ts
 ```
 
 ## Verification

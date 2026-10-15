@@ -56,3 +56,33 @@ export function pcmToTwilio(audio: ArrayBuffer): string[] {
   if (frame) frames.push(btoa(frame));
   return frames;
 }
+
+/** End the provider call and use its reported duration for billing, even on a retry. */
+export async function hangupTwilioCall(env: Env, callSid: string, fetcher: typeof fetch = fetch): Promise<{durationSeconds:number;billableMinutes:number}> {
+  if (!/^CA[a-f0-9]{32}$/i.test(callSid) || !/^AC[a-f0-9]{32}$/i.test(env.TWILIO_ACCOUNT_SID || '') || !env.TWILIO_AUTH_TOKEN)
+    throw new Error('voice_telephony_unavailable');
+  const url=`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`;
+  const headers={authorization:`Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`};
+  const response=await fetcher(url,{
+    method:'POST',headers:{...headers,'content-type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({Status:'completed'}),signal:AbortSignal.timeout(5000),
+  });
+  const readUsage=(result:{sid?:string;status?:string;duration?:string|null})=>{
+    if(result.sid!==callSid)return null;
+    if(['canceled','failed','busy','no-answer'].includes(result.status || ''))return {durationSeconds:0,billableMinutes:0};
+    if(result.status!=='completed' || !/^\d+$/.test(result.duration || ''))return null;
+    const durationSeconds=Number(result.duration);
+    return Number.isSafeInteger(durationSeconds)?{durationSeconds,billableMinutes:Math.max(1,Math.ceil(durationSeconds/60))}:null;
+  };
+  if(response.ok) {
+    const usage=readUsage(await response.json());
+    if(usage)return usage;
+  } else if(![400,404,409].includes(response.status))throw new Error('voice_telephony_stop_failed');
+  // A previous completion may have succeeded before its acknowledgement was
+  // lost. Confirm terminal state and duration; never estimate a financial charge.
+  const observed=await fetcher(url,{headers,signal:AbortSignal.timeout(5000)});
+  if(!observed.ok)throw new Error('voice_telephony_stop_failed');
+  const usage=readUsage(await observed.json());
+  if(!usage)throw new Error('voice_telephony_usage_pending');
+  return usage;
+}

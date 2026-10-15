@@ -2,6 +2,7 @@
 // declarations separate from Wrangler's generated deployment bindings.
 interface Env {
   VOICE_ENABLED?: string;
+  VOICE_PHONE_MICRO_USD_PER_MINUTE?: string;
   VOICE_PUBLIC_ORIGIN?: string;
   TWILIO_AUTH_TOKEN?: string;
   TWILIO_ACCOUNT_SID?: string;
