@@ -21,7 +21,6 @@ const ai = { async run(model: string,input: Record<string,unknown>) {
   const messages=input.messages as Array<{role:string;content:string}>;
   const caller=messages.at(-1)!.content;
   if (caller==='slow model') await new Promise(resolve=>setTimeout(resolve,200));
-  if (caller==='waiting model') await new Promise(resolve=>setTimeout(resolve,6500));
   if (caller==='missing usage') return {response:'Unknown usage'};
   if (caller==='cause model failure') throw new Error('Fixture inference unavailable');
   return {response:`I can take a message: ${caller}`,usage:{prompt_tokens:100,completion_tokens:20}};

@@ -1,8 +1,7 @@
 import { hangupTwilioCall } from '../lib/voice-telephony';
 import { hangupTelnyxCall } from '../lib/voice-telnyx';
 import { Agent, type Connection, type ConnectionContext } from 'agents';
-import { withVoice, WorkersAIFluxSTT, type TextSource, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
-import { withVoiceBackchannel } from '../lib/voice-backchannel';
+import { withVoice, WorkersAIFluxSTT, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
 import { billingError, checkVoiceBalance, llmCost, llmReservation, meteredVoiceInference, phoneRate, reportVoiceUsage, reserveVoiceUsage, stopUserCalls, STT_WINDOW_MS, sttCost, ttsCost } from '../lib/voice-billing';
 import { MAX_CALL_MS, MAX_TURNS, readCall, receptionistMessages, VOICE_MODELS, type VoiceAgentConfig, type VoiceCallRow } from '../lib/voice';
 
@@ -218,11 +217,7 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     }
     return transcript;
   }
-  async onTurn(transcript: string, context: VoiceTurnContext): Promise<TextSource> {
-    const reply=this.generateReply(transcript,context);
-    return this.state?.channel==='text' ? reply : withVoiceBackchannel(reply,context.signal,this.state?.turns || 1);
-  }
-  private async generateReply(transcript: string, context: VoiceTurnContext): Promise<string> {
+  async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
     if (!this.state || this.state.closed || this.state.turns>=MAX_TURNS || transcript.length>4000 || Date.now()-this.lastTurn<750) {
       await this.finish(); throw new Error('Call limit reached');
     }
