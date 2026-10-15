@@ -11,6 +11,7 @@ interface Env {
   TWILIO_SIP_URI?: string;
   TWILIO_AGENT_ID?: string;
   TELNYX_API_KEY?: string;
+  VOICE_NUMBER_SEARCH_LIMIT?: RateLimit;
   TELNYX_PUBLIC_KEY?: string;
   TELNYX_ACCOUNT_SID?: string;
   TELNYX_CONNECTION_ID?: string;

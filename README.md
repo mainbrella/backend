@@ -238,6 +238,32 @@ Telnyx availability is returned in `telephony.telnyx`; call history includes
 `phoneProvider` (`twilio` or `telnyx`, null for browser/text). Historical phone
 calls remain Twilio. Both providers share the existing account limits and wallet.
 
+Signed-in users can browse available US and Canadian voice numbers at
+`GET /voice/numbers/search`. The Voice workspace exposes this under **Search
+numbers** at `/voice/app/#numbers`. It uses the existing server-side
+`TELNYX_API_KEY` and the `VOICE_NUMBER_SEARCH_LIMIT` binding in `wrangler.jsonc`
+(20 searches per minute per account). Browsing does not require a saved
+receptionist, calling credits, or `VOICE_ENABLED`.
+
+For example, `GET /voice/numbers/search?query=FLOWERS&areaCode=800&type=toll-free`
+searches for numbers ending in `3569377`. Letters map to the phone keypad;
+patterns exclude the country code and, with an area code, search only the seven
+local digits. Supported filters are `country` (`US` or `CA`), `query`, `areaCode`,
+`match` (`ends_with`, `contains`, or `starts_with`), `type` (`local` or
+`toll-free`), `locality` (city), `region` (two-letter state/province),
+`includeSimilar` (`true` or `false`), and `limit` (1–50). Defaults are US, local,
+ends-with, exact matches only, and 50 results. Queries allow at most ten keypad
+digits, or seven with an area code; unknown and duplicate parameters are rejected.
+
+Results include the number, location, verified exact-match status, and available
+provider rental/setup estimates; usage charges are separate. Similar results
+are opt-in and labeled, and missing prices are returned as null. Searches never
+buy, hold, reserve, or configure numbers. Inventory can change after a search.
+Invalid filters return 400, expired/missing sessions 401, rate limits 429, and
+missing configuration or provider outages 503. The full schema is in
+`openapi.json`; the upstream filters follow the
+[Telnyx number search API](https://developers.telnyx.com/api-reference/phone-number-search/list-available-phone-numbers).
+
 Inbound Twilio telephony supports phone numbers (PSTN) and
 [Twilio Programmable Voice SIP Domains](https://www.twilio.com/docs/voice/api/sending-sip).
 The PBX or SIP endpoint connects to Twilio, which sends a signed HTTP webhook

@@ -84,6 +84,11 @@
 	],
 	"ratelimits": [
 		{
+			"name": "VOICE_NUMBER_SEARCH_LIMIT",
+			"namespace_id": "1004",
+			"simple": { "limit": 20, "period": 60 }
+		},
+		{
 			"name": "EMAIL_AUTH_LIMIT",
 			"namespace_id": "1002",
 			"simple": { "limit": 20, "period": 60 }

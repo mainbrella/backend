@@ -4,6 +4,7 @@ import { callStub, createCall, expireCalls, initializeCall, publicAgent, publicC
 import { handleTwilioRequest } from './voice-twilio';
 import { handleTelnyxRequest } from './voice-telnyx';
 import { telnyxConfigured, telnyxSipUri } from '../lib/voice-telnyx';
+import { handleVoiceNumberSearch } from './voice-number-search';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 async function body(request: Request) {
@@ -15,6 +16,7 @@ async function body(request: Request) {
 }
 export async function handleVoiceRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === '/voice/numbers/search') return handleVoiceNumberSearch(request, env);
   if (url.pathname.startsWith('/voice/twilio/')) return handleTwilioRequest(request,env,ctx);
   if (url.pathname.startsWith('/voice/telnyx/')) return handleTelnyxRequest(request,env,ctx);
   const cors = authCorsHeaders(request);

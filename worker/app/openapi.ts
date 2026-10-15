@@ -42,6 +42,7 @@ import { forward, type LegacyHandler } from "./openapi-shared";
 import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
 import { registerVoiceRoutes } from './openapi-voice';
 import { registerVoiceTelnyxRoutes } from './openapi-voice-telnyx';
+import { registerVoiceNumberSearchRoutes } from './openapi-voice-number-search';
 
 // Independent service documents keep infrastructure routes off the customer API.
 export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: LegacyHandler) {
@@ -89,6 +90,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerBuildRoutes(api, handler);
   registerVoiceRoutes(api, handler);
   registerVoiceTelnyxRoutes(api, handler);
+  registerVoiceNumberSearchRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);

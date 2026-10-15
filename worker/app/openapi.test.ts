@@ -30,6 +30,7 @@ const endpointMethods: Record<string, string[]> = {
   '/voice/calls/{callId}': ['get'], '/voice/calls/{callId}/end': ['post'], '/voice/calls/{callId}/connect': ['get'],
   '/voice/twilio/incoming/{agentId}': ['post'], '/voice/twilio/media/{callId}': ['get'],
   '/voice/telnyx/incoming/{agentId}': ['post'], '/voice/telnyx/media/{callId}': ['get'],
+  '/voice/numbers/search': ['get'],
   '/repo-launches': ['post'], '/repo-launches/resolve': ['get'],
   '/repo-launches/{launchId}': ['get'], '/repo-launches/{launchId}/advance': ['post'],
   '/private-services/networks': ['get', 'post', 'delete'], '/private-services/members': ['put', 'delete'],
@@ -797,4 +798,20 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.ok(paths['/voice/telnyx/incoming/{agentId}'].post.parameters.some((parameter:any)=>parameter.name==='telnyx-timestamp' && parameter.required));
   assert.match(paths['/voice/agent'].put.description, /CRM and calendar/);
   assert.match(paths['/voice/calls'].post.description, /15 minutes/);
+});
+
+test('voice inventory search documents authenticated bounded read-only filters and provider prices', async () => {
+  const { paths } = await document();
+  const search = paths['/voice/numbers/search'].get;
+  assert.deepEqual(search.security, [{ cookieAuth: [] }]);
+  assert.equal(search.operationId, 'searchVoiceNumbers');
+  const parameters = Object.fromEntries(search.parameters.filter((parameter: any) => parameter.in === 'query').map((parameter: any) => [parameter.name, parameter.schema]));
+  assert.deepEqual((parameters.country as any).enum, ['US', 'CA']);
+  assert.equal((parameters.limit as any).maximum, 50);
+  assert.equal((parameters.query as any).maxLength, 32);
+  assert.equal((parameters.includeSimilar as any).default, 'false');
+  assert.match(search.description, /No number is bought, held or reserved/);
+  assert.ok(search.responses[429]); assert.ok(search.responses[503]);
+  assert.equal(search.responses[200].content['application/json'].schema.properties.numbers.maxItems, 50);
+  assert.equal(paths['/voice/numbers/search'].post, undefined);
 });
