@@ -769,7 +769,17 @@ test('AI receptionist schemas describe bounded configuration, calls, and signed 
   assert.equal(agentBody.properties.businessName.maxLength, 120);
   assert.equal(agentBody.properties.greeting.maxLength, 500);
   assert.equal(agentBody.properties.instructions.maxLength, 8000);
-  assert.deepEqual(agentBody.properties.voice.enum, ['asteria', 'luna', 'athena']);
+  assert.equal(agentBody.properties.voice.maxLength,128);
+  assert.deepEqual(agentBody.properties.model.enum,['aura-1','aura-2','aura-2-gateway','sonic-3.6']);
+  assert.equal(agentBody.properties.model.default,'aura-1');
+  assert.equal(agentBody.properties.language.default,'en');
+  assert.equal(agentBody.required.includes('model'),false);
+  assert.equal(agentBody.required.includes('language'),false);
+  assert.equal(agentBody.properties.language.enum.length,10);
+  assert.deepEqual(components.schemas.VoiceAgentConfig.properties.language.enum,agentBody.properties.language.enum);
+  const speech=paths['/voice/config'].get.responses[200].content['application/json'].schema.properties.speech;
+  assert.ok(speech.properties.models.items.required.includes('available'));
+  assert.ok(speech.properties.models.items.properties.languages.items.properties.voices);
   assert.deepEqual(agentBody.properties.voiceLogic.enum, ['original_no_reply', 'reply_right_away']);
   assert.equal(agentBody.required.includes('voiceLogic'), false);
   assert.equal(agentBody.properties.voiceLogic.default, 'original_no_reply');

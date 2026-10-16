@@ -9,18 +9,25 @@ function fixtureAI(env: Env) {
   const options=env as unknown as Record<string,string>;
   let activeTTS=0;
   return { async run(model: string,input: Record<string,unknown>) {
-  if (model.includes('/flux')) {
+  if (model.includes('/flux') || model.includes('/nova-3')) {
     const pair=new WebSocketPair();pair[1].accept();
     let turns=0;
     pair[1].addEventListener('message',event=>{
       if (typeof event.data==='string' || (turns && options.VOICE_TEST_MULTI_TURN!=='true')) return;
       const transcript=['Could I leave a message?','Could I change that message?','Please take a final message.'][turns++] || 'Another message.';
-      if(options.VOICE_TEST_MULTI_TURN==='true')pair[1].send(JSON.stringify({event:'StartOfTurn'}));
-      pair[1].send(JSON.stringify({event:'EndOfTurn',transcript}));
+      if(model.includes('/nova-3')) {
+        if(!['es','fr','de','hi','ru','pt','ja','it','nl'].includes(String(input.language))) throw new Error('Missing Nova language');
+        pair[1].send(JSON.stringify({type:'SpeechStarted'}));
+        if(turns>1 && options.VOICE_TEST_NOVA_SPEECH_START_ONLY==='true') return;
+        pair[1].send(JSON.stringify({type:'Results',is_final:true,speech_final:true,channel:{alternatives:[{transcript}]}}));
+      } else {
+        if(options.VOICE_TEST_MULTI_TURN==='true')pair[1].send(JSON.stringify({event:'StartOfTurn'}));
+        pair[1].send(JSON.stringify({event:'EndOfTurn',transcript}));
+      }
     });
     return new Response(null,{status:101,webSocket:pair[0]});
   }
-  if (model.includes('/aura-1')) {
+  if (model.includes('/aura-')) {
     if (input.encoding!=='linear16' || input.container!=='none' || input.sample_rate!==16000) throw new Error('Raw PCM TTS required');
     if(activeTTS && options.VOICE_TEST_REJECT_TTS_OVERLAP==='true')throw new Error('Overlapping TTS requests');
     activeTTS++;
@@ -41,7 +48,9 @@ function fixtureAI(env: Env) {
   if(options.VOICE_TEST_REPLY_DELAY_MS)await new Promise(resolve=>setTimeout(resolve,Number(options.VOICE_TEST_REPLY_DELAY_MS)));
   if (caller==='missing usage') return {response:'Unknown usage'};
   if (caller==='cause model failure') throw new Error('Fixture inference unavailable');
-  return {response:`I can take a message: ${caller}${options.VOICE_TEST_MULTI_SENTENCE==='true'?' I will keep this information for the team.':''}`,usage:{prompt_tokens:100,completion_tokens:20}};
+  const response=`I can take a message: ${caller}${options.VOICE_TEST_MULTI_SENTENCE==='true'?' I will keep this information for the team.':''}`;
+  const usage={prompt_tokens:100,completion_tokens:20};
+  return model.includes('/gemma-4') ? {choices:[{message:{content:response},finish_reason:'stop'}],usage} : {response,usage};
   }};
 }
 export class VoiceBillingAccount extends DurableObject<Env> {
@@ -55,6 +64,11 @@ export class VoiceBillingAccount extends DurableObject<Env> {
   alarm() { return this.controller.alarm(); }
 }
 export class ReceptionistCall extends BaseCall {
+  protected fetchSpeech: typeof fetch = (async(_url:RequestInfo | URL,options?:RequestInit)=>{
+    const input=JSON.parse(String(options?.body));
+    if(input.output_format && (input.output_format.container!=='raw' || input.output_format.sample_rate!==16000)) throw new Error('Raw PCM required');
+    return new Response(new Int16Array(320).buffer,{headers:{'content-type':'audio/pcm'}});
+  }) as typeof fetch;
   private faults: {transcript:number;final:number;phone:number;stop:number};
   constructor(ctx: DurableObjectState,env: Env) {
     const faults={transcript:0,final:0,phone:0,stop:0};

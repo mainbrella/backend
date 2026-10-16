@@ -32,6 +32,7 @@ async function fixture(t: TestContext) {
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/045_voice_sip.sql', import.meta.url)), 'utf8'));
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/046_voice_telnyx.sql', import.meta.url)), 'utf8'));
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/047_voice_logic.sql', import.meta.url)), 'utf8'));
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/048_voice_languages.sql', import.meta.url)), 'utf8'));
   const billing=await voiceBillingFixture(f.env,f.sqlite,USER_ONE);
   f.env.VOICE_PHONE_MICRO_USD_PER_MINUTE='12500';
   f.env.AI = {} as Ai;
@@ -138,6 +139,42 @@ test('voice logic migration defaults existing agent rows', async t => {
   f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/047_voice_logic.sql', import.meta.url)), 'utf8'));
   const existing = f.sqlite.prepare('SELECT voice_logic FROM voice_agents WHERE user_id=?').get(USER_ONE) as { voice_logic: string };
   assert.equal(existing.voice_logic, 'original_no_reply');
+  f.sqlite.exec(readFileSync(fileURLToPath(new URL('../../migrations/048_voice_languages.sql', import.meta.url)), 'utf8'));
+  const speech=f.sqlite.prepare('SELECT model,language,voice FROM voice_agents WHERE user_id=?').get(USER_ONE);
+  assert.deepEqual({...speech as any},{model:'aura-1',language:'en',voice:'asteria'});
+});
+
+test('speech settings are validated, persisted and frozen per call; unavailable providers cannot dispatch',async t=>{
+  const f=await fixture(t);
+  const saved=await handleRequest(request('/voice/agent','PUT',input({model:'aura-2',language:'es',voice:'celeste'})),f.env);
+  assert.equal(saved.status,200);
+  const agent=(await saved.json() as any).agent;
+  assert.equal(agent.model,'aura-2');assert.equal(agent.language,'es');assert.equal(agent.voice,'celeste');
+  const created=await handleRequest(request('/voice/calls','POST',{channel:'browser'}),f.env);
+  assert.equal(created.status,201);
+  const call=(await created.json() as any).call;
+  await saveAgent(f);
+  const snapshot=JSON.parse((f.sqlite.prepare('SELECT config_json FROM voice_calls WHERE id=?').get(call.id) as any).config_json);
+  assert.equal(snapshot.model,'aura-2');assert.equal(snapshot.language,'es');assert.equal(snapshot.voice,'celeste');
+  for(const selection of [
+    {model:'aura-1',language:'es',voice:'asteria'}, {model:'aura-2',language:'fr',voice:'agathe'},
+    {model:'aura-2',language:'es',voice:'luna'}, {model:'aura-2-gateway',language:'ru',voice:'hector'},
+  ]) assert.equal((await handleRequest(request('/voice/agent','PUT',input(selection)),f.env)).status,400);
+  const unavailable=await handleRequest(request('/voice/agent','PUT',input({model:'aura-2-gateway',language:'fr',voice:'agathe'})),f.env);
+  assert.equal(unavailable.status,503);
+  assert.equal((await unavailable.json() as any).error,'voice_model_unavailable');
+  const settings=(await (await handleRequest(request('/voice/config'),f.env)).json() as any).speech;
+  assert.equal(settings.languages.length,10);
+  assert.deepEqual(settings.models.filter((model:any)=>model.available).map((model:any)=>model.id),['aura-1','aura-2']);
+  assert.equal(settings.models.find((model:any)=>model.id==='sonic-3.6').languages.length,10);
+  Object.assign(f.env,{VOICE_AI_GATEWAY_ACCOUNT_ID:'a'.repeat(32),VOICE_AI_GATEWAY_ID:'voice',DEEPGRAM_API_KEY:'secret',DEEPGRAM_TTS_MICRO_USD_PER_CHARACTER:'30'});
+  const french=await handleRequest(request('/voice/agent','PUT',input({model:'aura-2-gateway',language:'fr',voice:'agathe'})),f.env);
+  assert.equal(french.status,200);
+  delete f.env.DEEPGRAM_API_KEY;
+  const rejected=await handleRequest(request('/voice/calls','POST',{channel:'browser'}),f.env);
+  assert.equal(rejected.status,503);
+  assert.equal((await rejected.json() as any).error,'voice_model_unavailable');
+  assert.equal((f.sqlite.prepare('SELECT count(*) AS count FROM voice_calls').get() as any).count,1);
 });
 
 test('config reflects enablement and telephony is mapped only to its configured agent', async t => {

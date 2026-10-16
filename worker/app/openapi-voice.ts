@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
+import { voiceLanguage, voiceModel } from '../lib/voice-options';
 
-const voice = z.enum(['asteria', 'luna', 'athena']);
+const voice = z.string().min(1).max(128).describe('Voice ID from speech.models[].languages[].voices in GET /voice/config; must match the selected model and language.');
 const voiceLogic = z.enum(['original_no_reply', 'reply_right_away']).describe('original_no_reply keeps normal replies. reply_right_away rotates short spoken acknowledgments after each completed spoken turn, then gives the normal reply. Text calls are unchanged; the setting applies to new calls.');
 const channel = z.enum(['browser', 'text', 'phone']);
 const headers = z.object({ Origin: z.string().optional() });
@@ -10,7 +11,7 @@ const agentId = z.object({ agentId: z.string().min(1).max(128) });
 
 const agent = z.object({
   id: z.string(), name: z.string(), businessName: z.string(), greeting: z.string(), instructions: z.string(),
-  voice, voiceLogic, transferNumber: z.null(), updatedAt: z.iso.datetime(),
+  voice, model: voiceModel, language: voiceLanguage, voiceLogic, transferNumber: z.null(), updatedAt: z.iso.datetime(),
 }).openapi('VoiceAgentConfig');
 const call = z.object({
   id: z.string(), channel, phoneProvider: z.enum(['twilio','telnyx']).nullable().describe('Telephony provider; null for browser/text calls. Historical phone calls use twilio.'), phoneTransport: z.enum(['pstn', 'sip']).nullable().describe('Transport for phone calls; null for browser/text calls. Historical phone calls use pstn.'), status: z.enum(['active', 'completed', 'failed']), startedAt: z.iso.datetime(),
@@ -28,6 +29,11 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
       enabled: z.boolean(), browserCalling: z.boolean(), telephony: z.object({ configured: z.boolean(), webhookUrl: z.string().nullable(), phoneNumber: z.string().nullable(), sipUri: z.string().nullable(),
         telnyx:z.object({configured:z.boolean(),webhookUrl:z.string().nullable(),phoneNumber:z.string().nullable(),sipUri:z.string().nullable()}) }),
       models: z.object({ stt: z.string(), llm: z.string(), tts: z.string() }),
+      speech: z.object({
+        languages: z.array(z.object({ code: voiceLanguage, name: z.string() })),
+        models: z.array(z.object({ id: voiceModel, name: z.string(), available: z.boolean(), unavailableReason: z.string().nullable(),
+          languages: z.array(z.object({ code: voiceLanguage, voices: z.array(z.object({ id: z.string(), name: z.string() })) })) })),
+      }).describe('End-to-end speech capability catalog for ten languages. Unconfigured external providers are unavailable. Cloudflare Aura-2 supports English/Spanish, Deepgram Aura-2 supports seven languages, and Cartesia Sonic supports all ten.'),
     })), ...errors(401, 403, 503) },
   }, handler);
   register(api, 'get', '/voice/agent', {
@@ -36,10 +42,11 @@ export function registerVoiceRoutes(api: OpenAPIApi, handler: LegacyHandler): vo
   }, handler);
   register(api, 'put', '/voice/agent', {
     ...common, operationId: 'updateVoiceAgent', summary: 'Create or update the account AI receptionist',
-    description: 'Agent fields are bounded by the request schema. Number transfer is not supported; CRM and calendar integrations are not available.',
+    description: 'Agent fields are bounded by the request schema. Model, language and voice must be a supported combination from GET /voice/config; unavailable providers return voice_model_unavailable (503). Omitted model/language preserve the legacy Aura-1/English defaults. Greetings are used verbatim and should be written in the selected language. Changes apply to new calls. Number transfer is not supported; CRM and calendar integrations are not available.',
     request: { headers, ...requestBody(z.object({
       name: z.string().min(1).max(80), businessName: z.string().min(1).max(120), greeting: z.string().min(1).max(500),
-      instructions: z.string().min(1).max(8000), voice, voiceLogic: voiceLogic.default('original_no_reply'), transferNumber: z.null(),
+      instructions: z.string().min(1).max(8000), voice, model: voiceModel.default('aura-1'), language: voiceLanguage.default('en'),
+      voiceLogic: voiceLogic.default('original_no_reply'), transferNumber: z.null(),
     }).strict()) },
     responses: { 200: jsonResponse(z.object({ agent })), ...failures },
   }, handler);

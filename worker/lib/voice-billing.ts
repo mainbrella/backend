@@ -3,16 +3,18 @@ import { buildInferenceChargeMicroUsd, buildTokenCostMicroUsd, readBuildTokenUsa
 import { callStub, type VoiceCallRow, type VoicePhoneTransport, type VoicePhoneProvider, VOICE_MODELS } from './voice';
 
 // Verified 2026-10-15: https://developers.cloudflare.com/workers-ai/platform/pricing/
-// Flux $0.0077/audio minute; Aura $0.015/1,000 input characters.
+// Flux $0.0077/audio minute; streaming Nova-3 $0.0092/audio minute.
+// Aura-1 $0.015/1,000 characters; Aura-2 $0.03/1,000 characters.
+// External TTS uses an explicitly configured provider rate.
 export const STT_WINDOW_MS = 5000;
-export const sttCost = (audioMs: number) => Math.ceil(audioMs * 7700 / 60_000);
-export const ttsCost = (text: string) => text.length * 15;
-export const llmCost = (usage: unknown) => {
+export const sttCost = (audioMs: number, model: string = VOICE_MODELS.stt) => Math.ceil(audioMs * (model === '@cf/deepgram/nova-3' ? 9200 : 7700) / 60_000);
+export const ttsCost = (text: string, microUsdPerCharacter = 15) => Array.from(text).length * microUsdPerCharacter;
+export const llmCost = (usage: unknown, model: string = VOICE_MODELS.llm) => {
   const tokens = readBuildTokenUsage(usage);
   if (!tokens) throw new Error('voice_usage_unknown');
-  return buildTokenCostMicroUsd(VOICE_MODELS.llm, tokens);
+  return buildTokenCostMicroUsd(model, tokens);
 };
-export const llmReservation = (messages: Array<{role:string;content:string}>) => buildTokenCostMicroUsd(VOICE_MODELS.llm, {
+export const llmReservation = (messages: Array<{role:string;content:string}>, model: string = VOICE_MODELS.llm) => buildTokenCostMicroUsd(model, {
   // UTF-8 bytes bound token count, including a generous chat-template allowance.
   inputTokens: new TextEncoder().encode(messages.map(row=>row.content).join('')).length + messages.length * 64 + 256,
   cachedInputTokens: 0, outputTokens: 256,

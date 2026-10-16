@@ -20,7 +20,7 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
     bindings:{VOICE_ENABLED:'true',VOICE_PHONE_MICRO_USD_PER_MINUTE:'12500',VOICE_PUBLIC_ORIGIN:'https://api.mainbrella.com',TWILIO_AUTH_TOKEN:'voice-test-twilio-secret',TWILIO_ACCOUNT_SID:'AC'+'a'.repeat(32),TWILIO_PHONE_NUMBER:'+15551234567',TWILIO_AGENT_ID:'11111111-1111-4111-8111-111111111111',...bindings}}]}));
   t.after(()=>mf.dispose());
   const db=await mf.getD1Database('DB');
-  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip','046_voice_telnyx','047_voice_logic']) {
+  for (const migration of ['001_initial','002_auth_sessions','043_voice_receptionist','044_voice_billing','045_voice_sip','046_voice_telnyx','047_voice_logic','048_voice_languages']) {
     const statements=readFileSync(new URL(`../../migrations/${migration}.sql`,import.meta.url),'utf8').split(';').map(value=>value.trim()).filter(Boolean);
     for (const statement of statements) await db.prepare(statement).run();
   }
@@ -50,7 +50,11 @@ async function runtime(t: test.TestContext, bindings: Record<string,string> = {}
     const response=await request('/voice/agent','PUT',{...config,voiceLogic});
     assert.equal(response.status,200,await response.clone().text());
   }
-  return {mf,db,headers,request,create,setVoiceLogic,fundedAt};
+  async function setSpeech(selection:Record<string,string>) {
+    const response=await request('/voice/agent','PUT',{...config,...selection});
+    assert.equal(response.status,200,await response.clone().text());
+  }
+  return {mf,db,headers,request,create,setVoiceLogic,setSpeech,fundedAt};
 }
 async function until(predicate:()=>boolean|Promise<boolean>,message:string,timeout=8000) {
   const deadline=Date.now()+timeout;
@@ -111,6 +115,62 @@ async function telnyxCall(t:test.TestContext,f:Awaited<ReturnType<typeof runtime
   const stop=()=>ws.send(JSON.stringify({event:'stop',stream_id:streamId}));
   return {ws,messages,audio,speak,stop,callId:wssUrl.split('/').at(-1)!};
 }
+
+test('all ten languages complete a spoken turn through their selected transcription, reply and speech models',async t=>{
+  const f=await runtime(t,{VOICE_AI_GATEWAY_ACCOUNT_ID:'a'.repeat(32),VOICE_AI_GATEWAY_ID:'voice',
+    CARTESIA_API_KEY:'test',CARTESIA_TTS_MICRO_USD_PER_CHARACTER:'65'});
+  for(const language of ['en','es','fr','de','hi','ru','pt','ja','it','nl']) {
+    await f.setSpeech({model:'sonic-3.6',language,voice:'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4'});
+    const call=await browserCall(t,f);
+    call.ws.send(new Int16Array(320).buffer);
+    await until(()=>call.audio.length===2,`${language} spoken reply missing`);
+    const end=await f.request(`/voice/calls/${call.callId}/end`,'POST');
+    assert.equal(end.status,200);
+    const usage=await f.db.prepare('SELECT model,status,usage_json FROM voice_usage WHERE call_id=?').bind(call.callId).all() as any;
+    assert.deepEqual(new Set(usage.results.map((row:any)=>row.model)),new Set([
+      language==='en'?'@cf/deepgram/flux':'@cf/deepgram/nova-3',
+      language==='en'?'@cf/meta/llama-3.3-70b-instruct-fp8-fast':'@cf/google/gemma-4-26b-a4b-it',
+      'cartesia/sonic-3.6',
+    ]),language);
+    assert.equal(usage.results.every((row:any)=>row.status==='settled'),true,language);
+    assert.equal(usage.results.filter((row:any)=>row.model==='cartesia/sonic-3.6').every((row:any)=>JSON.parse(row.usage_json).language===language),true,language);
+  }
+});
+
+test('native Spanish and gateway French retain selected voice settings and localized acknowledgments',async t=>{
+  const f=await runtime(t,{VOICE_AI_GATEWAY_ACCOUNT_ID:'a'.repeat(32),VOICE_AI_GATEWAY_ID:'voice',
+    DEEPGRAM_API_KEY:'test',DEEPGRAM_TTS_MICRO_USD_PER_CHARACTER:'30'});
+  for(const selection of [{model:'aura-2',language:'es',voice:'celeste'},{model:'aura-2-gateway',language:'fr',voice:'agathe'}]) {
+    await f.setSpeech({...selection,voiceLogic:'reply_right_away'});
+    const call=await browserCall(t,f);
+    call.ws.send(new Int16Array(320).buffer);
+    await until(()=>call.audio.length===3,`${selection.language} acknowledgment or reply missing`);
+    await f.request(`/voice/calls/${call.callId}/end`,'POST');
+    const {results}=await f.db.prepare('SELECT model,usage_json FROM voice_usage WHERE call_id=?').bind(call.callId).all() as any;
+    const speech=results.filter((row:any)=>row.model===(selection.model==='aura-2'?'@cf/deepgram/aura-2-es':'deepgram/aura-2-fr'));
+    assert.equal(speech.length,5);
+    assert.equal(speech.filter((row:any)=>JSON.parse(row.usage_json).purpose==='reply_right_away').length,3);
+    assert.equal(speech.every((row:any)=>JSON.parse(row.usage_json).language===selection.language),true);
+  }
+});
+
+test('Nova speech-start events interrupt a pending Spanish reply without client-side VAD',async t=>{
+  const f=await runtime(t,{VOICE_TEST_MULTI_TURN:'true',VOICE_TEST_NOVA_SPEECH_START_ONLY:'true',VOICE_TEST_REPLY_DELAY_MS:'300'});
+  await f.setSpeech({model:'aura-2',language:'es',voice:'celeste'});
+  const call=await browserCall(t,f);
+  call.ws.send(new Int16Array(320).buffer);
+  await until(async()=>{
+    const usage=await f.db.prepare("SELECT count(*) AS count FROM voice_usage WHERE call_id=? AND model='@cf/google/gemma-4-26b-a4b-it' AND status='running'").bind(call.callId).first() as any;
+    return usage.count===1;
+  },'Spanish reply did not start');
+  const interrupts=call.messages.filter(message=>message.type==='playback_interrupt').length;
+  call.ws.send(new Int16Array(320).buffer);
+  await until(()=>call.messages.filter(message=>message.type==='playback_interrupt').length>interrupts,'Nova did not interrupt the pending reply');
+  await new Promise(resolve=>setTimeout(resolve,400));
+  assert.equal(call.audio.length,1,'Interrupted answer must not synthesize speech');
+  const ended=await f.request(`/voice/calls/${call.callId}/end`,'POST');
+  assert.equal(ended.status,200);
+});
 
 test('installed VoiceClient completes a text turn through the real Agent and persists transcript',async t=>{
   const f=await runtime(t);const created=await f.create();

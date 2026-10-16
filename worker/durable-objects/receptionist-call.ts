@@ -1,12 +1,25 @@
 import { hangupTwilioCall } from '../lib/voice-telephony';
 import { hangupTelnyxCall } from '../lib/voice-telnyx';
 import { Agent, type Connection, type ConnectionContext } from 'agents';
-import { withVoice, WorkersAIFluxSTT, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
+import { withVoice, WorkersAIFluxSTT, WorkersAINova3STT, type Transcriber, type TTSProvider, type VoiceTurnContext } from '@cloudflare/voice';
 import { billingError, checkVoiceBalance, llmCost, llmReservation, meteredVoiceInference, phoneRate, reportVoiceUsage, reserveVoiceUsage, stopUserCalls, STT_WINDOW_MS, sttCost, ttsCost } from '../lib/voice-billing';
-import { MAX_CALL_MS, MAX_TURNS, readCall, receptionistMessages, VOICE_MODELS, type VoiceAgentConfig, type VoiceCallRow } from '../lib/voice';
+import { MAX_CALL_MS, MAX_TURNS, readCall, receptionistMessages, type VoiceAgentConfig, type VoiceCallRow } from '../lib/voice';
+import { resolveVoiceModels, speechRate } from '../lib/voice-options';
+import { synthesizeVoiceSpeech } from '../lib/voice-speech';
 
 const VoiceAgent = withVoice(Agent,{audioFormat:'pcm16',sampleRate:16000,historyLimit:20,maxMessageCount:MAX_TURNS*2+1});
-const IMMEDIATE_REPLIES = ['One second please.', 'Got it, just a sec.', 'I see, let me think.'];
+const IMMEDIATE_REPLIES = {
+  en: ['One second please.', 'Got it, just a sec.', 'I see, let me think.'],
+  es: ['Un momento, por favor.', 'Entendido, un segundo.', 'Déjeme pensar.'],
+  fr: ['Un instant, s’il vous plaît.', 'D’accord, un instant.', 'Laissez-moi réfléchir.'],
+  de: ['Einen Moment bitte.', 'Verstanden, einen Augenblick.', 'Lassen Sie mich überlegen.'],
+  hi: ['एक क्षण, कृपया।', 'समझ गया, एक क्षण।', 'मुझे सोचने दीजिए।'],
+  ru: ['Одну секунду, пожалуйста.', 'Понятно, одну минуту.', 'Дайте подумать.'],
+  pt: ['Um momento, por favor.', 'Entendido, só um instante.', 'Deixe-me pensar.'],
+  ja: ['少々お待ちください。', '承知しました。', '少し考えさせてください。'],
+  it: ['Un momento, per favore.', 'Capito, un secondo.', 'Mi lasci pensare.'],
+  nl: ['Een ogenblik alstublieft.', 'Begrepen, een moment.', 'Laat me even nadenken.'],
+};
 interface CallState {
   callId: string; userId: string; channel: VoiceCallRow['channel']; startedAt: string;
   config: VoiceAgentConfig; closed: boolean; failed: boolean; turns: number;
@@ -18,7 +31,24 @@ interface SocketState { accepted: boolean; started: boolean; ready?: boolean }
 export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState | null> {
   static options = { sendIdentityOnConnect: false };
   initialState: CallState | null = null;
-  transcriber = new WorkersAIFluxSTT(this.env.AI);
+  createTranscriber(): Transcriber {
+    const language = this.state?.config.language ?? 'en';
+    if (language === 'en') return new WorkersAIFluxSTT(this.env.AI);
+    return { createSession: options => new WorkersAINova3STT({
+      run: async (model,input,runOptions) => {
+        const response = await this.env.AI.run(model as Parameters<Ai['run']>[0],input,runOptions) as unknown as Response;
+        // The installed Nova adapter forwards transcripts but omits SpeechStarted.
+        // Forward upstream VAD so phone callers can interrupt without client VAD.
+        response.webSocket?.addEventListener('message',event=>{
+          if (typeof event.data !== 'string') return;
+          try { if (JSON.parse(event.data).type==='SpeechStarted') options?.onSpeechStart?.(); } catch { /* Ignore non-JSON provider events. */ }
+        });
+        return response;
+      },
+    }, { language, endpointingMs: 500 }).createSession(options) };
+  }
+  private models() { return resolveVoiceModels(this.state?.config ?? {}); }
+  protected fetchSpeech: typeof fetch = fetch;
   private writes: Promise<unknown> = Promise.resolve();
   private finalization: Promise<void> | null = null;
   private windowStart = 0;
@@ -75,7 +105,7 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     if (this.state.stt) return;
     if (this.sttReservation) return this.sttReservation;
     const reservation=Promise.resolve().then(async()=>{
-      const id=await reserveVoiceUsage(this.env,this.owner(),VOICE_MODELS.stt,sttCost(STT_WINDOW_MS));
+      const id=await reserveVoiceUsage(this.env,this.owner(),this.models().stt,sttCost(STT_WINDOW_MS,this.models().stt));
       if (!this.state || this.state.closed) { await reportVoiceUsage(this.env,id,0,{audioBytes:0}); throw new Error('call_ended'); }
       this.setState({...this.state,stt:{id,bytes:0}});
     });
@@ -87,26 +117,28 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     const stt=this.state?.stt;
     if (!stt) return;
     const audioMs=stt.bytes / 32; // mono PCM16, 16 kHz
-    await reportVoiceUsage(this.env,stt.id,sttCost(audioMs),{audioBytes:stt.bytes,audioMs,sampleRate:16000});
+    await reportVoiceUsage(this.env,stt.id,sttCost(audioMs,this.models().stt),{audioBytes:stt.bytes,audioMs,sampleRate:16000});
     if (this.state?.stt?.id===stt.id) this.setState({...this.state,stt:undefined});
   }
   tts: TTSProvider = { synthesize: async (text,signal) => {
     this.activeInference++;
     try {
       await this.checkBilling();
-      const response=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.tts,ttsCost(text),async()=>{
-        const response = await this.env.AI.run(VOICE_MODELS.tts,{
-          text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
-        },{returnRawResponse:true,signal}) as Response;
-        if (!response.ok) throw new Error('tts_failed');
-        return {result:response,providerMicroUsd:ttsCost(text),usage:{characters:text.length}};
-      },()=>Boolean(this.state && !this.state.closed && !signal?.aborted));
-      return await response.arrayBuffer();
+      return await this.synthesizeAudio(text,signal);
     } catch (error) {
       if (!signal?.aborted) await this.billingFailure(error);
       throw error;
     } finally { this.activeInference--; }
   }};
+
+  private async synthesizeAudio(text: string, signal?: AbortSignal, purpose?: string) {
+    const config=this.state!.config;
+    const cost=ttsCost(text,speechRate(this.env,config.model ?? 'aura-1'));
+    return meteredVoiceInference(this.env,this.owner(),this.models().tts,cost,async()=>{
+      const audio=await synthesizeVoiceSpeech(this.env,config,text,signal,this.fetchSpeech);
+      return {result:audio,providerMicroUsd:cost,usage:{characters:Array.from(text).length,language:config.language ?? 'en',...(purpose?{purpose}:{})}};
+    },()=>Boolean(this.state && !this.state.closed && !signal?.aborted));
+  }
 
   private async prepareImmediateReply() {
     if (!this.state || this.state.closed || this.state.channel==='text' || this.state.config.voiceLogic!=='reply_right_away') return;
@@ -114,17 +146,9 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     try {
       // Prepare the rotation serially before speech capture, with this call's
       // frozen voice. Playback never needs another optional inference request.
-      for (const text of IMMEDIATE_REPLIES) {
+      for (const text of IMMEDIATE_REPLIES[this.state.config.language ?? 'en']) {
         if (this.state?.closed) return;
-        const audio=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.tts,ttsCost(text),async()=>{
-          const response=await this.env.AI.run(VOICE_MODELS.tts,{
-            text,speaker:this.state!.config.voice,encoding:'linear16',container:'none',sample_rate:16000,
-          },{returnRawResponse:true}) as Response;
-          if (!response.ok) throw new Error('tts_failed');
-          const audio=await response.arrayBuffer();
-          if (!audio.byteLength || audio.byteLength%2) throw new Error('tts_invalid_pcm');
-          return {result:audio,providerMicroUsd:ttsCost(text),usage:{characters:text.length,purpose:'reply_right_away'}};
-        },()=>Boolean(this.state && !this.state.closed));
+        const audio=await this.synthesizeAudio(text,undefined,'reply_right_away');
         if (!this.state?.closed) this.immediateReplyAudio.push(audio);
       }
     } catch {
@@ -277,12 +301,13 @@ export class ReceptionistCall extends VoiceAgent<Cloudflare.Env & Env,CallState 
     try {
       await this.checkBilling();
       const messages=receptionistMessages(this.state!.config,context.messages,transcript);
-      const text=await meteredVoiceInference(this.env,this.owner(),VOICE_MODELS.llm,llmReservation(messages),async()=>{
-        const response = await this.env.AI.run(VOICE_MODELS.llm,{
-          messages,max_tokens:256,temperature:0.4,
-        },{signal:context.signal}) as {response?:string;usage?:unknown};
-        const providerMicroUsd=llmCost(response.usage);
-        return {result:response.response?.trim().slice(0,4000) || '',providerMicroUsd,usage:{tokens:response.usage}};
+      const text=await meteredVoiceInference(this.env,this.owner(),this.models().llm,llmReservation(messages,this.models().llm),async()=>{
+        const response = await this.env.AI.run(this.models().llm as Parameters<Ai['run']>[0],{
+          messages,max_tokens:256,temperature:0.4,...(this.state!.config.language && this.state!.config.language!=='en' ? {chat_template_kwargs:{enable_thinking:false}} : {}),
+        },{signal:context.signal}) as {response?:string;choices?:Array<{message?:{content?:string|null}}>;usage?:unknown};
+        const providerMicroUsd=llmCost(response.usage,this.models().llm);
+        const content=response.response ?? response.choices?.[0]?.message?.content;
+        return {result:content?.trim().slice(0,4000) || '',providerMicroUsd,usage:{tokens:response.usage}};
       },()=>Boolean(this.state && !this.state.closed && !context.signal.aborted));
       if (!text) throw new Error('No response generated');
       return text;

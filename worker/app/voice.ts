@@ -5,6 +5,7 @@ import { handleTwilioRequest } from './voice-twilio';
 import { handleTelnyxRequest } from './voice-telnyx';
 import { telnyxConfigured, telnyxSipUri } from '../lib/voice-telnyx';
 import { handleVoiceNumberSearch } from './voice-number-search';
+import { resolveVoiceModels, speechModelAvailable, speechOptions } from '../lib/voice-options';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 async function body(request: Request) {
@@ -38,7 +39,8 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
           telnyx:{configured:telnyxConfigured(env,agent?.id || null),
             webhookUrl:agent && agent.id===env.TELNYX_AGENT_ID && publicVoiceOrigin(env) ? `${publicVoiceOrigin(env)}/voice/telnyx/incoming/${agent.id}` : null,
             phoneNumber:telnyxConfigured(env,agent?.id || null,'pstn') ? env.TELNYX_PHONE_NUMBER : null,
-            sipUri:telnyxConfigured(env,agent?.id || null,'sip') ? telnyxSipUri(env.TELNYX_SIP_URI) : null}},models:VOICE_MODELS},200,cors);
+            sipUri:telnyxConfigured(env,agent?.id || null,'sip') ? telnyxSipUri(env.TELNYX_SIP_URI) : null}},
+        models:agent ? resolveVoiceModels(publicAgent(agent)) : VOICE_MODELS,speech:speechOptions(env)},200,cors);
     }
     if (url.pathname === '/voice/agent') {
       if (request.method === 'GET') {
@@ -49,10 +51,12 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       const parsed = voiceAgentInput.safeParse(await body(request));
       if (!parsed.success) return authJson({error:'invalid_request'},400,cors);
       const input = parsed.data;
-      await env.DB.prepare(`INSERT INTO voice_agents(id,user_id,name,business_name,greeting,instructions,voice,voice_logic,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,business_name=excluded.business_name,
-        greeting=excluded.greeting,instructions=excluded.instructions,voice=excluded.voice,voice_logic=excluded.voice_logic,updated_at=excluded.updated_at`)
-        .bind(crypto.randomUUID(),user.id,input.name,input.businessName,input.greeting,input.instructions,input.voice,input.voiceLogic,new Date().toISOString()).run();
+      if (!speechModelAvailable(env,input.model)) return authJson({error:'voice_model_unavailable'},503,cors);
+      await env.DB.prepare(`INSERT INTO voice_agents(id,user_id,name,business_name,greeting,instructions,voice,voice_logic,model,language,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,business_name=excluded.business_name,
+        greeting=excluded.greeting,instructions=excluded.instructions,voice=excluded.voice,voice_logic=excluded.voice_logic,
+        model=excluded.model,language=excluded.language,updated_at=excluded.updated_at`)
+        .bind(crypto.randomUUID(),user.id,input.name,input.businessName,input.greeting,input.instructions,input.voice,input.voiceLogic,input.model,input.language,new Date().toISOString()).run();
       return authJson({agent:publicAgent((await readAgent(env,user.id))!)},200,cors);
     }
     if (url.pathname === '/voice/calls') {
@@ -67,6 +71,7 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
       if (!input || Object.keys(input).length !== 1 || !['browser','text'].includes(input.channel)) return authJson({error:'invalid_request'},400,cors);
       const agent = await readAgent(env,user.id);
       if (!agent) return authJson({error:'agent_required'},409,cors);
+      if (!speechModelAvailable(env,agent.model ?? 'aura-1')) return authJson({error:'voice_model_unavailable'},503,cors);
       const call = await createCall(env,user.id,publicAgent(agent),input.channel);
       if (!call) return authJson({error:'voice_call_limit'},429,cors);
       try { await initializeCall(env,call); }
