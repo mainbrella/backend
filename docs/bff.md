@@ -109,6 +109,64 @@ a provisioning lease recover lost create responses without allocating another
 database. Existing project names are idempotent per owner. The control plane keeps
 the database UUID; it is never accepted from the browser or customer code.
 
+## Fetch and preview image services
+
+These services use the Worker’s outbound `fetch()` and require no BFF project,
+customer database, or function deployment. BFF must be enabled. Authenticate with
+a Mainbrella session cookie from an allowed Mainbrella origin, or an account API
+key (`Authorization: Bearer mb_...`) from a trusted server. Scoped project browser
+keys do not grant access to these endpoints.
+
+`POST /bff/fetch` accepts `{ "url": "https://example.com", "userAgent": "MyApp/1.0" }`.
+It performs a GET with that User-Agent and returns HTTP 200 with
+`{ url, status, statusText, ok, redirected, headers, body, bodyEncoding }`.
+`status` and `ok` describe the upstream reply, including upstream 4xx/5xx errors.
+The default `bodyEncoding` is `text` (UTF-8). Add `"responseType": "base64"` to
+preserve binary bytes. Headers are JSON data; upstream cookies are never applied
+to the browser, and caller cookies and authorization are never forwarded upstream.
+
+`POST /bff/og-image` accepts `{ "url": "https://example.com/article" }` and returns
+`{ "image": "https://example.com/preview.jpg" }`, or `{ "image": null }` when no
+usable image exists. It sends `Accept: text/html` and
+`User-Agent: MainbrellaPreviewBot/1.0`. HTMLRewriter prefers the first usable
+`og:image`, falls back to `twitter:image`, ignores metadata after the body starts,
+and cancels reading once an Open Graph image or the body is reached. Relative
+image URLs resolve against the final page URL after redirects. Image URLs must
+use HTTP(S) without embedded credentials. Upstream HTTP failures return 502 with
+an error such as `upstream_http_404`.
+
+For example, from a signed-in Mainbrella frontend:
+
+```js
+async function bffService(service, input) {
+  const response = await fetch(`https://api.mainbrella.com/bff/${service}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error);
+  return result;
+}
+
+const reply = await bffService('fetch', {
+  url: 'https://example.com/article',
+  userAgent: 'MyApp/1.0',
+});
+const { image } = await bffService('og-image', {
+  url: 'https://example.com/article',
+});
+```
+
+Both services accept public HTTP(S) URLs on default ports without embedded
+credentials or fragments. Private IP literals and local/reserved hostnames are
+rejected, including redirect targets. They follow up to five redirects and read
+at most 5 MiB. A single deadline covers redirects and body reads: 15 seconds for
+fetch, 8 seconds for preview images. Oversized replies return 413
+`response_too_large`, network failures return 502 `fetch_failed`, and deadlines
+return 504 `fetch_timeout`. Responses use `Cache-Control: no-store`.
+
 ## Data and migrations
 
 `050_bff.sql` adds only control-plane tables to the host’s `DB`: projects, function

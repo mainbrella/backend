@@ -6,6 +6,8 @@ import { manageApiKeys } from './api-keys';
 import { handleDataRequest } from './data-routes';
 import { handleDemoSessionRequest } from './demo';
 import { handleEmailAuthRequest } from './email-auth';
+import { FETCH_LIMITS, fetchInput, fetchUrl } from './fetch';
+import { getOgImage, ogImageInput } from './og-image';
 import { body, enabled, readyProject } from './http';
 import { invokeFunction } from './invocation';
 import { managePolicies } from './policies';
@@ -55,6 +57,17 @@ export async function handleBffRequest(request: Request, env: Env): Promise<Resp
     if (url.pathname === '/bff/config' && method === 'GET') return reply({ version: VERSION,
       available: env.BFF_ENABLED === 'true' && databaseAvailable(env),
       functionsAvailable: env.BFF_ENABLED === 'true' && !!env.BFF_LOADER, limits: LIMITS });
+    if (url.pathname === '/bff/fetch') {
+      if (method !== 'POST') throw new BffError('method_not_allowed', 405);
+      enabled(env);
+      return reply(await fetchUrl(parse(fetchInput, await body(request, FETCH_LIMITS.requestBytes)), request.signal));
+    }
+    if (url.pathname === '/bff/og-image') {
+      if (method !== 'POST') throw new BffError('method_not_allowed', 405);
+      enabled(env);
+      const input = parse(ogImageInput, await body(request, FETCH_LIMITS.requestBytes));
+      return reply({ image: await getOgImage(input.url, request.signal) });
+    }
     if (url.pathname === '/bff/projects') {
       if (method === 'GET') {
         const rows = await env.DB.prepare('SELECT * FROM bff_projects WHERE user_id=? ORDER BY created_at,id').bind(user.id).all<Project>();

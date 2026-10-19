@@ -5,6 +5,8 @@ import { handleRequest } from "./router";
 import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
+  '/bff/fetch': ['post'],
+  '/bff/og-image': ['post'],
   '/bff/data/{projectId}/auth/email': ['post'],
   '/bff/data/{projectId}/auth/session': ['get', 'delete'],
   '/bff/demo/session': ['post', 'delete'],
@@ -110,6 +112,39 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('BFF fetch documents owner authentication, custom User-Agent and the upstream response envelope', async () => {
+  const { paths } = await document();
+  const operation = paths['/bff/fetch'].post;
+  assert.equal(operation.operationId, 'fetchBffUrl');
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  const input = operation.requestBody.content['application/json'].schema;
+  assert.deepEqual(input.required, ['url', 'userAgent']);
+  assert.equal(input.additionalProperties, false);
+  assert.equal(input.properties.userAgent.maxLength, 1024);
+  assert.equal(input.properties.responseType.default, 'text');
+  assert.deepEqual(input.properties.responseType.enum, ['text', 'base64']);
+  const output = operation.responses[200].content['application/json'].schema;
+  assert.deepEqual(output.required, ['url', 'status', 'statusText', 'ok', 'redirected', 'headers', 'body', 'bodyEncoding']);
+  assert.match(operation.description, /including upstream 4xx\/5xx replies/);
+  assert.match(operation.description, /15-second deadline, including body reads/);
+  for (const status of [400, 401, 403, 405, 408, 413, 415, 502, 503, 504]) assert.ok(operation.responses[status]);
+});
+
+test('BFF preview images document the HTMLRewriter behavior and nullable image URL', async () => {
+  const { paths } = await document();
+  const operation = paths['/bff/og-image'].post;
+  assert.equal(operation.operationId, 'getBffOgImage');
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  const input = operation.requestBody.content['application/json'].schema;
+  assert.deepEqual(input.required, ['url']);
+  assert.equal(input.additionalProperties, false);
+  assert.deepEqual(operation.responses[200].content['application/json'].schema.properties.image.type, ['string', 'null']);
+  assert.match(operation.description, /MainbrellaPreviewBot\/1\.0/);
+  assert.match(operation.description, /8-second deadline/);
+  assert.match(operation.description, /final page URL after redirects/);
+  for (const status of [400, 401, 403, 405, 408, 413, 415, 502, 503, 504]) assert.ok(operation.responses[status]);
+});
 
 test('BFF browser APIs distinguish scoped project keys from owner management and raw SQL', async () => {
   const { paths, components } = await document();

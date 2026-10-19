@@ -40,6 +40,7 @@ import { forward, type LegacyHandler } from "./openapi-shared";
 import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
 import { registerVoiceRoutes, registerVoiceTelnyxRoutes, registerVoiceNumberSearchRoutes } from '../voice-openapi.ts';
 import { registerBffRoutes } from '../bff/openapi.ts';
+import { registerBffFetchRoutes } from './openapi-bff-fetch';
 import { isStaging, publicApiOrigin, publicWebOrigin } from '../lib/deployment-environment';
 
 // Independent service documents keep infrastructure routes off the customer API.
@@ -108,6 +109,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerVoiceTelnyxRoutes(api, handler);
   registerVoiceNumberSearchRoutes(api, handler);
   registerBffRoutes(api, handler);
+  registerBffFetchRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);
