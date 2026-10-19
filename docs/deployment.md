@@ -6,10 +6,18 @@ Wrangler login or `CLOUDFLARE_API_TOKEN`. It needs no GitHub workflow or push.
 `npm run deploy -- --check` validates without credentials, migrations, or
 publication. The full multi-worker rollout is `npm run deploy:all`.
 
+`npm run deploy:api` applies pending remote account D1 migrations before
+publishing the API. Migration failure stops publication. Additional Wrangler
+options are forwarded only to deployment, for example
+`npm run deploy:api -- --outdir=dist`. The release runner uses the internal
+`deploy:api:worker` command after running migrations and the API preflight, so
+each API release runs migrations once.
+
 The coordinated release order is **migrations/secrets → account, routing, and service preflights → containers
 → gateway → admin and marketing → API → qualification → web**. `npm run deploy:all` enforces the preflights and Worker
-order and stops on the first failed command. It does not apply migrations, change
-secrets, publish web, or run paid verification. Direct `deploy:api`,
+order and stops on the first failed command. Apply account and preview migrations
+before its initial preflights. It does not change secrets, publish web, or run
+paid verification. Direct `deploy:api`,
 `deploy:previews`, and `deploy:containers` commands remain operator tools and
 bypass the combined gate.
 
@@ -18,8 +26,8 @@ from the current Mac through the API preflight. The same flag works for other
 root deployment targets, including `deploy:site`. It uses Wrangler login (run
 `npm exec -- wrangler login`) or `CLOUDFLARE_API_TOKEN`, and
 records local release evidence. Uncommitted changes can be deployed; no GitHub
-workflow or push is required. Apply the account migrations first with
-`npm run db:migrate:remote`. Keep local deployments separate
+workflow or push is required. API releases apply account migrations before
+their preflight. Keep local deployments separate
 from workflow releases, since they do not share the GitHub concurrency lock.
 
 ## Independent admin and marketing releases

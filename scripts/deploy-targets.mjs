@@ -6,7 +6,7 @@ const backend = (worker, config, checks, preflight, publish) => ({
 // Each ordinary release has one worker. Coordinated backend operations have a
 // separate workflow; security provisioning and SDK/image publishing stay explicit.
 export const targets = {
-  api: backend('mainbrella-api', 'wrangler.jsonc', ['test:api', 'test:openapi', 'type-check', 'check:api'], ['api:preflight'], 'deploy:api'),
+  api: backend('mainbrella-api', 'wrangler.jsonc', ['test:api', 'test:openapi', 'type-check', 'check:api'], ['db:migrate:remote', 'api:preflight'], 'deploy:api:worker'),
   admin: backend('mainbrella-admin', 'wrangler.admin.jsonc', ['test:admin', 'type-check', 'check:admin'], ['admin:preflight'], 'deploy:admin'),
   marketing: backend('mainbrella-marketing', 'wrangler.marketing.jsonc', ['test:marketing', 'type-check', 'check:marketing'], ['marketing:preflight'], 'deploy:marketing'),
   containers: backend('mainbrella-containers', 'wrangler.containers.jsonc', ['test:containers', 'test:api', 'type-check', 'check:containers'], ['deploy:preflight'], 'deploy:containers'),

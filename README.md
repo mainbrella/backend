@@ -39,6 +39,10 @@ from the current checkout. GitHub Actions and a push are not required. For the
 first login, run `npx wrangler login`. BFF also requires its two deployed
 [configuration secrets](docs/bff.md#setup).
 
+`npm run deploy:api` also applies pending remote account D1 migrations before
+publishing and stops if migration fails. Wrangler options such as
+`npm run deploy:api -- --outdir=dist` are passed through to deployment.
+
 Use `npm run deploy -- --check` to run API checks and bundle without provider
 access or publishing. The previous complete backend rollout remains available as
 `npm run deploy:all`; it includes container images, the preview gateway, and
@@ -453,7 +457,7 @@ benchmark and historical material only; production builds do not read it.
 npm run deploy:preflight   # Read deployment compatibility metadata; no starts
 npm run deploy:all         # Preflight, containers, then API; stops on failure
 npm run deploy:containers  # Container Worker with the CI-published image
-npm run deploy:api         # API only
+npm run deploy:api         # Account D1 migrations, then API only
 npm run deploy:bootstrap-activity # One-time recovery for missing AccountActivity export (10061)
 ```
 

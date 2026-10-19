@@ -160,8 +160,8 @@ test('preflight runs before the target-scoped publish', t => {
   assert.deepEqual(npmCalls, [...target.preflight, target.publish]);
 });
 
-test('preflight failures stop before any publish', t => {
-  for (const [name, failScript] of [['api', 'api:preflight'], ['admin', 'admin:preflight']]) {
+test('migration and preflight failures stop before any publish', t => {
+  for (const [name, failScript] of [['api', 'db:migrate:remote'], ['api', 'api:preflight'], ['admin', 'admin:preflight']]) {
     const { directory, target } = fixture(t, name);
     const log = [];
     const failure = `npm run ${failScript}`;
@@ -225,7 +225,7 @@ test('backend npm deploy authenticates once, migrates before preflight, and publ
   assert.deepEqual(calls.filter(call => call.command === 'npm').map(call => call.args), [
     ['run', 'db:migrate:remote'],
     ['run', 'api:preflight'],
-    ['run', 'deploy:api', '--', '--outdir=.wrangler/release-api'],
+    ['run', 'deploy:api:worker', '--', '--outdir=.wrangler/release-api'],
   ]);
   assert.equal(calls.filter(call => call.args.includes('auth')).length, 1);
   assert.equal(calls.some(call => call.command === 'gh' || call.command === 'git' && ['fetch', 'merge-base', 'remote'].includes(call.args[0])), false);
@@ -255,7 +255,7 @@ test('backend deploy --check never reads credentials, migrates, or publishes', t
   deployBackend({ publish: false, directory, env: {}, run: stubRun(calls) });
   assert.deepEqual(calls.filter(call => call.command === 'npm').map(call => call.args[1]), target.checks);
   assert.ok(calls.some(call => call.args.includes('--dry-run')));
-  assert.equal(calls.some(call => call.args.includes('auth') || call.args.includes('db:migrate:remote') || call.args.includes('deploy:api')), false);
+  assert.equal(calls.some(call => call.args.includes('auth') || call.args.includes('db:migrate:remote') || call.args.includes('deploy:api:worker')), false);
 });
 
 test('local releases reuse explicit credentials and reject mismatched accounts before reading credentials', t => {
