@@ -36,6 +36,7 @@ test('email accounts create project users, store private salted hashes, reuse re
   assert.equal(account.user.email, 'person@example.com');
   assert.equal(account.user.id, account.session.user_id);
   assert.match(account.token, /^bff_us_[a-f0-9]{64}$/);
+  assert.equal(Date.parse(account.session.expires_at) - Date.parse(account.session.created_at), 30 * 24 * 60 * 60 * 1000);
   assert.ok(!['alice', 'bob', 'owner'].includes(account.user.id));
   const credential = await f.db.prepare('SELECT * FROM bff_email_accounts WHERE project_id=?').bind(f.project.id).first<any>();
   assert.match(credential.password_hash, /^scrypt:16384:8:5:[a-f0-9]{32}:[a-f0-9]{64}$/);
@@ -53,6 +54,10 @@ test('email accounts create project users, store private salted hashes, reuse re
   const authHeaders = { authorization: `Bearer ${account.token}` };
   const session = await (await f.browser(`${f.auth}/session`, 'GET', undefined, 200, authHeaders)).json() as any;
   assert.deepEqual(session, { session: account.session, user: account.user });
+  // An upstream outage must leave the same token usable after recovery.
+  f.redirectNextQuery();
+  await f.browser(`${f.auth}/session`, 'GET', undefined, 502, authHeaders);
+  assert.deepEqual(await (await f.browser(`${f.auth}/session`, 'GET', undefined, 200, authHeaders)).json(), session);
   const posted = await (await f.browser(`/data/${f.project.id}/tables/messages`, 'POST', { body: 'A real account posting' }, 201, authHeaders)).json() as any;
   assert.equal(posted.data[0].user_id, account.user.id);
   await f.browser(`${f.auth}/email`, 'POST', { email: 'person@example.com', password: 'wrong password' }, 401);

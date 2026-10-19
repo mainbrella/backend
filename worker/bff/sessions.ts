@@ -20,11 +20,12 @@ export async function manageSessions(request: Request, env: Env, project: Projec
   return issueUserSession(env, project, userId);
 }
 
-export async function issueUserSession(env: Env, project: Project, userId: string) {
+export async function issueUserSession(env: Env, project: Project, userId: string, maxAgeMs = 3_600_000) {
   readyProject(env, project);
   const [users] = await new ProjectDatabase(env, project).query([{ sql: 'SELECT id FROM users WHERE id=?', params: [userId] }]);
   if (!users.results.length) throw new BffError('user_not_found', 404);
-  const created = new Date().toISOString(), expires = new Date(Date.now() + 3_600_000).toISOString();
+  const now = Date.now();
+  const created = new Date(now).toISOString(), expires = new Date(now + maxAgeMs).toISOString();
   await env.DB.prepare('DELETE FROM bff_user_sessions WHERE project_id=? AND expires_at<=?').bind(project.id, created).run();
   const sessionId = crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(32));

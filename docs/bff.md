@@ -591,9 +591,11 @@ Message-board projects support `POST /bff/data/{projectId}/auth/email` with an
 An existing email signs in; a new email creates an account with a password of at
 least 8 characters. Emails are trimmed and lowercased; passwords remain exact
 and are limited to 128 characters. The response is `{ session, token, user,
-created }`, where `user` contains `id` and `email`, and `token` is the same
-one-hour `bff_us_` session used below. Login is limited to 20 attempts per minute
-per project and client IP using `EMAIL_AUTH_LIMIT`.
+created }`, where `user` contains `id` and `email`, and `token` is a `bff_us_`
+Bearer token with a fixed 30-day lifetime. Owner-issued and demo sessions below retain their one-hour
+lifetime. Existing sessions keep their original expiry; the longer lifetime applies
+to new email logins. Session records persist across Worker deploys. Login is
+limited to 20 attempts per minute per project and client IP using `EMAIL_AUTH_LIMIT`.
 
 `GET /bff/data/{projectId}/auth/session` checks the token and returns
 `{ session, user }`. `DELETE` revokes that token and returns `{ revoked: true }`.

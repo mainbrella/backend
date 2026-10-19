@@ -13,6 +13,7 @@ export const emailLoginInput = z.object({
 }).strict();
 
 type EmailAccount = { email: string; user_id: string; password_hash: string; provisioned: number };
+const EMAIL_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const publicUser = (account: Pick<EmailAccount, 'user_id' | 'email'>) => ({ id: account.user_id, email: account.email });
 
 // Message-board applications use real project users and standard bff_us_ tokens.
@@ -90,7 +91,7 @@ export async function handleEmailAuthRequest(request: Request, env: Env): Promis
         await env.DB.prepare('UPDATE bff_email_accounts SET provisioned=1 WHERE project_id=? AND email=?')
           .bind(projectId, email).run();
       }
-      const result = await issueUserSession(env, project, account.user_id);
+      const result = await issueUserSession(env, project, account.user_id, EMAIL_SESSION_MAX_AGE_MS);
       await recordApiKeyUse(env, key.id);
       return reply({ ...result.data, user: publicUser(account), created }, result.status);
     }

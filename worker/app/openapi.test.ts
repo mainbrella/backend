@@ -215,6 +215,8 @@ test('BFF browser APIs distinguish scoped project keys from owner management and
   assert.deepEqual(emailAuth.requestBody.content['application/json'].schema.required, ['email', 'password']);
   assert.equal(emailAuth.requestBody.content['application/json'].schema.additionalProperties, false);
   assert.ok(emailAuth.responses['201']);
+  assert.match(emailAuth.description, /30-day/);
+  assert.match(demo.post.description, /one-hour/);
   assert.deepEqual(paths['/bff/data/{projectId}/auth/session'].get.security, [{ bffApiKey: [], bffUserSession: [] }]);
 
 });
