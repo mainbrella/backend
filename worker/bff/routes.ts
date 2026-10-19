@@ -8,6 +8,7 @@ import { handleDemoSessionRequest } from './demo';
 import { handleEmailAuthRequest } from './email-auth';
 import { FETCH_LIMITS, fetchInput, fetchUrl } from './fetch';
 import { handleOgImageRequest } from './og-image-routes';
+import { previewImage } from './previews';
 import { body, enabled, readyProject } from './http';
 import { invokeFunction } from './invocation';
 import { managePolicies } from './policies';
@@ -40,7 +41,13 @@ async function provision(env: Env, project: Project) {
 }
 
 export async function handleBffRequest(request: Request, env: Env): Promise<Response> {
-  if (new URL(request.url).pathname === '/bff/og-image') return handleOgImageRequest(request, env);
+  const path = new URL(request.url).pathname;
+  const image = /^\/bff\/preview-images\/([a-f0-9-]{36})\.jpg$/.exec(path);
+  if (image) {
+    try { return await previewImage(request, env, image[1]); }
+    catch { return new Response(null, { status: 503 }); }
+  }
+  if (path === '/bff/og-image' || /^\/bff\/projects\/[a-f0-9-]{36}\/previews\/[a-f0-9-]{36}$/.test(path)) return handleOgImageRequest(request, env);
   if (new URL(request.url).pathname === '/bff/demo/session') return handleDemoSessionRequest(request, env);
   if (/^\/bff\/data\/[a-f0-9-]{36}\/auth\//.test(new URL(request.url).pathname)) return handleEmailAuthRequest(request, env);
   if (new URL(request.url).pathname.startsWith('/bff/data/')) return handleDataRequest(request, env);

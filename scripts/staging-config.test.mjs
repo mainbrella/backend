@@ -57,6 +57,8 @@ test('staging backend bindings and provider defaults cannot reach production res
   assert.deepEqual(api.services.map(service => service.service), ['mainbrella-admin-stg', 'mainbrella-marketing-stg']);
   assert.deepEqual(api.ratelimits.map(rate => rate.namespace_id), ['11004', '11002', '11003']);
   assert.equal(api.workflows[0].name, 'mainbrella-build-stg');
+  assert.equal(api.queues, undefined);
+  assert.equal(api.browser, undefined);
   assert.equal(api.vars.VOICE_PUBLIC_ORIGIN, STAGING.apiOrigin);
   assert.equal(api.vars.PREVIEW_DOMAIN, STAGING.previewDomain);
   assert.equal(api.vars.R2_BILLING_MODE, 'off');

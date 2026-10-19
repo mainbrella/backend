@@ -7,6 +7,8 @@ import { serviceForPath } from "../shared/service-routing";
 const endpointMethods: Record<string, string[]> = {
   '/bff/fetch': ['post'],
   '/bff/og-image': ['post'],
+  '/bff/projects/{projectId}/previews/{previewId}': ['get'],
+  '/bff/preview-images/{previewId}.jpg': ['get'],
   '/bff/data/{projectId}/auth/email': ['post'],
   '/bff/data/{projectId}/auth/session': ['get', 'delete'],
   '/bff/demo/session': ['post', 'delete'],
@@ -140,6 +142,8 @@ test('BFF preview images document the HTMLRewriter behavior and nullable image U
   assert.deepEqual(input.required, ['url']);
   assert.equal(input.additionalProperties, false);
   assert.deepEqual(operation.responses[200].content['application/json'].schema.properties.image.type, ['string', 'null']);
+  assert.equal(input.properties.projectId.format, 'uuid');
+  assert.ok(operation.responses[202].headers['Retry-After']);
   assert.match(operation.description, /MainbrellaPreviewBot\/1\.0/);
   assert.match(operation.description, /8-second deadline/);
   assert.match(operation.description, /final page URL after redirects/);
@@ -150,6 +154,18 @@ test('BFF preview images document the HTMLRewriter behavior and nullable image U
   assert.match(operation.description, /does not require a project table-operation grant/);
   assert.ok(operation.responses[409].content['application/json'].schema.properties.error);
   for (const status of [400, 401, 403, 405, 408, 409, 413, 415, 502, 503, 504]) assert.ok(operation.responses[status]);
+});
+
+test('BFF screenshot schemas document project polling and public image capabilities', async () => {
+  const { paths } = await document();
+  const status = paths['/bff/projects/{projectId}/previews/{previewId}'].get;
+  assert.deepEqual(status.security, paths['/bff/og-image'].post.security);
+  assert.deepEqual(status.responses[202].content['application/json'].schema.required, ['image', 'source', 'status', 'previewId', 'statusUrl']);
+  const image = paths['/bff/preview-images/{previewId}.jpg'].get;
+  assert.deepEqual(image.security, []);
+  assert.equal(image.responses[200].content['image/jpeg'].schema.format, 'binary');
+  assert.match(image.description, /bearer capability/);
+  assert.match(image.description, /GET and HEAD/);
 });
 
 test('BFF browser APIs distinguish scoped project keys from owner management and raw SQL', async () => {

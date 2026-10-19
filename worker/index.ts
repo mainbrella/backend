@@ -12,6 +12,7 @@ import { reconcileAcquisitionBilling } from './lib/acquisition-billing';
 import { cleanupDeletedBuildGit, cleanupStorageOrphans, buildStorageExpiration } from './vibe-maintenance.ts';
 import { reconcileBuildTurns } from './vibe-routes.ts';
 import { cleanupBffDatabases } from './bff/maintenance.ts';
+import { cleanupPreviews, consumePreviews } from './bff/previews';
 
 export { AppState };
 export { ReceptionistCall } from './durable-objects/receptionist-call.ts';
@@ -20,6 +21,9 @@ export { AccountActivity } from './account.ts';
 export { BuildWorkflow } from './workflows/build.ts';
 
 export default {
+  queue(batch, env) {
+    return consumePreviews(batch, env);
+  },
   fetch(request, env, ctx) {
     if (env.LOCAL_DEV === 'true' && new URL(request.url).hostname.endsWith('.localhost')) {
       return handleApplicationGateway(request, env, ctx);
@@ -27,6 +31,7 @@ export default {
     return handleRequest(request, env, ctx);
   },
   scheduled(_event, env, ctx) {
+    ctx.waitUntil(cleanupPreviews(env).catch(() => { console.error('bff_preview_cleanup_failed'); }));
     ctx.waitUntil(cleanupBffDatabases(env).catch(() => { console.error('bff_database_cleanup_failed'); }));
     ctx.waitUntil(settleReportedVoiceUsage(env).catch(() => { console.error('voice_billing_reconciliation_failed'); }));
     ctx.waitUntil(reconcileDomainOrders(env).catch(() => { console.error('domain_reconciliation_failed'); }));

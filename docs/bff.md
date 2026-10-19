@@ -188,6 +188,77 @@ const { image } = await response.json();
 The browser key alone cannot authorize this endpoint; the user session is also
 required. `/bff/fetch` remains owner-only.
 
+To enable screenshot fallback, include `projectId` in `/bff/og-image`:
+
+```json
+{ "url": "https://example.com/article", "projectId": "YOUR_PROJECT_UUID" }
+```
+
+The owner must own that project. Scoped keys and sessions must match it. Without
+`projectId`, the existing metadata-only response stays the same. With it, the
+priority is `og:image`, `twitter:image`, a cached or queued screenshot, then the
+page's favicon. If neither a screenshot nor favicon is available, `image` is null
+and `source` is `placeholder`, so the frontend can show its standard placeholder.
+
+A metadata match returns HTTP 200 with `image`, `source` (`og` or `twitter`) and
+`status: "ready"`. Missing metadata, or a failed plain fetch, enqueues a Cloudflare
+Queue job and returns HTTP 202 with `Retry-After: 3`:
+
+```json
+{
+  "image": null,
+  "source": "placeholder",
+  "status": "pending",
+  "previewId": "PREVIEW_UUID",
+  "statusUrl": "https://api.mainbrella.com/bff/projects/PROJECT_UUID/previews/PREVIEW_UUID"
+}
+```
+
+Poll `statusUrl` with the same credentials. It returns 202 until the job finishes,
+then 200 with `status: "ready"` and `source: "screenshot"`, or `status: "failed"`
+and the favicon/placeholder. A failed capture is remembered for six hours to
+avoid repeatedly rendering a blocked page. Duplicate requests share a job, and
+expired delivery/processing leases are recoverable through polling.
+
+The queue uses Browser Run's `snapshot` Quick Action to get rendered HTML and a
+JPEG from the same browser session: 1200×630, quality 80, `fullPage: false`.
+Navigation and actions have 10-second limits within a 25-second overall deadline.
+HTTP failures, known challenge/login/error titles, common CAPTCHA or consent
+overlays, and empty HTML are rejected before saving. These checks are conservative
+heuristics; they cannot guarantee that every screenshot is visually useful.
+Submitted and final hostnames are checked against public DNS answers. Browser
+request patterns reject IP literals, local/reserved suffixes, credentials and
+non-default ports for both subresources and redirects. These hostname checks do
+not pin browser DNS resolution or provide per-request DNS rebinding protection.
+
+Screenshots use the existing `BUCKET` binding and account storage metering/funding
+rules. Each immutable JPEG is stored under
+`products/bff/<ownerId>/<projectId>/previews/<urlHash>/<previewId>.jpg`. Successful
+captures are cached for 14 days. The scheduled worker removes expired objects and
+objects whose project/account was deleted. There are at most 1,000 retained jobs
+per project, with admission limited to 100 new records per UTC day. Cached reads
+and metadata matches do not enqueue additional browser work.
+
+The returned `/bff/preview-images/<previewId>.jpg` URL is a public bearer link for
+use in `<img>` elements. Anyone with the unguessable URL can view it; do not treat
+it as private account content. Reads require a live, unpaused, unblocked project,
+and return 404 after expiry. Browser caches may retain it for up to one hour.
+
+Before deploying this fallback, create its queue once and apply migration 057:
+
+```sh
+npx wrangler queues create mainbrella-bff-previews
+npm run db:migrate:remote
+npm run deploy
+```
+
+The checked-in API config declares the `BROWSER` binding and the queue producer
+and consumer. Browser Run Quick Actions need a remote browser during local
+development (`browser.remote: true` in a local config); the default local browser
+does not implement Quick Actions. Staging keeps BFF disabled and strips these
+bindings, so it never consumes the production queue. The tests use a local mock
+browser with real workerd Queues, D1 and R2.
+
 Both services accept public HTTP(S) URLs on default ports without embedded
 credentials or fragments. Private IP literals and local/reserved hostnames are
 rejected, including redirect targets. They follow up to five redirects and read

@@ -18,6 +18,11 @@
 		"enabled": true
 	},
 	"ai": { "binding": "AI" },
+  "browser": { "binding": "BROWSER" },
+  "queues": {
+    "producers": [{ "binding": "BFF_PREVIEW_QUEUE", "queue": "mainbrella-bff-previews" }],
+    "consumers": [{ "queue": "mainbrella-bff-previews", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 2, "max_concurrency": 2 }]
+  },
 	"version_metadata": { "binding": "VERSION_METADATA" },
 	"workflows": [{ "binding": "BUILD_WORKFLOW", "name": "mainbrella-build", "class_name": "BuildWorkflow" }],
 	"triggers": {

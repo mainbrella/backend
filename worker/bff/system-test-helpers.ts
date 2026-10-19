@@ -7,8 +7,8 @@ import { build } from 'esbuild';
 import { Miniflare, Response as MfResponse, convertV4MiniflareOptions, type V4FetchHandler } from 'miniflare';
 import { hashToken } from '../app/auth-core';
 
-export async function runtime(t: test.TestContext, bindings: Record<string, string> = {}, outboundService?: V4FetchHandler) {
-  const bundle = await build({ stdin: { contents: `import { handleBffRequest } from './routes'; import { cleanupBffDatabases } from './maintenance'; import { handleAPIKeysRequest } from '../app/api-keys'; export default { async fetch(request,env) { const path=new URL(request.url).pathname; if(path==='/__test_cleanup') {await cleanupBffDatabases(env);return new Response('ok')} if(path.startsWith('/api-keys')) return handleAPIKeysRequest(request,env); return handleBffRequest(request,env); } };`, resolveDir: fileURLToPath(new URL('.', import.meta.url)) },
+export async function runtime(t: test.TestContext, bindings: Record<string, string> = {}, outboundService?: V4FetchHandler, previewBrowser?: V4FetchHandler) {
+  const bundle = await build({ stdin: { contents: `import { handleBffRequest } from './routes'; import { cleanupBffDatabases } from './maintenance'; import { cleanupPreviews, consumePreviews } from './previews'; import { handleAPIKeysRequest } from '../app/api-keys'; export default { queue:consumePreviews, async fetch(request,env) { const path=new URL(request.url).pathname; if(path==='/__test_cleanup') {await cleanupBffDatabases(env);return new Response('ok')} if(path==='/__test_preview_cleanup') {await cleanupPreviews(env);return new Response('ok')} if(path.startsWith('/api-keys')) return handleAPIKeysRequest(request,env); return handleBffRequest(request,env); } };`, resolveDir: fileURLToPath(new URL('.', import.meta.url)) },
     bundle: true, write: false, format: 'esm', target: 'es2022', platform: 'browser', external: ['cloudflare:*', 'node:*'] });
   const databases = new Map<string, { name: string; db: DatabaseSync }>();
   const calls: { path: string; body: any }[] = [];
@@ -18,7 +18,11 @@ export async function runtime(t: test.TestContext, bindings: Record<string, stri
   let failDelete = false;
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
     name: 'bff-test', modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-10-01', compatibilityFlags: ['nodejs_compat'],
-    d1Databases: ['DB'], workerLoaders: { BFF_LOADER: {} },
+    d1Databases: ['DB'], workerLoaders: { BFF_LOADER: {} }, r2Buckets: ['BUCKET'],
+    ...(previewBrowser ? {
+      queueProducers: { BFF_PREVIEW_QUEUE: 'bff-preview-test' }, queueConsumers: { 'bff-preview-test': { maxBatchSize: 1, maxBatchTimeout: 0 } },
+      serviceBindings: { BROWSER: 'bff-preview-browser' },
+    } : {}),
     ratelimits: { EMAIL_AUTH_LIMIT: { namespace_id: '1002', simple: { limit: 20, period: 60 } } },
     bindings: { BFF_ENABLED: 'true', BFF_CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), BFF_CLOUDFLARE_API_TOKEN: 'platform-token-must-never-leak', PLATFORM_SECRET: 'platform-secret-must-never-leak', ...bindings },
     // Local-provider tests exercise workerd's real loopback fetch path.
@@ -55,10 +59,14 @@ export async function runtime(t: test.TestContext, bindings: Record<string, stri
         db.exec('ROLLBACK'); return response(null, false);
       }
     }),
-  }] }));
+  }, ...(previewBrowser ? [{ name: 'bff-preview-browser', modules: true, compatibilityDate: '2026-10-01',
+    script: `import { WorkerEntrypoint } from 'cloudflare:workers'; export default class extends WorkerEntrypoint {
+      quickAction(action,options) { return this.env.REPORT.fetch('https://browser-test/',{method:'POST',body:JSON.stringify({action,options})}); }
+    }`, serviceBindings: { REPORT: previewBrowser },
+  }] : [])] }));
   t.after(async () => { await mf.dispose(); for (const { db } of databases.values()) db.close(); });
   const db = await mf.getD1Database('DB');
-  for (const migration of ['001_initial', '002_auth_sessions', '010_api_keys', '050_bff', '051_bff_api_keys', '052_bff_shared_api_keys', '053_bff_table_policies', '054_bff_message_board', '055_bff_public_demo', '056_bff_email_accounts']) {
+  for (const migration of ['001_initial', '002_auth_sessions', '010_api_keys', '050_bff', '051_bff_api_keys', '052_bff_shared_api_keys', '053_bff_table_policies', '054_bff_message_board', '055_bff_public_demo', '056_bff_email_accounts', '057_bff_previews']) {
     const sql = readFileSync(new URL(`../../migrations/${migration}.sql`, import.meta.url), 'utf8').replace(/^--.*$/gm, '');
     for (const statement of sql.match(/\s*CREATE TRIGGER[\s\S]*?END;|\s*[^;]+;/g) || []) await db.prepare(statement.trim()).run();
   }

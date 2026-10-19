@@ -4,16 +4,20 @@ import { BffError, checksum, parse, type Project } from './contracts';
 import { FETCH_LIMITS } from './fetch';
 import { body, enabled, readyProject } from './http';
 import { getOgImage, ogImageInput } from './og-image';
+import { previewStatus, requestPreview } from './previews';
 
 export async function handleOgImageRequest(request: Request, env: Env): Promise<Response> {
-  const cors: Record<string, string> = { vary: 'Origin' };
+  const cors: Record<string, string> = { vary: 'Origin', 'access-control-expose-headers': 'Retry-After' };
   const reply = (data: unknown, status = 200) => authJson(data, status, cors);
   try {
+    const statusMatch = /^\/bff\/projects\/([a-f0-9-]{36})\/previews\/([a-f0-9-]{36})$/.exec(new URL(request.url).pathname);
+    const expectedMethod = statusMatch ? 'GET' : 'POST';
+    let ownerId: string, scopedProjectId: string | undefined;
     const origin = request.headers.get('origin');
     const ownerCors = authCorsHeaders(request, env);
     if (request.method === 'OPTIONS') {
       if (!ownerCors && origin) {
-        // Preflights have no key. POST rechecks its own live key and session.
+        // Preflights have no key. Each request rechecks its live key and session.
         const allowed = await env.DB.prepare(`SELECT 1 FROM api_keys k
           JOIN bff_api_key_grants g ON g.api_key_id=k.id
           JOIN bff_projects p ON p.id=g.project_id AND p.user_id=k.user_id
@@ -25,9 +29,9 @@ export async function handleOgImageRequest(request: Request, env: Env): Promise<
       const method = request.headers.get('access-control-request-method');
       const headers = (request.headers.get('access-control-request-headers') || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean);
       const allowedHeaders = ['apikey', 'authorization', 'content-type', ...(ownerCors ? ['idempotency-key'] : [])];
-      if ((method && method !== 'POST') || headers.some(header => !allowedHeaders.includes(header))) throw new BffError('origin_not_allowed', 403);
+      if ((method && method !== expectedMethod) || headers.some(header => !allowedHeaders.includes(header))) throw new BffError('origin_not_allowed', 403);
       return new Response(null, { status: 204, headers: { ...cors, 'cache-control': 'no-store',
-        'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': allowedHeaders.join(', '),
+        'access-control-allow-methods': `${expectedMethod}, OPTIONS`, 'access-control-allow-headers': allowedHeaders.join(', '),
         'access-control-max-age': '600' } });
     }
     const authorization = request.headers.get('authorization');
@@ -50,16 +54,33 @@ export async function handleOgImageRequest(request: Request, env: Env): Promise<
         .bind(project.id, await checksum(sessionToken), new Date().toISOString()).first();
       if (!session) throw new BffError('unauthorized', 401);
       await recordApiKeyUse(env, identity.key_id);
+      ownerId = identity.id;
+      scopedProjectId = project.id;
     } else {
       if (!ownerCors) throw new BffError('origin_not_allowed', 403);
       Object.assign(cors, ownerCors);
       const token = authorization?.match(/^Bearer (mb_[a-f0-9]{64})$/i)?.[1];
       const user = authorization !== null ? (token ? await apiKeyUser(env, token) : null) : await currentUser(env, request);
       if (!user) throw new BffError('unauthorized', 401);
+      ownerId = user.id;
     }
-    if (request.method !== 'POST') throw new BffError('method_not_allowed', 405);
+    if (request.method !== expectedMethod) throw new BffError('method_not_allowed', 405);
     enabled(env);
+    if (statusMatch) {
+      if (scopedProjectId && scopedProjectId !== statusMatch[1]) throw new BffError('permission_denied', 403);
+      const result = await previewStatus(env, statusMatch[1], ownerId, statusMatch[2]);
+      const response = reply(result.data, result.status);
+      if (result.status === 202) response.headers.set('retry-after', '3');
+      return response;
+    }
     const input = parse(ogImageInput, await body(request, FETCH_LIMITS.requestBytes));
+    if (input.projectId) {
+      if (scopedProjectId && scopedProjectId !== input.projectId) throw new BffError('permission_denied', 403);
+      const result = await requestPreview(env, input.projectId, ownerId, input.url, request.signal);
+      const response = reply(result.data, result.status);
+      if (result.status === 202) response.headers.set('retry-after', '3');
+      return response;
+    }
     return reply({ image: await getOgImage(input.url, request.signal) });
   } catch (error) {
     if (error instanceof BffError) return reply({ error: error.code }, error.status);

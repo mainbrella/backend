@@ -49,6 +49,28 @@ test('project users can request preview images with their scoped key and session
   assert.equal(calls, 1);
 });
 
+test('scoped preview callers cannot select another project or poll its screenshot jobs', async t => {
+  let fetched = 0;
+  const f = await runtime(t, {}, async () => { fetched++; return new MfResponse('<head><meta property="og:image" content="/og.jpg"></head>'); });
+  const first = await projectCredentials(f), other = await projectCredentials(f);
+  const wrong = await f.request('/og-image', 'POST', { url: 'https://example.com/', projectId: other.projectId }, 'missing', first.headers);
+  assert.equal(wrong.status, 403); assert.equal(fetched, 0);
+  const own = await f.request('/og-image', 'POST', { url: 'https://example.com/', projectId: first.projectId }, 'missing', first.headers);
+  assert.equal(own.status, 200);
+  assert.deepEqual(await own.json(), { image: 'https://example.com/og.jpg', source: 'og', status: 'ready' });
+  const id = crypto.randomUUID();
+  await f.db.prepare(`INSERT INTO bff_previews(id,project_id,user_id,url_hash,url,state,lease_until,expires_at,created_at)
+    VALUES(?,?,'owner','hash','https://example.com/','pending',?,?,?)`)
+    .bind(id, first.projectId, Date.now() + 120_000, Date.now() + 600_000, Date.now()).run();
+  const path = `/projects/${first.projectId}/previews/${id}`;
+  const status = await f.request(path, 'GET', undefined, 'missing', first.headers);
+  assert.equal(status.status, 202);
+  assert.equal(status.headers.get('access-control-allow-origin'), first.headers.origin);
+  assert.equal((await f.request(path, 'GET', undefined, 'missing', other.headers)).status, 403);
+  await f.db.prepare('DELETE FROM bff_user_sessions WHERE id=?').bind(first.sessionId).run();
+  assert.equal((await f.request(path, 'GET', undefined, 'owner', first.headers)).status, 401);
+});
+
 test('project preview images honor BFF disablement before fetching', async t => {
   let calls = 0;
   const f = await runtime(t, { BFF_ENABLED: 'false' }, async () => { calls++; return new MfResponse('unexpected'); });

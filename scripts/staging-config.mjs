@@ -20,7 +20,7 @@ const SOURCE_KEYS = new Set([
   'workers_dev', 'preview_urls', 'r2_buckets', 'cache', 'ai', 'version_metadata',
   'workflows', 'triggers', 'vars', 'send_email', 'services', 'd1_databases',
   'ratelimits', 'durable_objects', 'exports', 'observability', 'routes',
-  'containers', 'assets', 'worker_loaders',
+  'containers', 'assets', 'worker_loaders', 'browser', 'queues',
 ]);
 const SOURCE_D1 = {
   api: ['DB', 'PREVIEW_ROUTES'], admin: ['DB'], marketing: ['DB'],
@@ -104,6 +104,13 @@ function assertSupportedSourceConfig(target, configuration) {
     }
   }
   const workflows = configuration.workflows ?? [];
+  if (target === 'api') {
+    if (!isDeepStrictEqual(configuration.browser, { binding: 'BROWSER' })
+      || !isDeepStrictEqual(configuration.queues, {
+        producers: [{ binding: 'BFF_PREVIEW_QUEUE', queue: 'mainbrella-bff-previews' }],
+        consumers: [{ queue: 'mainbrella-bff-previews', max_batch_size: 1, max_batch_timeout: 1, max_retries: 2, max_concurrency: 2 }],
+      })) unsupported(target, 'BFF browser or preview queue bindings');
+  } else if (configuration.browser || configuration.queues) unsupported(target, 'BFF browser or preview queue bindings');
   const loaders = configuration.worker_loaders ?? [];
   if (!isDeepStrictEqual(loaders, target === 'api' ? [{ binding: 'BFF_LOADER' }] : [])) {
     unsupported(target, 'worker loader bindings');
@@ -238,6 +245,9 @@ function stageDatabaseBindings(configuration, resources) {
 }
 
 function stageWorkerReferences(configuration) {
+  // BFF is disabled by default in staging; do not consume production jobs.
+  delete configuration.queues;
+  delete configuration.browser;
   for (const service of configuration.services ?? []) service.service += '-stg';
   for (const binding of configuration.durable_objects?.bindings ?? []) {
     if (binding.script_name) binding.script_name += '-stg';
