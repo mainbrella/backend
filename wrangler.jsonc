@@ -8,45 +8,70 @@
 		"nodejs_compat",
 		"global_fetch_strictly_public"
 	],
-  "r2_buckets": [
-    {
-      "binding": "BUCKET",
-      "bucket_name": "romeo"
-    }
-  ],
+	"r2_buckets": [
+		{
+			"binding": "BUCKET",
+			"bucket_name": "romeo"
+		}
+	],
 	"cache": {
 		"enabled": true
 	},
-	"ai": { "binding": "AI" },
-  "browser": { "binding": "BROWSER" },
-  "queues": {
-    "producers": [{ "binding": "BFF_PREVIEW_QUEUE", "queue": "mainbrella-bff-previews" }],
-    "consumers": [{ "queue": "mainbrella-bff-previews", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 2, "max_concurrency": 2 }]
-  },
-	"version_metadata": { "binding": "VERSION_METADATA" },
-	"workflows": [{ "binding": "BUILD_WORKFLOW", "name": "mainbrella-build", "class_name": "BuildWorkflow" }],
+	"ai": {
+		"binding": "AI"
+	},
+	"browser": {
+		"binding": "BROWSER"
+	},
+	"queues": {
+		"producers": [
+			{
+				"binding": "BFF_PREVIEW_QUEUE",
+				"queue": "mainbrella-bff-previews"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "mainbrella-bff-previews",
+				"max_batch_size": 1,
+				"max_batch_timeout": 1,
+				"max_retries": 2,
+				"max_concurrency": 2
+			}
+		]
+	},
+	"version_metadata": {
+		"binding": "VERSION_METADATA"
+	},
+	"workflows": [
+		{
+			"binding": "BUILD_WORKFLOW",
+			"name": "mainbrella-build",
+			"class_name": "BuildWorkflow"
+		}
+	],
 	"triggers": {
 		"crons": [
 			"*/5 * * * *"
 		]
 	},
 	"vars": {
-    "BFF_ENABLED": "true",
+		"BFF_ENABLED": "true",
 		"NAMECOM_ENABLED": "true",
 		"VOICE_ENABLED": "true",
 		"VOICE_PUBLIC_ORIGIN": "https://api.mainbrella.com",
 		"NAME_DOT_COM_USERNAME": "mainbrella",
 		"NAMECOM_MARKUP_BPS": "0",
 		"BUILD_ENABLED": "true",
-    "TELNYX_PUBLIC_KEY": "+F7vV3P3hKlXlrF0R1e1dujiKRYdsywqvj31XnZYPII=",
-    "TELNYX_ACCOUNT_SID": "f33a3f99-aacc-4848-9e50-a3faf96460cc",
-    "TELNYX_CONNECTION_ID": "3071274715852047597",
-    "TELNYX_AGENT_ID": "2e5af885-2f30-4a8b-9040-c25ee4c01112",
-    "TELNYX_PHONE_NUMBER": "+19362461010",
-    "TELNYX_PHONE_MICRO_USD_PER_MINUTE": "20000",
-    "VOICE_AI_GATEWAY_ACCOUNT_ID": "2b7a9be82bb64187230703b024e25157",
-    "VOICE_AI_GATEWAY_ID": "voice",
-    "CARTESIA_TTS_MICRO_USD_PER_CHARACTER": "65",
+		"TELNYX_PUBLIC_KEY": "+F7vV3P3hKlXlrF0R1e1dujiKRYdsywqvj31XnZYPII=",
+		"TELNYX_ACCOUNT_SID": "f33a3f99-aacc-4848-9e50-a3faf96460cc",
+		"TELNYX_CONNECTION_ID": "3071274715852047597",
+		"TELNYX_AGENT_ID": "2e5af885-2f30-4a8b-9040-c25ee4c01112",
+		"TELNYX_PHONE_NUMBER": "+19362461010",
+		"TELNYX_PHONE_MICRO_USD_PER_MINUTE": "20000",
+		"VOICE_AI_GATEWAY_ACCOUNT_ID": "2b7a9be82bb64187230703b024e25157",
+		"VOICE_AI_GATEWAY_ID": "voice",
+		"CARTESIA_TTS_MICRO_USD_PER_CHARACTER": "65",
 		"R2_BILLING_MODE": "charge",
 		"R2_CHARGE_FROM": "2026-10-11T00:00:00Z",
 		"R2_PLATFORM_MAX_BYTES": "1000000000000",
@@ -70,11 +95,22 @@
 		"GOOGLE_CLIENT_ID": "854186419005-l0u2olqlqe40qmgin0q8tjpvftooi6ac.apps.googleusercontent.com"
 	},
 	"send_email": [
-		{ "name": "WELCOME_EMAIL", "allowed_sender_addresses": ["andrew@mainbrella.com"] }
+		{
+			"name": "WELCOME_EMAIL",
+			"allowed_sender_addresses": [
+				"andrew@mainbrella.com"
+			]
+		}
 	],
 	"services": [
-		{ "binding": "ADMIN_API", "service": "mainbrella-admin" },
-		{ "binding": "MARKETING_API", "service": "mainbrella-marketing" }
+		{
+			"binding": "ADMIN_API",
+			"service": "mainbrella-admin"
+		},
+		{
+			"binding": "MARKETING_API",
+			"service": "mainbrella-marketing"
+		}
 	],
 	"d1_databases": [
 		{
@@ -91,27 +127,43 @@
 			"migrations_dir": "preview-migrations"
 		}
 	],
-  "worker_loaders": [{ "binding": "BFF_LOADER" }],
+	"worker_loaders": [
+		{
+			"binding": "BFF_LOADER"
+		}
+	],
 	"ratelimits": [
 		{
 			"name": "VOICE_NUMBER_SEARCH_LIMIT",
 			"namespace_id": "1004",
-			"simple": { "limit": 20, "period": 60 }
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
 		},
 		{
 			"name": "EMAIL_AUTH_LIMIT",
 			"namespace_id": "1002",
-			"simple": { "limit": 20, "period": 60 }
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
 		},
 		{
 			"name": "ACQUISITION_SUBMISSION_LIMIT",
 			"namespace_id": "1003",
-			"simple": { "limit": 20, "period": 60 }
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
 		}
 	],
 	"durable_objects": {
 		"bindings": [
-			{ "name": "RECEPTIONIST_CALL", "class_name": "ReceptionistCall" },
+			{
+				"name": "RECEPTIONIST_CALL",
+				"class_name": "ReceptionistCall"
+			},
 			{
 				"name": "ACCOUNT_ACTIVITY",
 				"class_name": "AccountActivity"
@@ -128,7 +180,10 @@
 		]
 	},
 	"exports": {
-		"ReceptionistCall": { "type": "durable-object", "storage": "sqlite" },
+		"ReceptionistCall": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"AccountActivity": {
 			"type": "durable-object",
 			"storage": "sqlite"
