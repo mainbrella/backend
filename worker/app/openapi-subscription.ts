@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { usageBillingSchema, usagePricingSchema } from "./openapi-usage-billing";
-import { limitsSchema, machineSizeSchema } from "./openapi-containers";
+import { usageBillingSchema, usagePricingSchema } from "../schemas.ts";
+import { limitsSchema, machineSizeSchema } from "../schemas.ts";
 import { cookieSecurity, errors, jsonResponse, planSchema, register, requestBody, type LegacyHandler, type OpenAPIApi } from "./openapi-shared";
 
 const subscriptionState = z.object({

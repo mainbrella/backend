@@ -1,4 +1,4 @@
-import { stripeRequest, subscriptionPlan, type BillingEnv, type StripeSubscription } from './stripe';
+import { stripeKeyAllowed, stripeRequest, subscriptionPlan, type BillingEnv, type StripeSubscription } from './stripe';
 export interface UsageInvoice {
   identifier: string; invoiceId: string; customerId: string; subscriptionId: string;
   amountCents: number; totalCents: number; periodStart: number; periodEnd: number; createdAt: number;
@@ -7,7 +7,7 @@ interface StripeInvoice { id: string; customer: string; status: string; created:
   parent?: { subscription_details?: { subscription?: string } }; subscription?: string;
   metadata?: Record<string, string>; }
 interface InvoiceItem { id: string; amount: number; invoice: string; customer: string; metadata?: Record<string, string> }
-export const usageBillingConfigured = (env: BillingEnv): boolean => Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_USAGE_BASE_PRICE_ID);
+export const usageBillingConfigured = (env: BillingEnv): boolean => stripeKeyAllowed(env) && Boolean(env.STRIPE_USAGE_BASE_PRICE_ID);
 
 export async function invoiceResourceUsage(env: BillingEnv, entry: UsageInvoice): Promise<string> {
   if (!usageBillingConfigured(env) || !Number.isSafeInteger(entry.amountCents) || entry.amountCents <= 0) throw new Error('billing_unavailable');

@@ -12,7 +12,7 @@ import { handleAppAnonymous, handleAppDelete, handleAppLogout, handleAppMe, hand
 import { handleNativeAppleLogin } from "./auth-apple";
 
 export async function handleAuthRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
-  const corsHeaders = authCorsHeaders(request);
+  const corsHeaders = authCorsHeaders(request, env);
   if (corsHeaders === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
 
@@ -71,7 +71,7 @@ export async function handleAuthRequest(request: Request, env: Env, ctx?: Execut
   if (pathname === "/auth/logout" && request.method === "POST") {
     try {
       await revokeSession(env, request);
-      return authJson({ ok: true }, 200, { ...corsHeaders, "set-cookie": expiredSessionCookie() });
+      return authJson({ ok: true }, 200, { ...corsHeaders, "set-cookie": expiredSessionCookie(env) });
     } catch (error) {
       console.error("auth_logout_error", error);
       return authJson({ error: "auth_unavailable" }, 503, corsHeaders);

@@ -1,4 +1,5 @@
 import { LaunchError, repoName, resolvePublicRepo, resolveRepository, type LaunchOptions, type ResolvedRepo } from './repo-launch';
+import { publicApiOrigin } from './deployment-environment';
 
 export interface GithubCredentials { access_token: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number }
 interface Connection { credentials: string; expires_at: number; github_user_id: string; github_login: string }
@@ -90,7 +91,7 @@ export async function resolveUserRepository(env: Env, owner: string, repo: strin
 }
 
 export function githubCallbackURL(env: Env) {
-  return `${env.LOCAL_DEV === 'true' ? 'http://localhost:8787' : 'https://api.mainbrella.com'}/github/import/callback`;
+  return `${env.LOCAL_DEV === 'true' ? 'http://localhost:8787' : publicApiOrigin(env)}/github/import/callback`;
 }
 
 export async function suggestedPrivateSetup(env: Env, owner: string, repo: ResolvedRepo, cwd: string): Promise<LaunchOptions> {
@@ -117,62 +118,13 @@ export const pkceChallenge = async (verifier: string) => {
   return btoa(String.fromCharCode(...digest)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 };
 
-export const MAX_IMPORT_PACK_BYTES = 32 * 1024 * 1024;
-const packet = (text: string) => (encoder.encode(text).byteLength + 4).toString(16).padStart(4, '0') + text;
-export function gitFetchBody(commit: string) {
-  if (!/^[a-f0-9]{40}$/.test(commit)) throw new LaunchError('invalid_request', 400);
-  return packet(`want ${commit} side-band-64k ofs-delta no-progress\n`) + packet('deepen 1\n') + '0000' + packet('done\n');
-}
+export { MAX_IMPORT_PACK_BYTES, gitFetchBody, readGitPack } from '../shared/github-git';
+import { downloadGitPack as downloadPack, GitPackError } from '../shared/github-git';
 
-// Only pack bytes cross into the guest. GitHub authorization stays in the Worker.
-// Shallow Git objects preserve the exact base commit for future local commits.
-export async function readGitPack(stream: ReadableStream<Uint8Array> | null): Promise<Uint8Array> {
-  if (!stream) throw new LaunchError('github_unavailable');
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let pending = new Uint8Array(), total = 0, wireBytes = 0, flushed = false;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      wireBytes += value.byteLength;
-      if (wireBytes > MAX_IMPORT_PACK_BYTES + 1024 * 1024) throw new LaunchError('repository_too_large', 413);
-      const joined = new Uint8Array(pending.length + value.length); joined.set(pending); joined.set(value, pending.length);
-      let offset = 0;
-      while (offset + 4 <= joined.length) {
-        const header = new TextDecoder().decode(joined.subarray(offset, offset + 4));
-        if (!/^[0-9a-f]{4}$/.test(header)) throw new LaunchError('github_unavailable');
-        const size = parseInt(header, 16);
-        if (size === 0) { if (total) flushed = true; offset += 4; continue; }
-        if (size < 5 || size > 65520 || flushed) throw new LaunchError('github_unavailable');
-        if (offset + size > joined.length) break;
-        const data = joined.subarray(offset + 4, offset + size);
-        if (data[0] === 1) {
-          total += data.length - 1;
-          if (total > MAX_IMPORT_PACK_BYTES) throw new LaunchError('repository_too_large', 413);
-          chunks.push(data.slice(1));
-        } else if (data[0] === 3 || new TextDecoder().decode(data).startsWith('ERR ')) throw new LaunchError('github_repository_access_required', 400);
-        offset += size;
-      }
-      pending = joined.slice(offset);
-    }
-    if (pending.length || !flushed || total < 32) throw new LaunchError('github_unavailable');
-    const pack = new Uint8Array(total);
-    let offset = 0; for (const chunk of chunks) { pack.set(chunk, offset); offset += chunk.length; }
-    if (new TextDecoder().decode(pack.subarray(0, 4)) !== 'PACK') throw new LaunchError('github_unavailable');
-    return pack;
-  } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
-}
 export async function downloadGitPack(repo: string, commit: string, token: string): Promise<Uint8Array> {
-  if (!repoName.safeParse(repo).success) throw new LaunchError('invalid_request', 400);
-  let response: Response;
-  try {
-    response = await fetch(`https://github.com/${repo}.git/git-upload-pack`, { method: 'POST', redirect: 'manual',
-      signal: AbortSignal.timeout(45_000), headers: { Authorization: `Basic ${btoa(`x-access-token:${token}`)}`,
-        'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result', 'User-Agent': 'Mainbrella-Import' },
-      body: gitFetchBody(commit) });
-  } catch { throw new LaunchError('github_unavailable'); }
-  if ([401, 403, 404].includes(response.status)) throw new LaunchError('github_repository_access_required', 400);
-  if (!response.ok || !response.headers.get('content-type')?.startsWith('application/x-git-upload-pack-result')) throw new LaunchError('github_unavailable');
-  return readGitPack(response.body);
+  try { return await downloadPack(repo, commit, token); }
+  catch (error) {
+    if (error instanceof GitPackError) throw new LaunchError(error.message, error.status, { cause: error });
+    throw error;
+  }
 }

@@ -7,7 +7,7 @@ import { EXECUTION_SIGNALS, EXECUTION_RETENTION_MS, MAX_STDIN_CHUNK_BYTES, valid
 import { readFileBytes } from '../../containers/file-contract.js';
 
 export async function handleExecutionRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

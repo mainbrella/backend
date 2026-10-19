@@ -30,7 +30,7 @@ def prepare(source, destination):
         with tarfile.open(fileobj=io.BytesIO(compressed), mode='r|gz') as archive:
             for member in archive:
                 path = pathlib.PurePosixPath(member.name)
-                if member.name in ('.', './') and member.isdir():
+                if member.name in ('.', '.') and member.isdir():
                     continue
                 if path.is_absolute() or '..' in path.parts or '\\' in member.name or not path.parts:
                     raise ValueError('Unsafe archive path')

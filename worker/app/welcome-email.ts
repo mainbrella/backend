@@ -1,4 +1,5 @@
 import type { AuthUser } from "./auth-core";
+import { emailDeliveryEnabled } from '../lib/deployment-environment';
 
 const WELCOME_TEXT = `💥 Hey there! Thanks for signing up with mainbrella.
 
@@ -15,7 +16,7 @@ Best,
 
 // Call only after this request has created the account, never on sign-in/linking.
 export async function welcomeNewUser(env: Env, user: AuthUser, ctx?: ExecutionContext): Promise<void> {
-  if (!user.email) return;
+  if (!user.email || !emailDeliveryEnabled(env)) return;
   const send = async () => {
     try {
       if (!env.WELCOME_EMAIL) throw new Error("Welcome email binding is unavailable.");

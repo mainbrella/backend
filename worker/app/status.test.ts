@@ -80,6 +80,17 @@ test('scheduled probes persist failures without claiming synthetic provisioning 
   assert.equal(targets.length, 4);
 });
 
+test('staging status probes target staging hosts', async t => {
+  const f = fixture(t);
+  f.env.DEPLOYMENT_ENVIRONMENT = 'staging';
+  const targets: string[] = [];
+  await collectStatus(f.env, (async (url: string | URL | Request) => {
+    targets.push(String(url));
+    return String(url).endsWith('/health') ? Response.json({ ok: true }) : new Response('homepage');
+  }) as typeof fetch, async () => {});
+  assert.deepEqual(targets, ['https://stg.mainbrella.com/', 'https://api-stg.mainbrella.com/health']);
+});
+
 test('history cursors preserve equal timestamps and hide expired evidence before maintenance', async t => {
   const f = fixture(t);
   const checkedAt = new Date(Date.now() - 1000);

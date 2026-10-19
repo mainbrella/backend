@@ -20,7 +20,7 @@ export async function handleVoiceRequest(request: Request, env: Env, ctx?: Execu
   if (url.pathname === '/voice/numbers/search') return handleVoiceNumberSearch(request, env);
   if (url.pathname.startsWith('/voice/twilio/')) return handleTwilioRequest(request,env,ctx);
   if (url.pathname.startsWith('/voice/telnyx/')) return handleTelnyxRequest(request,env,ctx);
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({error:'origin_not_allowed'},403,{});
   if (request.method === 'OPTIONS') return new Response(null,{status:204,headers:cors});
   if (!['GET','POST','PUT'].includes(request.method)) return authJson({error:'method_not_allowed'},405,cors);

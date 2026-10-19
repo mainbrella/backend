@@ -5,7 +5,7 @@ import { previewDatabase } from './lib/preview-test-helpers';
 import { handleProjectGateway, type ProjectGatewayEnv } from './project-gateway';
 import { normalizeProjectHostname } from './lib/project-domains';
 import { validProjectOrigin } from '../containers/project-contract.js';
-import { handleApplicationGateway } from './preview-gateway';
+import { handleApplicationGateway } from './linux-preview-gateway';
 
 const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const revision = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';

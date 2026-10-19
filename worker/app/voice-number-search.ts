@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { boundedPrivateBody } from '../../containers/private-services-contract.js';
+import { boundedBody as boundedPrivateBody } from '../shared/bounded-body.js';
 import { authCorsHeaders, authJson, currentUser } from './auth-core';
 
 export const numberSearchInput = z.object({
@@ -104,7 +104,7 @@ class NumberSearchError extends Error {
 }
 
 export async function handleVoiceNumberSearch(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'GET') return authJson({ error: 'method_not_allowed' }, 405, cors);

@@ -232,7 +232,7 @@ async function verifyDomain(env: Env, id: string, userId: string, row: ProjectDo
   }
 }
 async function handle(request: Request, env: Env, domains: boolean): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), verifying = url.pathname === '/projects/domains/verify';

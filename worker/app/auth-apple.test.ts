@@ -72,11 +72,11 @@ test("Apple identity tokens require a valid signature, app audience, and nonce",
     } as unknown as D1Database;
     const emails: EmailMessageBuilder[] = [];
     const emailBinding = { async send(message: EmailMessageBuilder) { emails.push(message); return { messageId: "apple-welcome" }; } };
-    async function signIn() {
+    async function signIn(identityToken = valid) {
       return handleRequest(new Request("https://api.groupicorn.com/auth/app/apple", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ identity_token: valid, nonce }),
+        body: JSON.stringify({ identity_token: identityToken, nonce }),
       }), { DB: db, WELCOME_EMAIL: emailBinding } as unknown as Env);
     }
     const first = await signIn();
@@ -86,6 +86,22 @@ test("Apple identity tokens require a valid signature, app audience, and nonce",
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 1);
     assert.deepEqual(emails.map(message => message.to), ["person@example.com"]);
     assert.equal(sqlite.prepare("SELECT apple_sub FROM users WHERE id = ?").get(firstTokens.user.id)?.apple_sub, "apple-user-id");
+
+    for (const domain of ["mailnesia.com", "maxxspace.com", "guerrillamailblock.com"]) {
+      const blockedToken = await token({ sub: `blocked-${domain}`, email: `person@${domain}` });
+      const blocked = await signIn(blockedToken);
+      assert.equal(blocked.status, 403);
+      assert.deepEqual(await blocked.json(), { error: "email_domain_blocked" });
+    }
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 1);
+    assert.deepEqual(emails.map(message => message.to), ["person@example.com"]);
+
+    sqlite.prepare("INSERT INTO users (id, email, name, apple_sub) VALUES (?, ?, ?, ?)")
+      .run("existing-blocked-apple", "existing@maxxspace.com", "Existing", "existing-apple-sub");
+    const existingBlocked = await signIn(await token({ sub: "existing-apple-sub", email: "existing@maxxspace.com" }));
+    assert.equal(existingBlocked.status, 200);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 2);
+    assert.deepEqual(emails.map(message => message.to), ["person@example.com"]);
     const me = await handleRequest(new Request("https://api.groupicorn.com/auth/app/me", {
       headers: { Authorization: `Bearer ${firstTokens.access_token}` },
     }), { DB: db, WELCOME_EMAIL: emailBinding } as unknown as Env);

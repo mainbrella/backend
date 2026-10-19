@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
-import { networkPolicySchema } from './openapi-containers';
+import { networkPolicySchema } from '../schemas.ts';
 
 const operator = [{ operatorBearer: [] }];
 const params = z.object({ runId: z.string().uuid() });

@@ -1,6 +1,6 @@
 import { welcomeNewUser } from "./welcome-email";
 import { scrypt, randomBytes, timingSafeEqual } from "node:crypto";
-import { AuthError, type AuthUser } from "./auth-core";
+import { assertSignupEmailAllowed, AuthError, type AuthUser } from "./auth-core";
 
 // OWASP's 16 MiB scrypt setting fits within the Workers memory limit.
 const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 5, maxmem: 32 * 1024 * 1024 };
@@ -13,12 +13,12 @@ function derive(password: string, salt: string): Promise<Buffer> {
   });
 }
 
-async function hashPassword(password: string): Promise<string> {
+export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString("hex");
   return `${HASH_PREFIX}:${salt}:${(await derive(password, salt)).toString("hex")}`;
 }
 
-async function verifyPassword(password: string, hash: string | null): Promise<boolean> {
+export async function verifyPassword(password: string, hash: string | null): Promise<boolean> {
   const parts = hash?.split(":");
   const valid = parts?.length === 6 && parts.slice(0, 4).join(":") === HASH_PREFIX
     && /^[a-f0-9]{32}$/.test(parts[4]) && /^[a-f0-9]{64}$/.test(parts[5]);
@@ -43,6 +43,7 @@ export async function signInOrCreateEmailUser(env: Env, email: unknown, password
     if (!await verifyPassword(password, existing.password_hash)) throw new AuthError("invalid_credentials");
     return { user: existing, created: false };
   }
+  assertSignupEmailAllowed(normalizedEmail);
   if (password.length < 8) throw new AuthError("weak_password", 400);
   const hash = await hashPassword(password);
   const user: AuthUser = {

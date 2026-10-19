@@ -9,14 +9,15 @@ import { catalogSourceHash, validateCatalogImages } from './catalog-images.mjs';
 
 const account = 'a'.repeat(32);
 function fixture(t, { published = false, changed = false, schedule = false, smokeFailure = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'catalog-publish-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const dir of ['scripts', 'containers/catalog', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
-  for (const file of ['publish-catalog-images.mjs', 'catalog-images.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
-  copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
+  const workspace = mkdtempSync(join(tmpdir(), 'catalog-publish-'));
+  const root = join(workspace, 'backend');
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  for (const dir of ['./containers/catalog', 'scripts', 'containers/catalog', 'bin', 'node_modules/wrangler/bin']) mkdirSync(join(root, dir), { recursive: true });
+  for (const file of ['publish-catalog-images.mjs', 'catalog-images.mjs', 'resolve-tool.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, './containers/image-catalog.js'));
   const manifest = { images: {} };
   for (const entry of IMAGE_CATALOG) {
-    writeFileSync(join(root, entry.dockerfile), 'FROM test\n');
+    writeFileSync(join(root, '.', entry.dockerfile), 'FROM test\n');
     manifest.images[entry.key] = { image: `registry.cloudflare.com/${account}/${entry.repository}@sha256:${'b'.repeat(64)}`, dockerfileHash: catalogSourceHash(root, entry) };
   }
   if (changed) writeFileSync(join(root, 'containers/catalog/python.Dockerfile'), 'FROM changed\n');

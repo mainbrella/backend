@@ -128,7 +128,7 @@ test('SDK HTTP lifecycle reaches real API handlers, filesystem and managed subpr
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     f.close(); await rm(directory, { recursive: true, force: true });
   });
-  const module = process.env.MAINBRELLA_SDK_MODULE || pathToFileURL(join(process.cwd(), 'sdk/javascript/index.js')).href;
+  const module = process.env.MAINBRELLA_SDK_MODULE || pathToFileURL(join(process.cwd(), './sdk/javascript/index.js')).href;
   const { Mainbrella } = await import(module);
   const client = new Mainbrella({ apiKey: token, baseUrl, fetch: realFetch });
   assert.equal((await client.capabilities()).execution.stdin, true);
@@ -165,7 +165,7 @@ test('SDK HTTP lifecycle reaches real API handlers, filesystem and managed subpr
   const python = process.env.MAINBRELLA_SDK_PYTHON || 'python3';
   const installed = Boolean(process.env.MAINBRELLA_SDK_PYTHON);
   const child = spawn(python, [...(installed ? ['-I'] : []), 'scripts/sdk-runtime-workflow.py', baseUrl, token, directory],
-    { env: { ...process.env, ...(installed ? {} : { PYTHONPATH: join(process.cwd(), 'sdk/python') }) } });
+    { env: { ...process.env, ...(installed ? {} : { PYTHONPATH: join(process.cwd(), './sdk/python') }) } });
   children.push(child);
   const childTimer = setTimeout(() => child.kill('SIGKILL'), 30_000);
   let output = '', errors = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { errors += chunk; });

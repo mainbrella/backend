@@ -1,3 +1,4 @@
+import { assertBuildStorageWritable } from './build-storage';
 import { putStoredObject, getStoredObject, listStoredObjects, deleteStoredObjects, storageMetered, acquireStorageLock, releaseStorageLock, reserveStorageCommit } from './r2-storage';
 import { BuildError, ownedBuildApp, validateBuildFiles, type BuildFiles, type BuildParams, type BuildTurnRow } from './build-contract';
 import { buildImageBytes, buildImagePath, savedBuildImages, buildImageEntries } from './build-images';
@@ -142,10 +143,10 @@ export async function saveBuildGitVersion(env: Env, params: BuildParams, runtime
       const bytes = await response.arrayBuffer();
       const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
       if (bytes.byteLength !== part.size || hash !== part.sha256) throw new BuildError('build_git_unavailable');
-      await putStoredObject(env, params, part.key, bytes, 'history', { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash });
+      await putStoredObject(env, params, part.key, bytes, 'history', { onlyIf: { etagDoesNotMatch: '*' }, sha256: hash }, () => assertBuildStorageWritable(env, params));
     }
     if (history) await putStoredObject(env, params, bundleKey, JSON.stringify(history), 'history',
-      { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
+      { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } }, () => assertBuildStorageWritable(env, params));
     // Refresh the complete hold after per-object reservations and before accepting
     // the head; other account usage may have consumed funds during the uploads.
     await fundCommit(0);

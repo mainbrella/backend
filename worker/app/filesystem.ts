@@ -15,7 +15,7 @@ const failures: Record<number, Set<string>> = {
 
 export async function handleFilesystemRequest(request: Request, env: Env): Promise<Response> {
   if (new URL(request.url).pathname === '/containers/files/transfer') return handleFileTransferRequest(request, env);
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   const url = new URL(request.url);
   const operation = url.pathname.slice('/containers/files/'.length);

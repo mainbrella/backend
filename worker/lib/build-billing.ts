@@ -1,5 +1,5 @@
 import { BuildError, type BuildParams } from './build-contract';
-import { accountBillingRequest } from './prepaid-billing';
+import { walletRequest as accountBillingRequest } from './wallet-billing.ts';
 import { buildInferenceChargeMicroUsd, buildTokenCostMicroUsd, readBuildTokenUsage } from './build-pricing';
 import { proposeBuildOperation, recordBuildOperation, buildFailure, type OperationRef } from './build-journal';
 

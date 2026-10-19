@@ -206,7 +206,7 @@ async function createImage(request: Request, env: Env, userId: string, cors: Rec
 }
 
 export async function handleImagesRequest(request: Request, env: Env) {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const path = new URL(request.url).pathname;
@@ -265,6 +265,7 @@ async function buildAuthenticated(request: Request, env: Env) {
 
 // Trusted preparation/publishing jobs only; never called from the untrusted build.
 export async function handleImageBuildRequest(request: Request, env: Env) {
+  if (!imageBuildsConfigured(env)) return authJson({ error: 'image_builds_unavailable' }, 503, {});
   try {
     if (!await buildAuthenticated(request, env)) return authJson({ error: 'not_authenticated' }, 401, {});
     const path = new URL(request.url).pathname;

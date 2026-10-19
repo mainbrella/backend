@@ -1,34 +1,35 @@
-import { usageBillingConfigured } from '../lib/usage-billing';
+import { usageBillingConfigured } from '../lib/usage-billing.ts';
 import { prepaidBillingConfigured } from '../lib/prepaid-billing';
 import { entitlementHeaders } from '../../containers/plan-policy.js';
 import { USAGE_PRICING, validSpendLimit } from '../../containers/usage-policy.js';
 import { redeemTrial } from '../lib/trial-coupons';
 import { authCorsHeaders, authJson, currentUser, readJSON, type StringHeaders } from "./auth-core";
-import { planPrices, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
+import { planPrices, stripeKeyAllowed, stripePublishableKeyAllowed, subscriptionPlan, billingSubscription, type Plan, stripeRequest, type BillingEnv, type CheckoutSession } from "../lib/stripe";
 import { resolveBillingState, syncSubscriptionRecord, type BillingRecord, type BillingState } from "../lib/entitlements";
 import { PLAN_DETAILS } from "../../containers/plan-policy.js";
 import { PLAN_ORDER, portalSession, releaseScheduledChange, scheduleDowngrade, scheduledChange, scheduleID } from "../lib/billing-changes";
 import { handleSubscriptionWebhook, type EntitlementChanged } from "./subscription-webhook";
+import { publicWebOrigin } from '../lib/deployment-environment';
 
 function validPlan(value: unknown): value is Plan { return typeof value === "string" && Object.hasOwn(PLAN_DETAILS, value); }
 async function stateResponse(env: BillingEnv, state: BillingState, cors: StringHeaders): Promise<Response> {
   const plan = state.entitlement.plan || subscriptionPlan(state.subscription, env);
   return authJson({ subscription: state.subscription, trial: state.trial || null, plan, active: state.entitlement.active,
     valid_until: state.entitlement.validUntil, pro: state.entitlement.active && (plan === "pro" || plan === "scale"),
-    configured: prepaidBillingConfigured(env) || Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY), ...await scheduledChange(env, state.subscription) }, 200, cors);
+    configured: prepaidBillingConfigured(env) || stripeKeyAllowed(env) && stripePublishableKeyAllowed(env), ...await scheduledChange(env, state.subscription) }, 200, cors);
 }
 
 export async function handleSubscriptionRequest(request: Request, env: BillingEnv, changed?: EntitlementChanged): Promise<Response> {
   const path = new URL(request.url).pathname;
   // Stripe delivers signed requests without a browser origin or login cookie.
   if (path === "/subscription/webhook") return handleSubscriptionWebhook(request, env, changed);
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (path === "/subscription/config" && request.method === "GET") {
     return authJson({ google_client_id: env.GOOGLE_CLIENT_ID, plans: PLAN_DETAILS, usage_pricing: USAGE_PRICING, usage_configured: prepaidBillingConfigured(env) || usageBillingConfigured(env),
       prepaid_configured: prepaidBillingConfigured(env), billing_model: prepaidBillingConfigured(env) ? 'prepaid' : 'legacy',
-      configured: prepaidBillingConfigured(env) || Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY) }, 200, cors);
+      configured: prepaidBillingConfigured(env) || stripeKeyAllowed(env) && stripePublishableKeyAllowed(env) }, 200, cors);
   }
   if (!["/subscription", "/subscription/trial", "/subscription/checkout", "/subscription/complete", "/subscription/portal", "/subscription/change", "/subscription/cancel", "/subscription/resume", "/subscription/usage"].includes(path)) {
     return authJson({ error: "not_found" }, 404, cors);
@@ -62,7 +63,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
     if (['/subscription/checkout', '/subscription/change', '/subscription/portal'].includes(path) && body?.plan === 'usage' && !usageBillingConfigured(env)) return authJson({ error: 'billing_unavailable' }, 503, cors);
     if (path === '/subscription/trial' && body?.plan === 'usage') return authJson({ error: 'invalid_plan' }, 400, cors);
     if (!["/subscription", "/subscription/complete"].includes(path)) {
-      if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
+      if (!stripeKeyAllowed(env) || (path === "/subscription/checkout" && !stripePublishableKeyAllowed(env))) return authJson({ error: "billing_unavailable" }, 503, cors);
       const now = Date.now();
       const token = crypto.randomUUID();
       const acquired = await env.DB.prepare(`INSERT INTO billing_operation_locks (user_id, lock_token, expires_at)
@@ -72,7 +73,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       if (acquired?.lock_token !== token) return authJson({ error: "billing_operation_pending" }, 409, cors);
       lock = { userId: user.id, token };
     }
-    const origin = cors["access-control-allow-origin"] || "https://mainbrella.com";
+    const origin = cors["access-control-allow-origin"] || publicWebOrigin(env);
     const returnUrl = `${origin}/pricing/`;
     let record = await env.DB.prepare("SELECT stripe_customer_id, checkout_session_id FROM pro_billing WHERE user_id = ?")
       .bind(user.id).first<BillingRecord>();
@@ -89,7 +90,7 @@ export async function handleSubscriptionRequest(request: Request, env: BillingEn
       await changed?.(user.id, state.entitlement);
       return stateResponse(env, state, cors);
     }
-    if (!env.STRIPE_SECRET_KEY || (path === "/subscription/checkout" && !env.STRIPE_PUBLISHABLE_KEY)) return authJson({ error: "billing_unavailable" }, 503, cors);
+    if (!stripeKeyAllowed(env) || (path === "/subscription/checkout" && !stripePublishableKeyAllowed(env))) return authJson({ error: "billing_unavailable" }, 503, cors);
     if (path === "/subscription/trial") {
       const state = await resolveBillingState(env, user.id, true);
       if (state.subscription) return authJson({ error: "subscription_exists" }, 409, cors);

@@ -5,7 +5,7 @@ import { validContainerId } from '../../containers/container-account-core.js';
 import { readCommandBody, validCommand } from '../../containers/command-contract.js';
 
 export async function handleCommandRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'POST') return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'POST, OPTIONS' });

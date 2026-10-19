@@ -4,7 +4,7 @@ import { reconcileStorageInvoice, type StorageInvoice } from '../lib/r2-billing'
 import { storageMetered } from '../lib/r2-storage';
 
 export async function handleAdminStorageBillingRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

@@ -117,3 +117,19 @@ test('API key identity requires an explicit valid key, rejects mutations and han
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: 'api_keys_unavailable' });
 });
+
+test('scoped BFF keys share account key listing and revocation without granting Linux or account access', async t => {
+  const { env, sqlite } = await fixture(t);
+  const token = `bff_pk_${'a'.repeat(64)}`;
+  sqlite.prepare('INSERT INTO api_keys(id,user_id,name,token_hash,prefix,created_at) VALUES(?,?,?,?,?,?)')
+    .run('browser-key', USER_ONE, 'BFF browser', await hashToken(token), token.slice(0, 15), new Date().toISOString());
+  const list = await (await handleRequest(request(), env)).json() as any;
+  assert.equal(list.keys[0].scope, 'bff');
+  assert.equal(list.keys[0].id, 'browser-key');
+  assert.equal(await containerUser(env, new Request('https://api.mainbrella.com/containers', { headers: { authorization: `Bearer ${token}`, cookie: `mainbrella_session=${SESSION_ONE}` } })), null);
+  assert.equal((await handleRequest(new Request('https://api.mainbrella.com/api-keys/me', { headers: { authorization: `Bearer ${token}` } }), env)).status, 401);
+  for (let i = 0; i < 20; i++) assert.equal((await handleRequest(request('POST', SESSION_ONE, { name: `account-${i}` }), env)).status, 201);
+  assert.equal((await handleRequest(request('POST', SESSION_ONE, { name: 'extra' }), env)).status, 429);
+  assert.equal((await handleRequest(request('DELETE', SESSION_ONE, undefined, '?id=browser-key'), env)).status, 200);
+  assert.equal(sqlite.prepare("SELECT id FROM api_keys WHERE id='browser-key'").get(), undefined);
+});

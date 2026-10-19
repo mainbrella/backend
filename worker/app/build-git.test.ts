@@ -17,7 +17,7 @@ import { buildImagePath } from '../lib/build-images';
 import { readBuildSource, readBuildText, storeBuildObject } from '../lib/build-storage';
 import { putStoredObject } from '../lib/r2-storage';
 import type { BuildGitBundle } from '../lib/build-git-bundle';
-import { cleanupStorageOrphans } from '../lib/r2-maintenance';
+import { cleanupStorageOrphans } from '../lib/build-maintenance';
 import { pushGithubHistory, rootSnapshotBundle } from '../lib/build-github';
 import { sealGithubBuildCredentials } from '../lib/github-build';
 

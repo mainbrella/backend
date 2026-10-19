@@ -7,7 +7,15 @@
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["./cloudflare-configuration.d.ts", "node"]
+    "types": [
+      "./cloudflare-configuration.d.ts",
+      "node"
+    ],
+    "allowImportingTsExtensions": true
   },
-  "include": ["worker/**/*.ts", "cloudflare-configuration.d.ts", "scripts/deploy-previews-preflight*.ts"]
+  "include": [
+    "worker/**/*.ts",
+    "cloudflare-configuration.d.ts",
+    "scripts/deploy-previews-preflight*.ts"
+  ]
 }

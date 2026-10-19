@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
-import { repoName } from '../lib/repo-launch';
+import { repoName } from '../shared/github-git';
 import { validGithubBranch, validGithubRepositoryCursor } from '../lib/github-build';
 
 const branch = z.string().refine(validGithubBranch, 'Invalid Git branch name.');

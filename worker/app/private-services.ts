@@ -11,7 +11,7 @@ export function privateServicesConfigured(env: Env): boolean {
 }
 
 export async function handlePrivateServicesRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), members = url.pathname === '/private-services/members';

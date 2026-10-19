@@ -1,4 +1,5 @@
-import { boundedPrivateBody } from '../../containers/private-services-contract.js';
+import { boundedBody as boundedPrivateBody } from '../shared/bounded-body.js';
+import { isStaging } from './deployment-environment';
 
 export class DomainError extends Error {
   constructor(message: string, public status = 503, public definitive = false) { super(message); }
@@ -11,7 +12,7 @@ export function domainName(value: unknown): string | null {
     && !name.startsWith('xn--') && DOMAIN_TLDS.includes(name.split('.')[1]) ? name : null;
 }
 export function registrarConfigured(env: Env): boolean {
-  return env.NAMECOM_ENABLED === 'true' && Boolean(env.NAME_DOT_COM_USERNAME && env.NAME_DOT_COM_TOKEN);
+  return !isStaging(env) && env.NAMECOM_ENABLED === 'true' && Boolean(env.NAME_DOT_COM_USERNAME && env.NAME_DOT_COM_TOKEN);
 }
 export function usdCents(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0

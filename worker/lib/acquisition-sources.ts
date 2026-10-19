@@ -1,6 +1,6 @@
 import { machineName, validContainerId } from '../../containers/container-account-core.js';
 import { validPreviewId } from '../../containers/preview-contract.js';
-import { validPreviewGeneration, type PreviewRoute, type PreviewRoutingEnv } from './preview-routing';
+import { validPreviewGeneration, type PreviewRoute, type PreviewRoutingEnv } from '../compute.ts';
 
 type SourceEnv = { DB?: D1Database; ACQUISITION_ENABLED?: string };
 type ContainerObservation = { id: string; createdAt: string; status: string };

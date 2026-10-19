@@ -1,3 +1,4 @@
+import { cleanupStorageOrphans, buildStorageExpiration } from '../vibe-maintenance.ts';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -8,8 +9,8 @@ import { putStoredObject, getStoredObject, deleteStoredObjects, inventoryObject,
 import { notifyStorageRetention, markStorageWarning } from '../lib/r2-retention';
 import { storageReadAccess } from '../lib/r2-access';
 import { checkStorageHealth } from '../lib/r2-health';
-import { cleanupStorageOrphans, expireUnfundedStorage } from '../lib/r2-maintenance';
-import { storeBuildSource, storeBuildObject } from '../lib/build-storage';
+import { expireUnfundedStorage } from '../lib/r2-maintenance';
+import { storeBuildSource, storeBuildObject, assertBuildStorageWritable } from '../lib/build-storage';
 import { handleRequest } from './service-test-helpers';
 import { handleAppDelete } from './auth-app';
 import { hashToken } from './auth-core';
@@ -153,16 +154,31 @@ test('orphan cleanup keeps historical manifests and their files while collecting
     [...f.storage.objects.values()].reduce((sum, bytes) => sum + bytes.length, 0));
 });
 
+test('Email storage uses its own namespace and survives Vibe orphan cleanup', async t => {
+  const f = await fixture(t);
+  const emailOwner = { ...f.owner, product: 'email' };
+  const emailKey = `products/email/${USER_ONE}/${f.owner.appId}/messages/message-one`;
+  await putStoredObject(f.env, emailOwner, emailKey, new Uint8Array([1, 2, 3]), 'assets');
+  await assert.rejects(getStoredObject(f.env, f.owner, emailKey), /storage_owner_mismatch/);
+  await assert.rejects(putStoredObject(f.env, emailOwner, f.key('wrong-product'), new Uint8Array(1), 'assets'), /storage_owner_mismatch/);
+  const orphan = await storeBuildObject(f.env, f.owner, new TextEncoder().encode('orphan'));
+  f.advance(2 * STORAGE_DAY_MS);
+  await cleanupStorageOrphans(f.env);
+  assert.equal(f.storage.objects.has(orphan.$r2), false);
+  assert.equal(f.storage.objects.has(emailKey), true);
+  assert.equal((await getStoredObject(f.env, emailOwner, emailKey))!.size, 3);
+});
+
 test('expired paid retention fences builds, clears references and queues durable physical cleanup', async t => {
   const f = await fixture(t, 'charge'); f.app();
   await inventoryObject(f.env, f.owner, f.key('retained'), 1000000, 'source');
   const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
   state.wallet.usedUnitMs = 500 * 1800000; f.stored.set('containerAccount', state);
   f.sqlite.prepare('UPDATE r2_accounts SET funded_through=?,writes_blocked=1,delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, USER_ONE);
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT user_id FROM build_git_deletions').get()!.user_id, USER_ONE);
   assert.equal(f.sqlite.prepare('SELECT source_json FROM build_apps').get()!.source_json, '{}');
-  await assert.rejects(putStoredObject(f.env, f.owner, f.key('late'), new Uint8Array(1), 'source'), /storage_retention_expired/);
+  await assert.rejects(putStoredObject(f.env, f.owner, f.key('late'), new Uint8Array(1), 'source', undefined, () => assertBuildStorageWritable(f.env, f.owner)), /storage_retention_expired/);
 });
 
 test('storage API is owner-scoped, invoice writes require admin and trusted Origin, and markup is configurable', async t => {
@@ -242,7 +258,7 @@ test('30-day funding is reserved; failed renewal warns once, sends reminders and
   restored.wallet.usedUnitMs = 0; f.stored.set('containerAccount', restored);
   await reserveStorage(f.env, USER_ONE);
   assert.equal(row().writes_blocked, 0); assert.equal(row().delete_after, null); assert.equal(row().warned_at, null);
-  f.advance(40 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env);
+  f.advance(40 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
 });
 
@@ -252,7 +268,7 @@ test('failed warning delivery and billing outages preserve files; recovered deli
   await unfund(f);
   f.env.WELCOME_EMAIL = { async send() { throw new Error('email_unavailable'); } } as unknown as SendEmail;
   await notifyStorageRetention(f.env);
-  f.advance(45 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env);
+  f.advance(45 * STORAGE_DAY_MS); await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
   f.env.WELCOME_EMAIL = { async send() { return {}; } } as unknown as SendEmail;
   await notifyStorageRetention(f.env);
@@ -261,10 +277,10 @@ test('failed warning delivery and billing outages preserve files; recovered deli
   f.advance(31 * STORAGE_DAY_MS);
   const get = f.env.CONTAINER_ACCOUNT.get;
   f.env.CONTAINER_ACCOUNT.get = (() => ({ async fetch() { throw new Error('billing_unavailable'); } })) as any;
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
   f.env.CONTAINER_ACCOUNT.get = get;
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 1);
 });
 
@@ -275,7 +291,7 @@ test('fresh funding before expiration cancels deletion, even if the D1 account s
   f.sqlite.prepare('UPDATE r2_accounts SET delete_after=?,warned_at=? WHERE user_id=?').run(f.now() - 1, f.now() - 31 * STORAGE_DAY_MS, USER_ONE);
   const state = f.stored.get('containerAccount') as { wallet: { usedUnitMs: number } };
   state.wallet.usedUnitMs = 0; f.stored.set('containerAccount', state);
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 0);
   assert.equal(f.sqlite.prepare('SELECT writes_blocked FROM r2_accounts WHERE user_id=?').get(USER_ONE)!.writes_blocked, 0);
 });
@@ -293,7 +309,7 @@ test('expired accounts complete once and sweeps advance beyond the first 20 acco
     const body = await request.json() as any;
     return Response.json({ fundedThrough: null, writesBlocked: true, deletionToken: body.action === 'expire' ? body.token : null });
   } })) as any;
-  await expireUnfundedStorage(f.env); await expireUnfundedStorage(f.env); await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration); await expireUnfundedStorage(f.env, buildStorageExpiration); await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM r2_accounts WHERE expired_at IS NOT NULL').get()!.n, 25);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 25);
 });
@@ -380,10 +396,10 @@ test('lost expiry acknowledgement reconciles the wallet claim without repeating 
     if (!lost) { lost = true; throw new Error('lost_expiration_ack'); }
     return result;
   }) as D1Database['batch'];
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   const row = () => f.sqlite.prepare('SELECT * FROM r2_accounts WHERE user_id=?').get(USER_ONE)!;
   assert.ok(row().expiration_token); assert.equal(row().expired_at, f.now());
-  await expireUnfundedStorage(f.env);
+  await expireUnfundedStorage(f.env, buildStorageExpiration);
   assert.equal(row().expiration_token, null);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM build_git_deletions').get()!.n, 1);
 });

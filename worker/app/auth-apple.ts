@@ -1,5 +1,5 @@
 import { welcomeNewUser } from "./welcome-email";
-import { AuthError, authJson, readJSON, type AuthUser, type StringHeaders } from "./auth-core";
+import { assertSignupEmailAllowed, AuthError, authJson, readJSON, type AuthUser, type StringHeaders } from "./auth-core";
 import { issueAppTokens } from "./auth-app";
 import { absorbAnonymousHerds } from "./auth-anonymous";
 
@@ -110,6 +110,7 @@ export async function handleNativeAppleLogin(request: Request, env: Env, headers
     }
     if (!user) {
       if (!identity.email) return authJson({ error: "email_required" }, 400, headers);
+      assertSignupEmailAllowed(identity.email);
       const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ").slice(0, 120) : "";
       const id = crypto.randomUUID();
       await env.DB.prepare("INSERT INTO users (id, email, name, apple_sub) VALUES (?, ?, ?, ?)")
@@ -125,6 +126,6 @@ export async function handleNativeAppleLogin(request: Request, env: Env, headers
   } catch (error) {
     const status = error instanceof AuthError ? error.status : 500;
     if (status >= 500) console.error("native_apple_login_error", error);
-    return authJson({ error: status === 503 ? "apple_unavailable" : status === 401 ? "invalid_apple_credential" : "auth_unavailable" }, status, headers);
+    return authJson({ error: error instanceof AuthError && error.message === "email_domain_blocked" ? error.message : status === 503 ? "apple_unavailable" : status === 401 ? "invalid_apple_credential" : "auth_unavailable" }, status, headers);
   }
 }

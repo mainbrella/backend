@@ -2,6 +2,10 @@ import { BUILD_MAX_FILES, BuildError, type BuildFiles } from './build-contract';
 import { putStoredObject, getStoredObject, type StoragePurpose } from './r2-storage';
 
 export type BuildStorageOwner = { userId: string; appId: string };
+export async function assertBuildStorageWritable(env: Env, owner: BuildStorageOwner) {
+  const deletion = await env.DB.prepare('SELECT app_id FROM build_git_deletions WHERE app_id=?').bind(owner.appId).first();
+  if (deletion) throw new Error('storage_retention_expired');
+}
 export type BuildObjectRef = { $r2: string; size: number; sha256: string };
 export type BuildStoredFile = BuildObjectRef & { path: string; type: 'text' | 'image' };
 export type BuildFileInfo = { path: string; size: number; type: 'text' | 'image' };
@@ -38,7 +42,7 @@ export async function storeBuildObject(env: Env, owner: BuildStorageOwner, bytes
   if (!env.BUCKET) throw new BuildError('build_source_unavailable');
   const ref = await buildObjectReference(owner, bytes), sha256 = ref.sha256;
   try {
-    await putStoredObject(env, owner, ref.$r2, bytes, purpose, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } });
+    await putStoredObject(env, owner, ref.$r2, bytes, purpose, { onlyIf: { etagDoesNotMatch: '*' }, sha256, httpMetadata: { contentType } }, () => assertBuildStorageWritable(env, owner));
   } catch (error) {
     if (error instanceof Error && /storage_(funding_required|limit_exceeded)|insufficient_balance|spend_limit_exceeded/.test(error.message)) throw new BuildError(error.message.includes('storage_limit') ? 'storage_limit_exceeded' : 'storage_funding_required', 402, undefined, { cause: error });
     throw new BuildError('build_source_unavailable', 503, undefined, { cause: error });

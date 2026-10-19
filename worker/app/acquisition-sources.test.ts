@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { acceptPreviewObservation, observeRunningWorkspaces } from '../lib/acquisition-sources';
 import { accountResponse } from '../lib/container-service';
-import { handlePreviewGateway } from '../preview-gateway';
+import { handlePreviewGateway } from '../linux-preview-gateway';
 import { previewDatabase } from '../lib/preview-test-helpers';
 import { previewTokenHash } from '../lib/preview-routing';
 

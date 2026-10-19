@@ -37,7 +37,7 @@ export async function handleGoogleLogin(
     const status = error instanceof AuthError ? error.status : 500;
     if (status >= 500) console.error("google_login_error", error);
     return authJson(
-      { error: status === 500 ? "auth_unavailable" : status === 503 ? "google_unavailable" : status === 409 ? "identity_conflict" : "invalid_google_credential" },
+      { error: error instanceof AuthError && error.message === "email_domain_blocked" ? error.message : status === 500 ? "auth_unavailable" : status === 503 ? "google_unavailable" : status === 409 ? "identity_conflict" : "invalid_google_credential" },
       status,
       corsHeaders,
     );
@@ -82,7 +82,7 @@ export async function handleNativeGoogleLogin(
   } catch (error) {
     const status = error instanceof AuthError ? error.status : 500;
     if (status >= 500) console.error("native_google_login_error", error);
-    return authJson({ error: status === 503 ? "google_unavailable" : status === 409 ? "identity_conflict" : status === 401 ? "invalid_google_credential" : "auth_unavailable" }, status, corsHeaders);
+    return authJson({ error: error instanceof AuthError && error.message === "email_domain_blocked" ? error.message : status === 503 ? "google_unavailable" : status === 409 ? "identity_conflict" : status === 401 ? "invalid_google_credential" : "auth_unavailable" }, status, corsHeaders);
   }
 }
 

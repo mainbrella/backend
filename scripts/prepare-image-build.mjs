@@ -28,7 +28,7 @@ await prepareImageInputs({ source, accountId, write: writeFileSync,
     const asset = manifest.assets.find(asset => asset.name === 'terminal-image.json');
     if (!asset) throw new Error('Missing base image manifest');
     const base = JSON.parse(execFileSync('gh', ['api', `repos/mainbrella/backend/releases/assets/${asset.id}`, '-H', 'Accept: application/octet-stream'], { encoding: 'utf8', timeout: 30_000 }));
-    return validateImage(base, accountId, createHash('sha256').update(readFileSync('containers/Dockerfile')).digest('hex'));
+    return validateImage(base, accountId, createHash('sha256').update(readFileSync('./containers/Dockerfile')).digest('hex'));
   },
 });
 } catch {

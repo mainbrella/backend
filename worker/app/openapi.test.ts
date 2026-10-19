@@ -5,6 +5,20 @@ import { handleRequest } from "./router";
 import { serviceForPath } from "../shared/service-routing";
 
 const endpointMethods: Record<string, string[]> = {
+  '/bff/data/{projectId}/auth/email': ['post'],
+  '/bff/data/{projectId}/auth/session': ['get', 'delete'],
+  '/bff/demo/session': ['post', 'delete'],
+  '/bff/config': ['get'], '/bff/projects': ['get', 'post'], '/bff/projects/{projectId}': ['get', 'patch'],
+  '/bff/projects/{projectId}/provision': ['post'], '/bff/projects/{projectId}/schema': ['get'],
+  '/bff/projects/{projectId}/query': ['post'], '/bff/projects/{projectId}/migrations': ['get', 'post'],
+  '/bff/projects/{projectId}/functions': ['get'], '/bff/projects/{projectId}/functions/{functionName}': ['get', 'put'],
+  '/bff/projects/{projectId}/functions/{functionName}/invoke': ['post'],
+  '/bff/projects/{projectId}/executions': ['get'], '/bff/projects/{projectId}/usage': ['get'],
+  '/bff/projects/{projectId}/api-keys': ['get', 'post'], '/bff/projects/{projectId}/api-keys/{keyId}': ['patch', 'delete'],
+  '/bff/projects/{projectId}/sessions': ['get', 'post'], '/bff/projects/{projectId}/sessions/{sessionId}': ['delete'],
+  '/bff/projects/{projectId}/policies': ['get'], '/bff/projects/{projectId}/policies/{table}': ['put', 'delete'],
+  '/bff/data/{projectId}/tables/{table}': ['get', 'post', 'patch', 'delete'],
+  '/bff/data/{projectId}/functions/{functionName}/invoke': ['post'],
   '/pools': ['get', 'post'], '/pools/{poolId}': ['get', 'patch', 'delete'], '/pools/{poolId}/acquire': ['post'],
   '/secrets': ['get', 'post'], '/secrets/{secretId}': ['put', 'delete'],
   '/containers/stop': ['post'], '/containers/resume': ['post'], '/containers/fork': ['post'],
@@ -96,6 +110,85 @@ async function document() {
   assert.equal(response.status, 200);
   return response.json() as Promise<any>;
 }
+
+test('BFF browser APIs distinguish scoped project keys from owner management and raw SQL', async () => {
+  const { paths, components } = await document();
+  assert.match(paths['/bff/config'].get.responses['200'].content['application/json'].schema.properties.available.description, /local Wrangler D1/);
+  assert.match(paths['/bff/projects/{projectId}/provision'].post.summary, /local Wrangler D1/);
+  const table = paths['/bff/data/{projectId}/tables/{table}'];
+  for (const method of ['get', 'post', 'patch', 'delete']) {
+    assert.deepEqual(table[method].security, [{ apiKeyBearer: [] }, { bffBearer: [] }, { bffApiKey: [] }, { bffApiKey: [], bffUserSession: [] }]);
+    assert.match(table[method].description, /ownership predicate/);
+    assert.match(table[method].description, /bff_us_/);
+    assert.match(table[method].description, /select=public/);
+  }
+  assert.equal(components.securitySchemes.bffApiKey.name, 'apikey');
+  assert.equal(components.securitySchemes.bffBearer.scheme, 'bearer');
+  assert.equal(table.get.parameters.find((parameter: any) => parameter.name === 'limit').schema.maximum, 100);
+  assert.ok(table.post.responses['201'].content['application/json'].schema.properties.data);
+  assert.deepEqual(paths['/bff/projects/{projectId}/api-keys'].post.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  const grant = paths['/bff/projects/{projectId}/api-keys/{keyId}'].patch;
+  assert.deepEqual(grant.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  assert.equal(grant.operationId, 'grantBffApiKeySelect');
+  assert.deepEqual(grant.requestBody.content['application/json'].schema.properties.operation.enum, ['select', 'insert', 'update', 'delete']);
+  assert.equal(grant.requestBody.content['application/json'].schema.additionalProperties, false);
+  assert.deepEqual(grant.requestBody.content['application/json'].schema.required, ['table', 'operation']);
+  assert.ok(grant.responses['200'].content['application/json'].schema.properties.key);
+  assert.equal(grant.responses['200'].content['application/json'].schema.properties.token, undefined);
+  assert.deepEqual(paths['/bff/projects/{projectId}/query'].post.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  const invoke = paths['/bff/data/{projectId}/functions/{functionName}/invoke'].post;
+  assert.deepEqual(invoke.security, [{ apiKeyBearer: [] }, { bffBearer: [] }, { bffApiKey: [] }, { bffApiKey: [], bffUserSession: [] }]);
+  assert.equal(invoke.requestBody.content['application/json'].schema.properties.version, undefined);
+  const policy = paths['/bff/projects/{projectId}/policies/{table}'];
+  assert.deepEqual(policy.put.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  assert.deepEqual(policy.put.requestBody.content['application/json'].schema.properties.select.enum, ['none', 'public']);
+  assert.deepEqual(policy.put.requestBody.content['application/json'].schema.properties.update.enum, ['none', 'own']);
+  assert.equal(paths['/bff/projects'].post.requestBody.content['application/json'].schema.properties.template.default, 'message_board');
+  assert.ok(paths['/bff/projects/{projectId}/sessions'].post.responses['201']);
+  assert.ok(policy.delete.responses['200']);
+  const demo = paths['/bff/demo/session'];
+  assert.deepEqual(demo.post.security, [{ bffApiKey: [] }]);
+  assert.deepEqual(demo.delete.security, [{ bffApiKey: [], bffUserSession: [] }]);
+  assert.deepEqual(demo.post.requestBody.content['application/json'].schema.properties.userId.enum, ['alice', 'bob']);
+  assert.equal(demo.post.requestBody.content['application/json'].schema.additionalProperties, false);
+  assert.match(demo.post.description, /fixed.*example only/);
+  assert.ok(demo.post.responses['201']);
+  const emailAuth = paths['/bff/data/{projectId}/auth/email'].post;
+  assert.deepEqual(emailAuth.security, [{ bffApiKey: [] }]);
+  assert.deepEqual(emailAuth.requestBody.content['application/json'].schema.required, ['email', 'password']);
+  assert.equal(emailAuth.requestBody.content['application/json'].schema.additionalProperties, false);
+  assert.ok(emailAuth.responses['201']);
+  assert.deepEqual(paths['/bff/data/{projectId}/auth/session'].get.security, [{ bffApiKey: [], bffUserSession: [] }]);
+
+});
+
+test('staging documentation is isolated without changing production schema or docs configuration', async () => {
+  const productionEnv = {} as Env;
+  const stagingEnv = { DEPLOYMENT_ENVIRONMENT: 'staging' } as Env;
+  const getDocument = (env: Env) => handleRequest(new Request('https://api-stg.mainbrella.com/openapi.json'), env);
+  const before = await (await getDocument(productionEnv)).text();
+  const stagingFirst = await (await getDocument(stagingEnv)).text();
+  const after = await (await getDocument(productionEnv)).text();
+  const stagingSecond = await (await getDocument(stagingEnv)).text();
+  assert.equal(after, before);
+  assert.equal(stagingSecond, stagingFirst);
+  const production = JSON.parse(before);
+  const staging = JSON.parse(stagingFirst);
+  assert.deepEqual(production.servers, [{ url: 'https://api.mainbrella.com' }, { url: 'http://localhost:8787', description: 'Local development' }]);
+  assert.deepEqual(staging.servers, [{ url: 'https://api-stg.mainbrella.com' }]);
+  assert.equal(production.components.securitySchemes.cookieAuth.name, 'mainbrella_session');
+  assert.equal(staging.components.securitySchemes.cookieAuth.name, 'mainbrella_session_stg');
+  assert.match(staging.components.securitySchemes.apiKeyBearer.description, /stg\.mainbrella\.com\/api-keys\//);
+  assert.doesNotMatch(staging.components.securitySchemes.apiKeyBearer.description, /(?:^|\s)mainbrella\.com\/api-keys\//);
+  assert.deepEqual(staging.paths, production.paths);
+  for (const path of ['/docs', '/redocs']) {
+    const response = await handleRequest(new Request(`https://api-stg.mainbrella.com${path}`), stagingEnv);
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /\/openapi\.json/);
+    assert.doesNotMatch(html, /https:\/\/api\.mainbrella\.com/);
+  }
+});
 
 test('streamed downloads publish the length contract required by SDK consumers', async () => {
   const { paths } = await document();
@@ -719,6 +812,11 @@ test("signup schemas document welcome email behavior and public authentication",
   for (const path of ["/auth/email", "/auth/google", "/auth/app/google", "/auth/app/apple"]) {
     assert.match(paths[path].post.description, /welcome email/);
     assert.match(paths[path].post.description, /delivery failures do not fail signup/);
+    assert.match(paths[path].post.description, /mailnesia\.com, maxxspace\.com, or guerrillamailblock\.com/);
+    assert.match(paths[path].post.description, /403 email_domain_blocked/);
+    assert.match(paths[path].post.description, /existing accounts at those domains can still sign in/);
+    assert.ok(paths[path].post.responses["403"]);
+    assert.match(paths[path].post.responses["403"].description, /email_domain_blocked/);
     assert.deepEqual(paths[path].post.security, []);
   }
 });

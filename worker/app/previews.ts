@@ -29,7 +29,7 @@ const publicGrant = (grant: PreviewGrant): PreviewGrant => ({
 });
 
 export async function handlePreviewRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   try {
@@ -45,7 +45,7 @@ export async function handlePreviewRequest(request: Request, env: Env): Promise<
 // Internal workflows supply a server-resolved owner; no browser credentials are
 // stored in a long-running job. This function is not registered as an API route.
 export async function handleOwnedPreviewRequest(request: Request, env: Env, userId: string): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (!['GET', 'POST', 'DELETE'].includes(request.method)) {

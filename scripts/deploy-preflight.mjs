@@ -3,13 +3,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseEnv } from 'node:util';
+import { resolveTool } from './resolve-tool.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function wrangler(args) {
   try {
     return JSON.parse(execFileSync(process.execPath,
-      [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args],
+      [resolveTool('wrangler', 'bin/wrangler.js'), ...args],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
   } catch {
     // Wrangler errors may include environment/configuration data. Do not echo them.
@@ -102,7 +103,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.env.CLOUDFLARE_ACCOUNT_ID = containers.account_id;
     await preflight({ api, containers, env,
       migrations: readdirSync(join(root, api.d1_databases.find(item => item.binding === 'DB').migrations_dir)).filter(name => name.endsWith('.sql')).sort() });
-    console.log('Account deployment preflight passed. Use npm run deploy for the routing preflight and runtime/gateway/API publication. This does not verify runtime health or consume a start.');
+    console.log('Account deployment preflight passed. Use npm run deploy:all for the routing preflight and runtime/gateway/API publication. This does not verify runtime health or consume a start.');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

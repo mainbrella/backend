@@ -1,15 +1,15 @@
-import { handleVoiceRequest } from './voice';
+import { handleBuildRequest, handleGithubBuildRequest, handleProjectGithubRequest } from '../vibe-routes.ts';
+import { handleVoiceRequest } from './voice.ts';
+import { handleBffRequest } from '../bff/routes.ts';
 import { handleStorageBillingRequest } from './storage-billing';
 import { handleDomainsRequest } from './domains';
 import { handleRepoLaunchRequest } from "./repo-launches";
 import { handleGithubImportRequest } from './github-import';
-import { handleGithubBuildRequest } from './github-build';
-import { handleProjectGithubRequest } from './project-github';
 import { handleAPIKeysRequest } from "./api-keys";
 import { handleProjectsRequest } from "./projects";
-import { handleProjectEndpointRequest, handleProjectDomainsRequest } from './project-hosting';
+import { handleProjectEndpointRequest, handleProjectDomainsRequest } from '../linux-routes.ts';
 import { createOpenAPIApp } from "./openapi";
-import { syncAccountEntitlement } from "../lib/container-service";
+import { syncAccountEntitlement } from "../compute.ts";
 import { jsonResponse } from "../shared/http";
 import { handleAuthRequest } from "./auth";
 import { handleSubscriptionRequest } from "./subscription";
@@ -17,31 +17,30 @@ import { handlePrepaidBillingRequest } from './prepaid-billing';
 import { handleAppleIAPRequest } from './apple-iap';
 import { forwardServiceRequest } from "../shared/service-proxy";
 import { serviceForPath } from "../shared/service-routing";
-import { handleContainersRequest } from "./containers";
-import { handleContainerLifecycleRequest } from './container-lifecycle';
-import { handleContainerStartupRequest } from './container-startup';
-import { handleSecretsRequest } from './secrets';
-import { handlePoolsRequest } from './pools';
-import { handleSSHRequest } from "./ssh";
-import { handleImagesRequest, handleImageBuildRequest } from "./images";
-import { handleTerminalRequest } from "./terminal";
-import { handleCommandRequest } from "./commands";
-import { handleFileRequest } from "./files";
-import { handleFilesystemRequest } from './filesystem';
-import { handleCapabilitiesRequest } from './capabilities';
-import { handleExecutionRequest } from './executions';
-import { handleCodeContextRequest } from './code-contexts';
-import { handlePreviewRequest } from './previews';
+import { handleContainersRequest } from "../linux-routes.ts";
+import { handleContainerLifecycleRequest } from '../linux-routes.ts';
+import { handleContainerStartupRequest } from '../linux-routes.ts';
+import { handleSecretsRequest } from '../linux-routes.ts';
+import { handlePoolsRequest } from '../linux-routes.ts';
+import { handleSSHRequest } from "../linux-routes.ts";
+import { handleImagesRequest, handleImageBuildRequest } from "../linux-routes.ts";
+import { handleTerminalRequest } from "../linux-routes.ts";
+import { handleCommandRequest } from "../linux-routes.ts";
+import { handleFileRequest } from "../linux-routes.ts";
+import { handleFilesystemRequest } from '../linux-routes.ts';
+import { handleCapabilitiesRequest } from '../linux-routes.ts';
+import { handleExecutionRequest } from '../linux-routes.ts';
+import { handleCodeContextRequest } from '../linux-routes.ts';
+import { handlePreviewRequest } from '../linux-routes.ts';
 import { handleStatusRequest } from './status';
-import { handleObservationRequest } from './observations';
-import { handleTelemetryRequest } from './telemetry';
-import { handleWebhookRequest } from './webhooks';
-import { handleActivityRequest } from './activity';
-import { handleWorkspacesRequest } from './workspaces';
-import { handleWorkspaceExportRequest } from './workspace-export';
-import { handlePrivateServicesRequest } from './private-services';
+import { handleObservationRequest } from '../linux-routes.ts';
+import { handleTelemetryRequest } from '../linux-routes.ts';
+import { handleWebhookRequest } from '../linux-routes.ts';
+import { handleActivityRequest } from '../linux-routes.ts';
+import { handleWorkspacesRequest } from '../linux-routes.ts';
+import { handleWorkspaceExportRequest } from '../linux-routes.ts';
+import { handlePrivateServicesRequest } from '../linux-routes.ts';
 import { handleAcquisitionRequest } from './acquisition';
-import { handleBuildRequest } from './build';
 
 async function handleLegacyRequest(
   request: Request,
@@ -49,16 +48,17 @@ async function handleLegacyRequest(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/bff/')) return handleBffRequest(request, env);
   if (url.pathname.startsWith('/voice/')) return handleVoiceRequest(request, env, ctx);
   if (url.pathname === '/pools' || url.pathname.startsWith('/pools/')) return handlePoolsRequest(request, env);
   if (url.pathname === '/secrets' || url.pathname.startsWith('/secrets/')) return handleSecretsRequest(request, env);
   if (url.pathname === '/domains' || url.pathname.startsWith('/domains/')) return handleDomainsRequest(request, env);
   const service = serviceForPath(url.pathname);
   if (service === "admin") {
-    return forwardServiceRequest(request, env.ADMIN_API, "admin_unavailable");
+    return forwardServiceRequest(request, env.ADMIN_API, "admin_unavailable", env);
   }
   if (service === "marketing") {
-    return forwardServiceRequest(request, env.MARKETING_API, "marketing_unavailable");
+    return forwardServiceRequest(request, env.MARKETING_API, "marketing_unavailable", env);
   }
   if (url.pathname.startsWith('/github/import/')) return handleGithubImportRequest(request, env);
   if (url.pathname.startsWith('/github/build/')) return handleGithubBuildRequest(request, env);

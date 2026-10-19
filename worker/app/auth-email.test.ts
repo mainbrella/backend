@@ -87,6 +87,44 @@ Best,
   assert.notEqual(f.sqlite.prepare("SELECT password_hash FROM users WHERE email = ?").get("other@example.com")?.password_hash, stored);
 });
 
+test('staging origins and browser sessions remain separate from production', async t => {
+  const f = fixture(t);
+  const production = await f.login();
+  assert.equal(production.status, 200);
+  const productionCookie = production.headers.get('set-cookie')!.split(';')[0];
+  assert.match(productionCookie, /^mainbrella_session=/);
+  assert.equal((await f.login('person@example.com', 'a strong password', 'https://stg.mainbrella.com')).status, 403);
+
+  f.env.DEPLOYMENT_ENVIRONMENT = 'staging';
+  const request = (path: string, origin: string, cookie?: string, method = 'GET') =>
+    handleRequest(new Request(`https://api-stg.mainbrella.com${path}`, {
+      method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
+    }), f.env);
+  for (const origin of ['https://mainbrella.com', 'https://www.mainbrella.com', 'https://raindrop.mainbrella.com', 'http://localhost:5173']) {
+    assert.equal((await request('/auth/me', origin)).status, 403, origin);
+  }
+  assert.equal((await request('/auth/me', 'https://stg.mainbrella.com', productionCookie)).status, 200);
+  assert.deepEqual(await (await request('/auth/me', 'https://stg.mainbrella.com', productionCookie)).json(), { user: null });
+  const stage = await f.login('person@example.com', 'a strong password', 'https://stg.mainbrella.com');
+  assert.equal(stage.status, 200);
+  assert.equal(stage.headers.get('access-control-allow-origin'), 'https://stg.mainbrella.com');
+  const stageCookie = stage.headers.get('set-cookie')!.split(';')[0];
+  assert.match(stageCookie, /^mainbrella_session_stg=/);
+  await Promise.all(f.background);
+  assert.equal(f.emails.length, 1);
+  const stageMe = await request('/auth/me', 'https://raindrop-stg.mainbrella.com', stageCookie);
+  assert.equal((await stageMe.json() as { user: { email: string } }).user.email, 'person@example.com');
+  const logout = await request('/auth/logout', 'https://stg.mainbrella.com', stageCookie, 'POST');
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.get('set-cookie')!, /^mainbrella_session_stg=; Max-Age=0/);
+  assert.deepEqual(await (await request('/auth/me', 'https://stg.mainbrella.com', stageCookie)).json(), { user: null });
+  f.env.DEPLOYMENT_ENVIRONMENT = 'production';
+  const productionMe = await handleRequest(new Request('https://api.mainbrella.com/auth/me', {
+    headers: { Origin: 'https://mainbrella.com', Cookie: productionCookie },
+  }), f.env);
+  assert.equal((await productionMe.json() as { user: { email: string } }).user.email, 'person@example.com');
+});
+
 test("new accounts require valid email and bounded passwords", async t => {
   const f = fixture(t);
   for (const [email, password, error] of [
@@ -99,6 +137,37 @@ test("new accounts require valid email and bounded passwords", async t => {
     assert.deepEqual(await response.json(), { error });
   }
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 0);
+});
+
+test("blocked disposable email domains cannot create accounts, while existing accounts and lookalikes can sign in", async t => {
+  const f = fixture(t);
+  for (const email of [
+    "  Person@MailNeSiA.com  ",
+    "PERSON@MAXXSPACE.COM",
+    "person@GuerrillaMailBlock.com",
+  ]) {
+    const response = await f.login(email);
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: "email_domain_blocked" });
+  }
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 0);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM sessions").get()?.count, 0);
+  assert.equal(f.emails.length, 0);
+  assert.equal(f.background.length, 0);
+
+  assert.equal((await f.login("person@notmailnesia.com")).status, 200);
+  assert.equal((await f.login("person@mailnesia.com.example.org")).status, 200);
+  await Promise.all(f.background);
+
+  const existing = await f.login("existing@example.com");
+  assert.equal(existing.status, 200);
+  const existingUser = f.sqlite.prepare("SELECT id FROM users WHERE email = ?").get("existing@example.com");
+  f.sqlite.prepare("UPDATE users SET email = ? WHERE id = ?").run("existing@maxxspace.com", existingUser!.id as string);
+  const returning = await f.login(" Existing@MaxxSpace.com ");
+  assert.equal(returning.status, 200);
+  assert.deepEqual(await returning.json(), { user: { ...((await existing.json()) as { user: object }).user, email: "existing@maxxspace.com" }, created: false });
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 3);
+  assert.equal(f.emails.length, 3);
 });
 
 test("provider accounts cannot be claimed with a password and password accounts do not auto-link to Google", async t => {
@@ -149,6 +218,29 @@ test("Google creation sends one welcome; repeated sign-in and linking do not", a
   f.sqlite.prepare("INSERT INTO users (id, email, name) VALUES (?, ?, ?)").run("linked", "linked@example.com", "Linked");
   assert.equal((await findOrCreateGoogleUser(f.env, { ...identity, googleSub: "linked-sub", email: "linked@example.com" })).created, false);
   assert.deepEqual(f.emails.map(message => message.to), ["google@example.com"]);
+});
+
+test("Google rejects new accounts at blocked domains but preserves existing identities", async t => {
+  const f = fixture(t);
+  for (const domain of ["mailnesia.com", "maxxspace.com", "guerrillamailblock.com"]) {
+    await assert.rejects(findOrCreateGoogleUser(f.env, {
+      googleSub: `blocked-${domain}`, email: `person@${domain}`, name: "Person",
+    }), { status: 403, message: "email_domain_blocked" });
+  }
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()?.count, 0);
+  assert.equal(f.emails.length, 0);
+
+  f.sqlite.prepare("INSERT INTO users (id, email, name, google_sub) VALUES (?, ?, ?, ?)")
+    .run("existing-blocked-google", "person@mailnesia.com", "Person", "known-sub");
+  const existing = await findOrCreateGoogleUser(f.env, {
+    googleSub: "known-sub", email: "person@mailnesia.com", name: "Person",
+  });
+  assert.equal(existing.created, false);
+  assert.equal(existing.user.id, "existing-blocked-google");
+  assert.equal((await findOrCreateGoogleUser(f.env, {
+    googleSub: "lookalike-sub", email: "person@mailnesia.com.example.org", name: "Person",
+  })).created, true);
+  assert.deepEqual(f.emails.map(message => message.to), ["person@mailnesia.com.example.org"]);
 });
 
 test("signup completes before background delivery and email failure does not fail authentication", async t => {

@@ -5,8 +5,8 @@ export const storagePricingSchema = z.object({
   mode: z.enum(['off', 'meter', 'charge']), markupBps: z.number(), maxBytes: z.number(), chargeFrom: z.number().nullable(),
   storageUsdPerGbMonth: z.literal(0.015), classAUsdPerMillion: z.literal(4.5), classBUsdPerMillion: z.literal(0.36), retentionDays: z.literal(30),
 });
-export const storageRetentionSchema = z.object({ writesBlocked: z.boolean(), deletionAt: z.number().nullable(), notice: z.string().nullable(),
-  warningDeliveredAt: z.number().nullable(), expiredAt: z.number().nullable() }).openapi('StorageRetention');
+import { storageRetentionSchema } from '../shared/storage-retention';
+export { storageRetentionSchema } from '../shared/storage-retention';
 export const storageSummarySchema = z.object({ month: z.string(), maxBytes: z.number(), retention: storageRetentionSchema, pricing: storagePricingSchema, projects: z.array(z.object({ appId: z.string(), exportUrl: z.string(), sourceExportUrl: z.string(), name: z.string().nullable(), storedBytes: z.number(), sourceAssetsBytes: z.number(), historyBytes: z.number(),
   chargedCents: z.number(), estimatedMonthlyCents: z.number(), cloudflareCents: z.number(), markupCents: z.number(), adjustmentCents: z.number(),
   writes: z.number(), reads: z.number(), fundedThrough: z.number().nullable(), writesBlocked: z.boolean() })) }).openapi('StorageBillingSummary');

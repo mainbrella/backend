@@ -1,19 +1,37 @@
 import { authCorsHeaders, authJson, currentUser, hashToken, randomToken, type AuthUser } from "./auth-core";
 
-export async function apiKeyUser(env: Env, token: string): Promise<AuthUser | null> {
+export async function newApiKey(name: string, scope: 'account' | 'bff' = 'account') {
+  const token = `${scope === 'account' ? 'mb_' : 'bff_pk_'}${randomToken()}`;
+  return { token, tokenHash: await hashToken(token), key: {
+    id: crypto.randomUUID(), name, scope, prefix: token.slice(0, scope === 'account' ? 11 : 15),
+    created_at: new Date().toISOString(), last_used_at: null,
+  } };
+}
+
+export async function apiKeyIdentity(env: Env, token: string): Promise<(AuthUser & { key_id: string; prefix: string }) | null> {
   if (!env.DB) return null;
-  const tokenHash = await hashToken(token);
-  const user = await env.DB.prepare(
-    `SELECT users.id, users.email, users.name, users.dob, users.google_sub, users.created_at
+  if (!/^(?:mb_|bff_pk_)[a-f0-9]{64}$/.test(token)) return null;
+  return env.DB.prepare(
+    `SELECT api_keys.id AS key_id,api_keys.prefix,users.id,users.email,users.name,users.dob,users.google_sub,users.created_at
      FROM api_keys JOIN users ON users.id = api_keys.user_id WHERE api_keys.token_hash = ? LIMIT 1`,
-  ).bind(tokenHash).first<AuthUser>();
-  if (user) await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE token_hash = ?")
-    .bind(new Date().toISOString(), tokenHash).run();
-  return user || null;
+  ).bind(await hashToken(token)).first<AuthUser & { key_id: string; prefix: string }>();
+}
+
+export async function recordApiKeyUse(env: Env, id: string) {
+  await env.DB.prepare('UPDATE api_keys SET last_used_at=? WHERE id=?').bind(new Date().toISOString(), id).run();
+}
+
+export async function apiKeyUser(env: Env, token: string): Promise<AuthUser | null> {
+  const identity = await apiKeyIdentity(env, token);
+  // Scoped browser credentials must never become account-wide Linux/BFF access.
+  if (!identity || !identity.prefix.startsWith('mb_')) return null;
+  const { key_id, prefix, ...user } = identity;
+  await recordApiKeyUse(env, key_id);
+  return user;
 }
 
 export async function handleAPIKeysRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);
@@ -33,7 +51,7 @@ export async function handleAPIKeysRequest(request: Request, env: Env): Promise<
     if (identity) return authJson({ accountId: user.id }, 200, cors);
     if (request.method === "GET") {
       const { results } = await env.DB.prepare(
-        "SELECT id, name, prefix, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+        "SELECT id,name,prefix,created_at,last_used_at,CASE WHEN prefix GLOB 'bff_pk_*' THEN 'bff' ELSE 'account' END AS scope FROM api_keys WHERE user_id=? ORDER BY created_at DESC,id DESC",
       ).bind(user.id).all();
       return authJson({ keys: results }, 200, cors);
     }
@@ -46,14 +64,12 @@ export async function handleAPIKeysRequest(request: Request, env: Env): Promise<
       if (!body || typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 80) {
         return authJson({ error: "invalid_request" }, 400, cors);
       }
-      const token = `mb_${randomToken()}`;
-      const key = { id: crypto.randomUUID(), name: body.name.trim(), prefix: token.slice(0, 11),
-        created_at: new Date().toISOString(), last_used_at: null };
+      const { key, token, tokenHash } = await newApiKey(body.name.trim());
       // Atomic limit check also covers concurrent create requests.
       const result = await env.DB.prepare(
         `INSERT INTO api_keys (id, user_id, name, token_hash, prefix, created_at)
-         SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM api_keys WHERE user_id = ?) < 20`,
-      ).bind(key.id, user.id, key.name, await hashToken(token), key.prefix, key.created_at, user.id).run();
+         SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND prefix GLOB 'mb_*') < 20`,
+      ).bind(key.id, user.id, key.name, tokenHash, key.prefix, key.created_at, user.id).run();
       if (!result.meta.changes) return authJson({ error: "api_key_limit" }, 429, cors);
       return authJson({ key, token }, 201, cors);
     }

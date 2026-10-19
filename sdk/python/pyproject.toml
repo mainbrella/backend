@@ -14,8 +14,8 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://mainbrella.com/docs/"
-Repository = "https://github.com/mainbrella/backend"
-Issues = "https://github.com/mainbrella/backend/issues"
+Repository = "https://github.com/mainbrella/canopy"
+Issues = "https://github.com/mainbrella/canopy/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

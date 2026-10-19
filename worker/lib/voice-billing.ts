@@ -1,5 +1,5 @@
-import { accountBillingRequest } from './prepaid-billing';
-import { buildInferenceChargeMicroUsd, buildTokenCostMicroUsd, readBuildTokenUsage } from './build-pricing';
+import { walletRequest as accountBillingRequest } from './wallet-billing.ts';
+import { inferenceChargeMicroUsd, inferenceTokenCostMicroUsd, readInferenceTokenUsage } from './inference-pricing';
 import { callStub, type VoiceCallRow, type VoicePhoneTransport, type VoicePhoneProvider, VOICE_MODELS } from './voice';
 
 // Verified 2026-10-15: https://developers.cloudflare.com/workers-ai/platform/pricing/
@@ -10,11 +10,11 @@ export const STT_WINDOW_MS = 5000;
 export const sttCost = (audioMs: number, model: string = VOICE_MODELS.stt) => Math.ceil(audioMs * (model === '@cf/deepgram/nova-3' ? 9200 : 7700) / 60_000);
 export const ttsCost = (text: string, microUsdPerCharacter = 15) => Array.from(text).length * microUsdPerCharacter;
 export const llmCost = (usage: unknown, model: string = VOICE_MODELS.llm) => {
-  const tokens = readBuildTokenUsage(usage);
+  const tokens = readInferenceTokenUsage(usage);
   if (!tokens) throw new Error('voice_usage_unknown');
-  return buildTokenCostMicroUsd(model, tokens);
+  return inferenceTokenCostMicroUsd(model, tokens);
 };
-export const llmReservation = (messages: Array<{role:string;content:string}>, model: string = VOICE_MODELS.llm) => buildTokenCostMicroUsd(model, {
+export const llmReservation = (messages: Array<{role:string;content:string}>, model: string = VOICE_MODELS.llm) => inferenceTokenCostMicroUsd(model, {
   // UTF-8 bytes bound token count, including a generous chat-template allowance.
   inputTokens: new TextEncoder().encode(messages.map(row=>row.content).join('')).length + messages.length * 64 + 256,
   cachedInputTokens: 0, outputTokens: 256,
@@ -49,7 +49,7 @@ export interface VoiceReceipt {
 type CallOwner = Pick<VoiceCallRow,'id'|'user_id'|'agent_id'|'channel'>;
 export async function reserveVoiceUsage(env: Env, call: CallOwner, model: string, providerMicroUsd: number): Promise<string> {
   const id = `${call.id}:${crypto.randomUUID()}`;
-  const createdAt = Date.now(), reservedMicroUsd = buildInferenceChargeMicroUsd(providerMicroUsd);
+  const createdAt = Date.now(), reservedMicroUsd = inferenceChargeMicroUsd(providerMicroUsd);
   await env.DB.prepare(`INSERT INTO voice_usage (id,user_id,call_id,agent_id,channel,model,reserved_micro_usd,status,created_at)
     VALUES (?,?,?,?,?,?,?,'reserved',?)`).bind(id,call.user_id,call.id,call.agent_id,call.channel,model,reservedMicroUsd,createdAt).run();
   try {
@@ -67,7 +67,7 @@ export async function reserveVoiceUsage(env: Env, call: CallOwner, model: string
 }
 export async function reportVoiceUsage(env: Env, id: string, providerMicroUsd: number, usage: Record<string,unknown>) {
   await env.DB.prepare(`UPDATE voice_usage SET status='reported',cost_micro_usd=?,usage_json=?,reported_at=? WHERE id=? AND status='running'`)
-    .bind(buildInferenceChargeMicroUsd(providerMicroUsd),JSON.stringify({...usage,service:'voice',providerCostMicroUsd:providerMicroUsd,markupPercent:50}),Date.now(),id).run();
+    .bind(inferenceChargeMicroUsd(providerMicroUsd),JSON.stringify({...usage,service:'voice',providerCostMicroUsd:providerMicroUsd,markupPercent:50}),Date.now(),id).run();
   const row = await env.DB.prepare('SELECT * FROM voice_usage WHERE id=?').bind(id).first<VoiceReceipt>();
   if (!row || !['reported','settled'].includes(row.status)) throw new Error('voice_billing_unavailable');
   await settleVoiceReceipt(env,row);

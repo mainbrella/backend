@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { authCorsHeaders, authJson, currentUser, type AuthUser } from './auth-core';
-import { boundedPrivateBody } from '../../containers/private-services-contract.js';
-import { stripeRequest, type BillingEnv } from '../lib/stripe';
+import { boundedBody as boundedPrivateBody } from '../shared/bounded-body.js';
+import { stripeKeyAllowed, stripeRequest, type BillingEnv } from '../lib/stripe';
 import { ensurePrepaidAccount } from '../lib/prepaid-billing';
 import { namecom, DomainError, DOMAIN_TLDS, domainName, registrarConfigured, retailCents, usdCents, nameDomainPath, checkedNameDomain, type NameDomain, type NameRecord } from '../lib/namecom';
-import { apexIps, customDomainsConfigured } from '../lib/project-hosting';
-import { purchasedProjectDomain, disconnectPurchasedDomain } from './project-hosting';
+import { apexIps, customDomainsConfigured } from '../hosting.ts';
+import { purchasedProjectDomain, disconnectPurchasedDomain } from '../linux-routes.ts';
 import { contactSchema, quoteSchema, checkoutSchema, settingsSchema, recordSchema } from './domain-schemas';
 
 export interface DomainOrder {
@@ -40,8 +40,9 @@ async function parseBody<T>(request: Request, schema: z.ZodType<T>): Promise<T> 
   catch { throw new DomainError('invalid_request', 400); }
 }
 function billingReady(env: BillingEnv): boolean {
-  return registrarConfigured(env) && Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY)
-    && (env.LOCAL_DEV !== 'true' || env.STRIPE_SECRET_KEY!.startsWith('sk_test_') && env.STRIPE_PUBLISHABLE_KEY!.startsWith('pk_test_'));
+  return registrarConfigured(env) && stripeKeyAllowed(env) && Boolean(env.STRIPE_PUBLISHABLE_KEY)
+    && (env.LOCAL_DEV !== 'true' || env.STRIPE_SECRET_KEY!.startsWith('sk_test_') && env.STRIPE_PUBLISHABLE_KEY!.startsWith('pk_test_'))
+    && (env.DEPLOYMENT_ENVIRONMENT !== 'staging' || env.STRIPE_PUBLISHABLE_KEY!.startsWith('pk_test_'));
 }
 async function registrationChecks(env: Env, name: string, years: number) {
   const result = await namecom<{ results: SearchResult[] }>(env, '/domains:checkAvailability', 'POST', { domainNames: [name], purchaseType: 'registration' });
@@ -245,7 +246,7 @@ export async function reconcileDomainOrder(env: BillingEnv, id: string): Promise
 }
 
 export async function handleDomainsRequest(request: Request, env: BillingEnv): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'GET' && !request.headers.get('Origin')) return authJson({ error: 'origin_required' }, 403, cors);

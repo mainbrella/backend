@@ -69,8 +69,8 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       if (item.event_type === 'funding_state') revoked.set(fact.fundingId, Math.max(revoked.get(fact.fundingId) ?? 0, fact.revokedCents));
       if (item.event_type === 'refund') refunded.set(fact.fundingId, (refunded.get(fact.fundingId) ?? 0) + fact.amountCents);
     }
-    const checkpointUsed = evidence.filter(r => ['compute', 'inference', 'legacy_usage'].includes(r.event_type))
-      .reduce((sum, r) => sum + (r.event_type === 'inference' ? BigInt(JSON.parse(r.payload).costMicroUsd) * 180n : BigInt(JSON.parse(r.payload).unitMs)), 0n);
+    const checkpointUsed = evidence.filter(r => ['compute', 'usage', 'inference', 'legacy_usage'].includes(r.event_type))
+      .reduce((sum, r) => sum + (['usage', 'inference'].includes(r.event_type) ? BigInt(JSON.parse(r.payload).costMicroUsd) * 180n : BigInt(JSON.parse(r.payload).unitMs)), 0n);
     const storageUsed = evidence.filter(r => ['storage', 'storage_adjustment'].includes(r.event_type)).reduce((sum, r) => sum + BigInt(JSON.parse(r.payload).costNanoUsd), 0n);
     if (storageUsed !== BigInt(d.usedStorageNanoUsd ?? 0)) issues.add(`wallet_storage_usage_mismatch:${userId}`);
     if (checkpointUsed !== BigInt(d.usedUnitMs)) issues.add(`wallet_usage_mismatch:${userId}`);
@@ -88,7 +88,7 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       if (expectedCredit !== refundedCredit) issues.add(`refund_credit_not_reconciled:${funding.fundingId}`);
     }
   }
-  for (const userId of new Set(rows.filter(r => ['funding', 'compute', 'inference', 'storage', 'storage_adjustment'].includes(r.event_type)).map(r => r.user_id))) {
+  for (const userId of new Set(rows.filter(r => ['funding', 'compute', 'usage', 'inference', 'storage', 'storage_adjustment'].includes(r.event_type)).map(r => r.user_id))) {
     if (!checkpoints.has(userId)) issues.add(`wallet_checkpoint_missing:${userId}`);
   }
   // Split source intervals at receipts, revocations, the close boundary and
@@ -138,8 +138,8 @@ export function buildAccountingClose(month: string, rows: LedgerRow[], policy: A
       const revoked = BigInt(d.revokedCents) * UNIT_MS_PER_CENT;
       creditRevoked += max(0n, revoked - lot.revoked); lot.revoked = max(revoked, lot.revoked);
       lot.disputed ||= d.disputed;
-    } else if (['compute', 'inference', 'storage', 'storage_adjustment', 'legacy_usage'].includes(row.event_type)) {
-      let consumed = row.event_type === 'inference' ? BigInt(d.costMicroUsd) * 180n * UNIT_SCALE
+    } else if (['compute', 'usage', 'inference', 'storage', 'storage_adjustment', 'legacy_usage'].includes(row.event_type)) {
+      let consumed = ['usage', 'inference'].includes(row.event_type) ? BigInt(d.costMicroUsd) * 180n * UNIT_SCALE
         : ['storage', 'storage_adjustment'].includes(row.event_type) ? BigInt(d.costNanoUsd) * 18n : BigInt(d.unitMs) * UNIT_SCALE;
       if (row.event_type === 'compute') {
         if (d.unitMsPerCent !== Number(UNIT_MS_PER_CENT / UNIT_SCALE)) issues.add(`unrecognized_compute_rate:${row.event_key}`);

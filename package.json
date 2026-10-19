@@ -15,7 +15,8 @@
     "db:migrate:previews:remote": "wrangler d1 migrations apply PREVIEW_ROUTES --remote --config wrangler.previews.jsonc",
     "generate-types": "wrangler types cloudflare-configuration.d.ts --config wrangler.jsonc --env-file scripts/type-generation.env",
     "type-check": "npm run generate-types && tsc --noEmit",
-    "deploy": "npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers && npm run deploy:previews && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api",
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:all": "npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers && npm run deploy:previews && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api",
     "deploy:bootstrap-activity": "npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers -- --without-activity && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api && npm run deploy:containers && npm run deploy:previews",
     "deploy:preflight": "node scripts/deploy-preflight.mjs",
     "previews:preflight": "tsx scripts/deploy-previews-preflight.ts",
@@ -39,8 +40,8 @@
     "deploy:containers": "node scripts/deploy-containers.mjs",
     "deploy:api": "wrangler deploy --config wrangler.jsonc",
     "deploy:previews": "wrangler deploy --config wrangler.previews.jsonc",
-    "test:containers": "node --test containers/*.test.mjs scripts/*.test.mjs experiments/*.test.mjs",
-    "test:api": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts worker/*.test.ts scripts/*.test.ts",
+    "test:containers": "tsx --test containers/*.test.mjs scripts/*.test.mjs experiments/*.test.mjs",
+    "test:api": "tsx --test worker/app/*.test.ts worker/durable-objects/*.test.ts worker/*.test.ts worker/bff/*.test.ts scripts/*.test.ts",
     "test:projects": "node --test containers/project-ingress.test.mjs && tsx --test worker/app/project-hosting.test.ts worker/app/project-hosting.integration.test.ts worker/project-gateway.test.ts worker/app/projects.test.ts",
     "test:plans": "npm run test:containers && tsx --test worker/app/entitlements.test.ts worker/app/subscription.test.ts worker/app/subscription-webhook.test.ts worker/app/containers.test.ts worker/app/container-entitlements.integration.test.ts worker/app/ssh.test.ts worker/app/terminal.test.ts",
     "check:containers": "node --check containers/user-container.js && node --check containers/user-container-core.js && node --check containers/terminal.js && node --check containers/files.js && node --check containers/filesystem.js && node --check containers/filesystem-contract.js && node --check containers/observations.js && node --check containers/webhooks.js && node --check containers/webhook-contract.js && node --check containers/process-supervisor.js && node --check containers/executions.js && node --check containers/previews.js && node --check containers/preview-contract.js && node --check experiments/runtime-probe-worker.js && node --check experiments/network-probe.js && node --check experiments/network-probe-worker.js && node --check containers/code-contexts.js && node --check containers/code-kernel.js && node --check containers/code-contract.js && node --check containers/file-transfers.js && node --check containers/file-transfer-contract.js",
@@ -58,21 +59,36 @@
     "check:admin": "node scripts/deploy-services-preflight.mjs admin --local && wrangler deploy --dry-run --config wrangler.admin.jsonc --outdir .wrangler/check-admin --metafile && node scripts/check-worker-boundaries.mjs admin .wrangler/check-admin/bundle-meta.json",
     "check:marketing": "node scripts/deploy-services-preflight.mjs marketing --local && wrangler deploy --dry-run --config wrangler.marketing.jsonc --outdir .wrangler/check-marketing --metafile && node scripts/check-worker-boundaries.mjs marketing .wrangler/check-marketing/bundle-meta.json",
     "check:services": "npm run check:admin && npm run check:marketing",
-    "check:api": "wrangler deploy --dry-run --config wrangler.jsonc --outdir .wrangler/check-api --metafile && node scripts/check-worker-boundaries.mjs api .wrangler/check-api/bundle-meta.json"
+    "check:api": "wrangler deploy --dry-run --config wrangler.jsonc --outdir .wrangler/check-api --metafile && node scripts/check-worker-boundaries.mjs api .wrangler/check-api/bundle-meta.json",
+    "api:preflight": "node scripts/deploy-api-preflight.mjs",
+    "test:billing": "node --test containers/usage.test.mjs",
+    "test:bff": "tsx --test worker/bff/*.test.ts",
+    "bff:example:prepare": "node scripts/bff-prepare-public-read.mjs",
+    "stg:plan": "node scripts/staging.mjs plan",
+    "stg:homepage": "node scripts/staging-homepage.mjs",
+    "stg:backend": "node scripts/staging-backend.mjs",
+    "stg:check": "node scripts/staging.mjs check",
+    "stg:provision": "node scripts/staging.mjs provision",
+    "stg:deploy": "node scripts/staging.mjs deploy",
+    "stg:bootstrap": "node scripts/staging.mjs bootstrap",
+    "stg:migrate:api": "node scripts/staging.mjs migrate-api",
+    "stg:migrate:previews": "node scripts/staging.mjs migrate-previews"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
-    "wrangler": "^4.134.0"
+    "wrangler": "^4.134.0",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261006.1-alpha"
   },
   "dependencies": {
     "@apple/app-store-server-library": "3.1.0",
-    "@cloudflare/voice": "^0.5.0",
-    "agents": "^0.28.1",
     "chanfana": "^3.4.0",
     "hono": "^4.13.13",
-    "twilio": "^5.13.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@cloudflare/voice": "^0.5.0",
+    "agents": "^0.28.1",
+    "twilio": "^5.13.1"
   }
 }

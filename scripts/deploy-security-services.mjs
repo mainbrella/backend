@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { resolveTool } from './resolve-tool.mjs';
 
 // Deliberately separate from the normal deploy: private service provisioning
 // does not enable customer access or replace the runtime's published image map.
@@ -27,7 +28,7 @@ const scan = output => {
   for (const value of [settings.relayToken, settings.ackControlToken, settings.encryptionKey]) assert.equal(output.includes(value), false, 'Wrangler output contained a credential');
 };
 async function wrangler(args, input) {
-  const child = spawn(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [resolveTool('wrangler', 'bin/wrangler.js'), ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; });
   child.stdin.end(input === undefined ? undefined : JSON.stringify(input));

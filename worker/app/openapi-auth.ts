@@ -6,6 +6,10 @@ const tokens = z.object({ access_token: z.string(), refresh_token: z.string(),
 const refresh = z.object({ refresh_token: z.string() });
 
 export function registerAuthRoutes(api: OpenAPIApi, handler: LegacyHandler): void {
+  const signupForbidden = jsonResponse(
+    z.object({ error: z.string(), provider: z.string().optional() }),
+    "Origin denied or new account creation rejected for a blocked email domain (email_domain_blocked).",
+  );
   const credentials = {
     google: z.object({ credential: z.string() }),
     email: z.object({ email: z.string(), password: z.string() }),
@@ -15,17 +19,17 @@ export function registerAuthRoutes(api: OpenAPIApi, handler: LegacyHandler): voi
     register(api, "post", `/auth/${provider}`, {
       operationId: `${provider}Login`, tags: ["Authentication"], summary: `Sign in with ${provider} and create a browser session`,
       security: [],
-      ...(provider === "email" ? { description: "Signs in an existing password account or creates an account when the email is unused. New passwords require 8–128 characters. Email is trimmed and lowercased. A welcome email is sent after account creation; delivery failures do not fail signup. No verification email is sent. Existing provider-only accounts must use their provider. Limited to 20 attempts per minute per IP." } : { description: "New accounts receive a welcome email; delivery failures do not fail signup. Existing accounts and provider linking do not send another welcome email." }),
+      ...(provider === "email" ? { description: "Signs in an existing password account or creates an account when the email is unused. New passwords require 8–128 characters. Email is trimmed and lowercased. New accounts using mailnesia.com, maxxspace.com, or guerrillamailblock.com are rejected with 403 email_domain_blocked; existing accounts at those domains can still sign in. A welcome email is sent after account creation; delivery failures do not fail signup. No verification email is sent. Existing provider-only accounts must use their provider. Limited to 20 attempts per minute per IP." } : { description: "New accounts using mailnesia.com, maxxspace.com, or guerrillamailblock.com are rejected with 403 email_domain_blocked; existing accounts at those domains can still sign in. New accounts receive a welcome email; delivery failures do not fail signup. Existing accounts and provider linking do not send another welcome email." }),
       request: requestBody(provider === "email" ? z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128) }) : credentials[provider]),
-      responses: { 200: jsonResponse(z.object({ user: userSchema, created: z.boolean() })), ...errors(400, 401, 403, ...(provider === "email" ? [429] : [409]), 500, 503) },
+      responses: { 200: jsonResponse(z.object({ user: userSchema, created: z.boolean() })), ...errors(400, 401, 403, ...(provider === "email" ? [429] : [409]), 500, 503), 403: signupForbidden },
     }, handler);
   }
   for (const provider of ["google", "email", "apple"] as const) {
     register(api, "post", `/auth/app/${provider}`, {
       operationId: `native${provider[0].toUpperCase()}${provider.slice(1)}Login`, tags: ["Authentication"], summary: `Sign in with ${provider} for a native app`,
       security: [],
-      ...(provider !== "email" ? { description: "New accounts receive a welcome email; delivery failures do not fail signup. Existing accounts and provider linking do not send another welcome email." } : {}),
-      request: requestBody(credentials[provider]), responses: { 200: jsonResponse(tokens), ...errors(400, 401, 403, 409, 500, 503) },
+      ...(provider !== "email" ? { description: "New accounts using mailnesia.com, maxxspace.com, or guerrillamailblock.com are rejected with 403 email_domain_blocked; existing accounts at those domains can still sign in. New accounts receive a welcome email; delivery failures do not fail signup. Existing accounts and provider linking do not send another welcome email." } : {}),
+      request: requestBody(credentials[provider]), responses: { 200: jsonResponse(tokens), ...errors(400, 401, 403, 409, 500, 503), ...(provider !== "email" ? { 403: signupForbidden } : {}) },
     }, handler);
   }
   register(api, "post", "/auth/app/anonymous", {

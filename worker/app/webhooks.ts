@@ -7,7 +7,7 @@ import { validExecutionId } from '../../containers/execution-contract.js';
 import { readWebhookBody, webhookUrl, webhooksConfigured } from '../../containers/webhook-contract.js';
 
 export async function handleWebhookRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), suffix = url.pathname.slice('/containers/webhook'.length);

@@ -7,10 +7,10 @@
   "homepage": "https://mainbrella.com/docs/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mainbrella/backend.git",
-    "directory": "sdk/javascript"
+    "url": "git+https://github.com/mainbrella/canopy.git",
+    "directory": "apps/linux/sdk/javascript"
   },
-  "bugs": "https://github.com/mainbrella/backend/issues",
+  "bugs": "https://github.com/mainbrella/canopy/issues",
   "exports": {
     ".": {
       "types": "./index.d.ts",

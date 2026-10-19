@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "mainbrella-raindrop",
+  "compatibility_date": "2026-09-13",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    {
+      "pattern": "raindrop.mainbrella.com",
+      "custom_domain": true
+    }
+  ]
+}

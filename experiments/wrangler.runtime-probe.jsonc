@@ -1,5 +1,5 @@
 {
-  "$schema": "../node_modules/wrangler/config-schema.json",
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
   "name": "mainbrella-runtime-probe",
   "account_id": "2b7a9be82bb64187230703b024e25157",
   "main": "runtime-probe-worker.js",

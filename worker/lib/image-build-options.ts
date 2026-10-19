@@ -1,5 +1,6 @@
 // Registry pulls happen in the trusted preparation job. Only image bytes cross
 // into the disposable job that executes customer Dockerfiles.
+import { isStaging } from './deployment-environment';
 export type ImageBase = { image: string; username?: string; password?: string };
 const encoder = new TextEncoder();
 const registryReference = /^(?:ghcr\.io|docker\.io)\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$/;
@@ -16,7 +17,7 @@ export function parseImageBase(value: unknown): ImageBase | null {
 }
 
 export const imageRegistriesConfigured = (env: Env) => /^[a-f0-9]{64}$/i.test(env.IMAGE_REGISTRY_ENCRYPTION_KEY ?? '');
-export const imageBuildsConfigured = (env: Env) => Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN
+export const imageBuildsConfigured = (env: Env) => !isStaging(env) && Boolean(env.IMAGE_BUILD_SECRET && env.IMAGE_BUILD_GITHUB_TOKEN
   && /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9_.-]{1,100}$/.test(env.IMAGE_BUILD_GITHUB_REPOSITORY ?? ''));
 
 async function key(env: Env) {

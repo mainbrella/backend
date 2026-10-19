@@ -1,6 +1,6 @@
 import { accountBillingRequest } from './prepaid-billing';
 
-export type StorageOwner = { userId: string; appId: string };
+export type StorageOwner = { userId: string; appId: string; product?: string };
 export type StoragePurpose = 'source' | 'assets' | 'history' | 'diagnostics' | 'platform';
 export const PLATFORM_STORAGE: StorageOwner = { userId: 'mainbrella', appId: 'platform' };
 export const STORAGE_DAY_MS = 86400000;
@@ -23,9 +23,16 @@ export const storageCharging = (env: Env, at = Date.now()) => {
 };
 export const storageRetentionNanoUsd = (bytes: number, markupBps: number) => Math.ceil(bytes * 0.0005 * STORAGE_RETENTION_DAYS * (1 + markupBps / 10000));
 
-function ownedKey(owner: StorageOwner, key: string) {
-  if (owner.userId !== 'mainbrella' && !key.startsWith(`build-git/${owner.userId}/${owner.appId}/`)) throw new Error('storage_owner_mismatch');
+export function storagePrefix(owner: StorageOwner) {
+  if (owner.product === undefined || owner.product === 'vibe') return `build-git/${owner.userId}/${owner.appId}/`;
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(owner.product) || !/^[A-Za-z0-9_-]{1,128}$/.test(owner.userId)
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(owner.appId)) throw new Error('storage_owner_mismatch');
+  return `products/${owner.product}/${owner.userId}/${owner.appId}/`;
 }
+function ownedKey(owner: StorageOwner, key: string) {
+  if (owner.userId !== 'mainbrella' && !key.startsWith(storagePrefix(owner))) throw new Error('storage_owner_mismatch');
+}
+
 async function operation<T>(env: Env, owner: StorageOwner, name: 'put' | 'get' | 'head' | 'list' | 'delete', action: () => Promise<T>): Promise<T> {
   if (!storageMetered(env)) return action();
   if (name !== 'delete') await storageRateLimit(env, 'operations:global', 10000);
@@ -88,14 +95,13 @@ export async function acquireStorageLock(env: Env, appId: string) {
   return token;
 }
 export const releaseStorageLock = (env: Env, appId: string, token: string) => env.DB.prepare('DELETE FROM r2_project_locks WHERE app_id=? AND token=?').bind(appId, token).run();
-export async function putStoredObject(env: Env, owner: StorageOwner, key: string, value: string | ArrayBuffer | Uint8Array<ArrayBuffer>, purpose: StoragePurpose, options?: R2PutOptions) {
+export async function putStoredObject(env: Env, owner: StorageOwner, key: string, value: string | ArrayBuffer | Uint8Array<ArrayBuffer>, purpose: StoragePurpose, options?: R2PutOptions, assertWritable?: () => Promise<void>) {
   if (!storageMetered(env)) return putObject(env, owner, key, value, purpose, options);
   const token = await acquireStorageLock(env, owner.appId);
   try {
     const user = await env.DB.prepare('SELECT id FROM users WHERE id=?').bind(owner.userId).first();
     if (!user && owner.userId !== 'mainbrella') throw new Error('storage_owner_unavailable');
-    const deletion = await env.DB.prepare('SELECT app_id FROM build_git_deletions WHERE app_id=?').bind(owner.appId).first();
-    if (deletion) throw new Error('storage_retention_expired');
+    await assertWritable?.();
     return await putObject(env, owner, key, value, purpose, options);
   } finally { await releaseStorageLock(env, owner.appId, token); }
 }

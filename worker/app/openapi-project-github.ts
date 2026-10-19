@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cookieSecurity, errors, jsonResponse, register, requestBody, type LegacyHandler, type OpenAPIApi } from './openapi-shared';
-import { repoName } from '../lib/repo-launch';
+import { repoName } from '../shared/github-git';
 import { validGithubBranch } from '../lib/github-build';
 import { BUILD_MAX_FILES, BUILD_MAX_FILE_BYTES, BUILD_MAX_SOURCE_BYTES } from '../lib/build-contract';
 

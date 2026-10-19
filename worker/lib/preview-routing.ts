@@ -1,6 +1,7 @@
 import { validPreviewId, validPreviewPort } from '../../containers/preview-contract.js';
 
 export interface PreviewRoutingEnv {
+  DEPLOYMENT_ENVIRONMENT?: 'production' | 'staging';
   ACQUISITION_ENABLED?: string;
   CONTAINER_ACCOUNT?: DurableObjectNamespace<any>;
   LOCAL_DEV?: string;

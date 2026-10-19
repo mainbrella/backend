@@ -1,6 +1,6 @@
 import { authCorsHeaders, authJson } from "../app/auth-core";
 
-export async function forwardServiceRequest(request: Request, service: Fetcher | undefined, error: string): Promise<Response> {
+export async function forwardServiceRequest(request: Request, service: Fetcher | undefined, error: string, env: Env): Promise<Response> {
   if (service) {
     try {
       // Preserve cookies, Origin, method, query, and streaming bodies. The target
@@ -10,7 +10,7 @@ export async function forwardServiceRequest(request: Request, service: Fetcher |
       console.error(error);
     }
   }
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   return authJson({ error }, 503, cors);
 }

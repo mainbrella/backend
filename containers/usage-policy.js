@@ -4,8 +4,7 @@ export const USAGE_PRICING = Object.freeze({
   minimumCents: 500, centsPerComputeUnitHour: 2,
   defaultSpendLimitCents: 500, maxSpendLimitCents: 100000,
 });
-export const validSpendLimit = value => Number.isSafeInteger(value)
-  && value >= USAGE_PRICING.minimumCents && value <= USAGE_PRICING.maxSpendLimitCents;
+export { validSpendLimit } from './wallet-policy.js';
 export const validBillingPeriod = value => Boolean(value && (/^cus_[A-Za-z0-9]+$/.test(value.customerId)
   || (value.kind === 'prepaid' && /^account_[A-Za-z0-9_-]{1,128}$/.test(value.customerId)))
   && (value.kind === 'prepaid' || /^sub_[A-Za-z0-9]+$/.test(value.subscriptionId))

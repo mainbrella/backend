@@ -18,7 +18,7 @@ const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('"', '
 export async function startRegistration({ owner = 'mainbrella', port = 43187, provision = false } = {}) {
   if (!/^[A-Za-z0-9-]+$/.test(owner)) throw new Error('Invalid GitHub organization.');
   const state = randomBytes(32).toString('hex');
-  const root = fileURLToPath(new URL('../', import.meta.url));
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const base = `http://127.0.0.1:${port}`;
   const manifest = importAppManifest(`${base}/callback`);
   let finished = false;

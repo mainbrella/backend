@@ -35,15 +35,15 @@ async function boundedJson(request: Request, limit: number): Promise<unknown> {
   } catch { throw new Error('invalid_json'); }
 }
 
-function cors(request: Request): Record<string, string> | null {
+function cors(request: Request, env: Env): Record<string, string> | null {
   if (!request.headers.get('Origin')) return null;
-  return authCorsHeaders(request);
+  return authCorsHeaders(request, env);
 }
 const normalizedRepo = (repo: string) => repo.toLowerCase();
 const uuid = () => crypto.randomUUID();
 
 export async function handleAcquisitionRequest(request: Request, env: Env): Promise<Response> {
-  const headers = cors(request);
+  const headers = cors(request, env);
   if (headers === null) return authJson({ error: 'origin_required_or_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
   if (env.ACQUISITION_ENABLED !== 'true') return authJson({ error: 'not_found' }, 404, headers);

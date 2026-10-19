@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { previewDatabase } from './lib/preview-test-helpers';
-import gateway, { handlePreviewGateway } from './preview-gateway';
+import gateway, { handlePreviewGateway } from './linux-preview-gateway';
 import { previewTokenHash, previewDomain, previewsConfigured, type PreviewRoutingEnv } from './lib/preview-routing';
 import { validPreviewOrigin } from '../containers/preview-contract.js';
 
@@ -65,6 +65,10 @@ test('gateway redirects only the exact apex without requiring preview bindings',
     assert.equal((await handlePreviewGateway(new Request(url), env)).status, 404, url);
   }
   assert.equal((await handlePreviewGateway(new Request('https://mainbrella.dev/', { headers: { host: 'other.example' } }), env)).status, 404);
+  const staging = { PREVIEW_DOMAIN: 'stg.mainbrella.dev', DEPLOYMENT_ENVIRONMENT: 'staging' as const };
+  const stageResponse = await handlePreviewGateway(new Request('https://stg.mainbrella.dev/docs/?q=1'), staging);
+  assert.equal(stageResponse.status, 308);
+  assert.equal(stageResponse.headers.get('location'), 'https://stg.mainbrella.com/docs/?q=1');
 });
 
 test('gateway requires explicit isolated configuration and exact HTTPS bearer host', async t => {

@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mainbrella-web",
+  "main": "src/site-worker.ts",
+  "compatibility_date": "2026-09-13",
+  "workers_dev": false,
+  "assets": {
+    "binding": "ASSETS",
+    "run_worker_first": ["/bff/demo/boards/*"],
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    {
+      "pattern": "mainbrella.com",
+      "custom_domain": true
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+name: Deploy isolated staging environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Staging operation
+        required: true
+        type: choice
+        options: [bootstrap, deploy, migrate-api, migrate-previews]
+      target:
+        description: Worker to deploy (used by deploy; bootstrap deploys all workers)
+        required: true
+        default: all
+        type: choice
+        options: [all, api, admin, marketing, containers, previews, site, builder, raindrop]
+      source_sha:
+        description: Full commit SHA on a pushed backend repository branch
+        required: true
+        type: string
+      source_branch:
+        description: Pushed backend repository branch containing the selected source commit
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canopy-staging
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: staging
+    env:
+      OPERATION: ${{ inputs.operation }}
+      RELEASE_TARGET: ${{ inputs.target }}
+      RELEASE_SHA: ${{ inputs.source_sha }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      STAGING_DEPLOYS_ENABLED: ${{ vars.STAGING_DEPLOYS_ENABLED }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Require the staging deployment gate and trusted workflow
+        working-directory: .
+        run: |
+          test "$GITHUB_REPOSITORY" = mainbrella/backend
+          test "$GITHUB_WORKFLOW_REF" = mainbrella/backend/.github/workflows/staging.yml@refs/heads/main
+          test "$GITHUB_REF" = refs/heads/main
+          test "$STAGING_DEPLOYS_ENABLED" = true || { echo 'Set STAGING_DEPLOYS_ENABLED=true in the staging environment before publishing.' >&2; exit 1; }
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo 'Select a full source commit SHA.' >&2; exit 1; }
+          git check-ref-format --branch "$SOURCE_BRANCH"
+          case "$OPERATION" in bootstrap|deploy|migrate-api|migrate-previews) ;; *) exit 1 ;; esac
+          case "$RELEASE_TARGET" in all|api|admin|marketing|containers|previews|site|builder|raindrop) ;; *) exit 1 ;; esac
+          if [[ "$OPERATION" == deploy && "$RELEASE_TARGET" == all ]]; then echo 'Deploy requires one target.' >&2; exit 1; fi
+          if [[ "$OPERATION" != deploy && "$RELEASE_TARGET" != all ]]; then echo 'Bootstrap and migrations use target all.' >&2; exit 1; fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: backend
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mainbrella/web
+          path: web
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mainbrella/raindrop
+          path: raindrop
+          persist-credentials: false
+      - name: Require the selected source on the pushed backend repository branch
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch --no-tags origin "$SOURCE_BRANCH"
+          git merge-base --is-ancestor "$RELEASE_SHA" FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            web/package-lock.json
+            raindrop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: npm ci
+        working-directory: web
+      - run: npm ci
+        working-directory: raindrop
+      - run: node --check scripts/staging-config.mjs
+      - name: Run the selected staging operation
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VITE_API_URL: https://api-stg.mainbrella.com
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.STAGING_GOOGLE_CLIENT_ID || vars.VITE_GOOGLE_CLIENT_ID || vars.GOOGLE_CLIENT_ID }}
+          STAGING_GOOGLE_CLIENT_ID: ${{ vars.STAGING_GOOGLE_CLIENT_ID || vars.VITE_GOOGLE_CLIENT_ID || vars.GOOGLE_CLIENT_ID }}
+          VITE_GA_MEASUREMENT_ID: ''
+          STAGING_SECRETS_JSON: ${{ secrets.STAGING_SECRETS_JSON }}
+        run: node scripts/staging-release.mjs "$OPERATION" "$RELEASE_TARGET"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: staging-${{ inputs.operation }}-${{ inputs.target }}-${{ inputs.source_sha }}
+          path: backend/artifacts/staging/
+          if-no-files-found: ignore
+          retention-days: 90

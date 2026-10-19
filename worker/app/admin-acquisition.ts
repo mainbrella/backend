@@ -3,7 +3,7 @@ import { ADMIN_EMAIL } from '../shared/admin';
 import { acquisitionEventTypes } from '../lib/acquisition';
 
 export async function handleAdminAcquisitionRequest(request: Request, env: Env): Promise<Response> {
-  const headers = request.headers.get('Origin') ? authCorsHeaders(request) : null;
+  const headers = request.headers.get('Origin') ? authCorsHeaders(request, env) : null;
   if (headers === null) return authJson({ error: 'origin_required_or_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
   if (env.ACQUISITION_ENABLED !== 'true') return authJson({ error: 'not_found' }, 404, headers);

@@ -4,18 +4,18 @@ import { agentReferenceArchive } from './agent-reference-archive.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== '--out')) throw new Error('Usage: npm run docs:package -- [--out <new directory>]');
 const output = resolve(args[1] || join(root, 'artifacts/agent-reference'));
 await mkdir(dirname(output), { recursive: true });
 await mkdir(output);
-const version = JSON.parse(await readFile(join(root, 'sdk/javascript/package.json'), 'utf8')).version;
+const version = JSON.parse(await readFile(join(root, './sdk/javascript/package.json'), 'utf8')).version;
 const skillDir = join(output, 'mainbrella-containers');
 await mkdir(join(skillDir, 'references'), { recursive: true });
 const sources = {
   'API.md': 'API.md', 'SKILL.md': 'SKILL.md',
-  'sdk/javascript.md': 'sdk/javascript/README.md', 'sdk/python.md': 'sdk/python/README.md',
+  'sdk/javascript.md': './sdk/javascript/README.md', 'sdk/python.md': './sdk/python/README.md',
 };
 const documents = {};
 for (const [name, path] of Object.entries(sources)) documents[name] = await readFile(join(root, path), 'utf8');
@@ -42,7 +42,7 @@ await writeFile(join(output, 'llms-full.txt'), full);
 const index = `# Mainbrella\n\n> Linux sandboxes, agent execution, and application hosting.\n\nGenerated from the canonical API and SDK documentation. Check deployment capabilities and authenticated account limits before using a feature. Source additions may precede deployment and SDK publication.\n\n- [Deployment capabilities](https://api.mainbrella.com/capabilities): Feature flags and limits for this deployment.\n- [OpenAPI](https://api.mainbrella.com/openapi.json): Request, response and authentication schemas.\n- [API reference](https://mainbrella.com/API.md)\n- [Agent setup](https://mainbrella.com/SKILL.md)\n- [Full reference](https://mainbrella.com/llms-full.txt)\n- [Platform availability](https://mainbrella.com/platform/)\n- [Integrations](https://mainbrella.com/integrations/)\n\n${Object.entries(references).filter(([name]) => name !== 'references/index.md').map(([name, content]) => `- [${content.match(/^#+ (.+)$/m)?.[1]}](https://mainbrella.com/${name})`).join('\n')}\n`;
 await writeFile(join(output, 'llms.txt'), index);
 const files = { ...documents, ...references, ...scripts, 'llms-full.txt': full, 'llms.txt': index };
-const manifest = { version, source: 'mainbrella/backend', licenseSha256: createHash('sha256').update(await readFile(join(root, 'LICENSE'))).digest('hex'), files: Object.fromEntries(Object.entries(files).map(([name, value]) =>
+const manifest = { version, source: 'mainbrella/canopy', licenseSha256: createHash('sha256').update(await readFile(join(root, 'LICENSE'))).digest('hex'), files: Object.fromEntries(Object.entries(files).map(([name, value]) =>
   [name, createHash('sha256').update(value).digest('hex')])) };
 await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const archive = join(output, `mainbrella-containers-${version}.tar.gz`);

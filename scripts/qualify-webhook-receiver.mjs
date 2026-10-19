@@ -74,8 +74,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const secrets = parseEnv(await readFile(resolve(options['secret-file']), 'utf8'));
     const request = receiverClient(secrets.QUALIFICATION_RECEIVER_TOKEN);
     const output = resolve(options.output); await mkdir(dirname(output), { recursive: true }); await mkdir(output, { mode: 0o700 });
-    const root = fileURLToPath(new URL('../', import.meta.url));
-    const sources = await Promise.all(['scripts/qualify-webhook-receiver.mjs', 'experiments/webhook-receiver-core.mjs', 'sdk/javascript/index.js'].map(async path =>
+    const root = fileURLToPath(new URL('..', import.meta.url));
+    const sources = await Promise.all(['scripts/qualify-webhook-receiver.mjs', 'experiments/webhook-receiver-core.mjs', './sdk/javascript/index.js'].map(async path =>
       ({ path, sha256: createHash('sha256').update(await readFile(join(root, path))).digest('hex') })));
     const checkpoint = async report => writeFile(join(output, 'receiver-verification.json'), JSON.stringify({ ...report, sources, receiverOrigin: RECEIVER_ORIGIN }, null, 2) + '\n', { mode: 0o600 });
     const report = await qualifyReceiver(request, { checkpoint });

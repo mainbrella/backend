@@ -8,17 +8,18 @@ import { serialize } from 'node:v8';
 import { DatabaseSync } from 'node:sqlite';
 
 async function run(t, { signal, fail = false, migrationFail, allImages = false, portArgs = [], expectedPort = '8787', aiArgs = [], codexFail = false, githubLocal = false, devVars = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const dir of ['scripts', 'containers', 'bin', 'node_modules/.bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
+  const workspace = mkdtempSync(join(tmpdir(), 'mainbrella-dev-'));
+  const root = join(workspace, 'backend');
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  for (const dir of ['./containers/catalog', 'scripts', 'containers', 'bin', 'node_modules/.bin', 'node_modules/wrangler/bin', 'state/v3/do/mainbrella-containers-UserContainer']) mkdirSync(join(root, dir), { recursive: true });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   const localSecrets = { GITHUB_BUILD_CLIENT_ID: 'local-client', GITHUB_BUILD_CLIENT_SECRET: 'local-secret', GITHUB_BUILD_APP_SLUG: 'mainbrella-build', GITHUB_BUILD_ENCRYPTION_KEY: 'a'.repeat(64) };
   if (githubLocal) writeFileSync(join(root, '.github-build-local-secrets.json'), JSON.stringify(localSecrets));
   const existingEnv = '# Preserve existing settings\nSTRIPE_SECRET_KEY="stripe-test-key"\n';
   writeFileSync(join(root, '.env'), existingEnv);
   if (devVars) writeFileSync(join(root, '.dev.vars'), `${existingEnv}GITHUB_BUILD_CLIENT_SECRET="old-local-secret"\n`);
-  copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, 'containers/image-catalog.js'));
-  for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs', 'codex-bridge.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
+  copyFileSync(new URL('../containers/image-catalog.js', import.meta.url), join(root, './containers/image-catalog.js'));
+  for (const file of ['dev.mjs', 'local-proxy-cleanup.mjs', 'codex-bridge.mjs', 'bff-local.mjs', 'resolve-tool.mjs']) copyFileSync(new URL(file, import.meta.url), join(root, 'scripts', file));
   writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'mainbrella-api', routes: [{ pattern: 'api.mainbrella.com' }], ai: { binding: 'AI' },
     vars: { R2_BILLING_MODE: 'charge', R2_CHARGE_FROM: '2026-10-11T00:00:00Z' }, compatibility_flags: ['nodejs_compat', 'global_fetch_strictly_public'] }));
   writeFileSync(join(root, 'wrangler.containers.jsonc'), JSON.stringify({ name: 'mainbrella-containers', containers: [
@@ -61,6 +62,7 @@ ${signal ? "process.on('SIGINT', () => process.exit(0)); process.on('SIGTERM', (
 console.log('fixture-ready');
 ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
 `, { mode: 0o755 });
+  copyFileSync(join(root, 'node_modules/.bin/wrangler'), join(root, 'node_modules/wrangler/bin/wrangler.js'));
   const child = spawn(process.execPath, ['scripts/dev.mjs', ...(allImages ? ['--all-images'] : []), ...aiArgs, ...portArgs, '--persist-to', 'state'], {
     cwd: root, env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, CODEX_PATH: join(root, 'bin', codexFail ? 'missing-codex' : 'codex'), CODEX_FIXTURE_LOG: join(root, 'codex.jsonl'), ...(migrationFail ? { FAIL_LOCAL_MIGRATION: migrationFail } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -99,6 +101,13 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
   assert.equal(apiConfig.vars.PROJECT_HOSTING_ENABLED, 'true');
   assert.equal(apiConfig.vars.PROJECT_DOMAIN_PROVIDER, 'local');
   assert.equal(apiConfig.vars.LOCAL_PREVIEW_PORT, expectedPort);
+  assert.match(apiConfig.vars.BFF_LOCAL_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(apiConfig.vars.BFF_LOCAL_TOKEN, /^[a-f0-9]{64}$/);
+  assert.equal(apiConfig.compatibility_flags.includes('global_fetch_strictly_public'), false);
+  assert.equal(containerConfig.vars.BFF_LOCAL_URL, undefined);
+  assert.equal(containerConfig.vars.BFF_LOCAL_TOKEN, undefined);
+  assert.equal(output.includes(apiConfig.vars.BFF_LOCAL_TOKEN), false);
+  await assert.rejects(fetch(apiConfig.vars.BFF_LOCAL_URL), 'the local BFF service must stop with Wrangler');
   if (githubLocal) {
     for (const [key, value] of Object.entries(localSecrets)) {
       assert.equal(apiConfig.vars[key], undefined);
@@ -133,7 +142,7 @@ ${signal ? '' : `process.exit(${fail ? 7 : 0});`}
   const images = configs[1].containers[0].images;
   assert.deepEqual(Object.keys(images), allImages ? ['terminal', 'python', 'rust', 'go', 'devops'] : ['terminal']);
   if (allImages) {
-    for (const id of ['python', 'rust', 'go', 'devops']) assert.equal(images[id].dockerfile, `./containers/catalog/${id}.Dockerfile`);
+    for (const id of ['python', 'rust', 'go', 'devops']) assert.equal(images[id].dockerfile, `containers/catalog/${id}.Dockerfile`);
   }
   assert.equal(JSON.parse(readFileSync(join(root, 'args.json'))).includes('--all-images'), false);
   assert.equal(JSON.parse(readFileSync(join(root, 'args.json'))).some(arg => arg === '--ai' || arg.startsWith('--ai=')), false);

@@ -1,5 +1,6 @@
 import { BuildError } from './build-contract';
-import { repoName } from './repo-launch';
+import { repoName } from '../shared/github-git';
+import { publicApiOrigin } from './deployment-environment';
 
 export interface GithubBuildCredentials { access_token: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number }
 interface Connection { credentials: string; expires_at: number; github_user_id: string; github_login: string }
@@ -128,7 +129,7 @@ export async function githubBuildRepositories(env: Env, userId: string, cursor =
 export async function exchangeGithubBuildCode(env: Env, values: Record<string, string>) { return exchangeToken(env, values); }
 export async function sealGithubBuildCredentials(env: Env, owner: string, credentials: GithubBuildCredentials) { return sealCredentials(env, owner, credentials); }
 export function githubBuildCallbackURL(env: Env) {
-  return `${env.LOCAL_DEV === 'true' ? 'http://localhost:8787' : 'https://api.mainbrella.com'}/github/build/callback`;
+  return `${env.LOCAL_DEV === 'true' ? 'http://localhost:8787' : publicApiOrigin(env)}/github/build/callback`;
 }
 export const githubBuildPKCEChallenge = async (verifier: string) => {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(verifier)));

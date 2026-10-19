@@ -7,7 +7,7 @@ import { readFileBytes } from '../../containers/file-contract.js';
 
 const iso = (value: string | null) => Boolean(value && value.length <= 32 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value);
 export async function handleObservationRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'GET') return authJson({ error: 'method_not_allowed' }, 405, { ...cors, allow: 'GET, OPTIONS' });

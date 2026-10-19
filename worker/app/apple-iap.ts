@@ -4,7 +4,7 @@ import { APPLE_PRODUCT_ID, appleAccountToken, appleConfigured, appleProceeds, ap
 
 export async function handleAppleIAPRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url), notification = url.pathname === '/billing/apple/notifications';
-  const cors = notification ? {} : authCorsHeaders(request);
+  const cors = notification ? {} : authCorsHeaders(request, env);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS' && !notification) return new Response(null, { status: 204, headers: cors });
   if (!['/billing/apple/config', '/billing/apple/transactions', '/billing/apple/notifications'].includes(url.pathname))

@@ -1,4 +1,4 @@
-import { invoiceAccountUsage, invoiceCanceledUsage } from '../lib/usage-billing';
+import { invoiceAccountUsage, invoiceCanceledUsage } from '../lib/usage-billing.ts';
 import { reconcileDomainOrder } from './domains';
 import { authJson } from "./auth-core";
 import { resolveEntitlement, type Entitlement } from "../lib/entitlements";

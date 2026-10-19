@@ -49,6 +49,22 @@ test('a free promotion creates compute rights with no consideration or liability
   assert.equal(report.taxableAdvancePaymentsByReceiptYear[0].considerationMicroUsd, '0');
 });
 
+test('product usage reconciles fractional Email charges against the same funding and wallet checkpoint', () => {
+  const rows = evidence({ used: 0 });
+  rows.splice(rows.length - 1, 0, row(4, 'usage', received + 1000,
+    { product: 'email', meter: 'send', id: 'message_1', costMicroUsd: 125, evidence: { providerId: 'accepted_1' } }));
+  const checkpoint = rows.at(-1)!;
+  checkpoint.sequence = 6;
+  checkpoint.payload = JSON.stringify({ ...JSON.parse(checkpoint.payload), usedUnitMs: 125 * 180 });
+  const report = buildAccountingClose('2026-12', rows, policy);
+  assert.deepEqual(report.issues, []);
+  assert.equal(report.customerComputeCredits.outstandingCreditCents, 1999.9875);
+  assert.equal(report.customerComputeCredits.consumedUnitMs, '22500');
+  assert.equal(report.deferredRevenue.earnedMicroUsd, '62');
+  checkpoint.payload = JSON.stringify({ ...JSON.parse(checkpoint.payload), usedUnitMs: 0 });
+  assert.ok(buildAccountingClose('2026-12', rows, policy).issues.includes(`wallet_usage_mismatch:${TEST_USER}`));
+});
+
 test('storage nano-USD and negative invoice adjustments reconcile exact wallet credit and deferred revenue', () => {
   const rows = evidence({ used: 0 });
   rows.splice(rows.length - 1, 0,

@@ -1,12 +1,12 @@
 import { authCorsHeaders, authJson, currentUser, readJSON } from './auth-core';
 import { BUILD_MAX_APPS, BuildError } from '../lib/build-contract';
-import { repoName } from '../lib/repo-launch';
+import { repoName } from '../shared/github-git';
 import { githubBuildUserToken, validGithubBranch } from '../lib/github-build';
 import { checkGithubWriteAccess, githubProject, publicGithubProject, migrateGithubProject, cleanupGithubHostedHistory, deleteGithubHostedStorage, githubStorageState } from '../lib/build-github';
 import { storeBuildSource } from '../lib/build-storage';
 
 export async function handleProjectGithubRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const deleting = new URL(request.url).pathname === '/projects/github/storage';

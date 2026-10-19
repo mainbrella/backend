@@ -1,13 +1,13 @@
 import { authCorsHeaders, authJson } from './auth-core';
-import { containerUser } from './container-auth';
-import { handleContainersRequest } from './containers';
-import { handleExecutionRequest } from './executions';
-import { handleContainerStartupRequest } from './container-startup';
-import { ownedImage } from './images';
+import { containerUser } from '../linux-routes.ts';
+import { handleContainersRequest } from '../linux-routes.ts';
+import { handleExecutionRequest } from '../linux-routes.ts';
+import { handleContainerStartupRequest } from '../linux-routes.ts';
+import { ownedImage } from '../linux-routes.ts';
 import { downloadGitPack, githubUserToken, resolveUserRepository, suggestedPrivateSetup } from '../lib/github-import';
 import { MAX_FILE_BYTES } from '../../containers/file-contract.js';
 import { resolveEntitlement } from '../lib/entitlements';
-import { containerError, runningContainer } from '../lib/container-service';
+import { containerError, runningContainer } from '../compute.ts';
 import { validIdempotencyKey } from '../../containers/container-account-core.js';
 import { readCommandBody } from '../../containers/command-contract.js';
 import { validExecutionId } from '../../containers/execution-contract.js';
@@ -202,7 +202,7 @@ async function advance(request: Request, env: Env, owner: string, id: string, di
 
 export async function handleRepoLaunchRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const receivedAt = Date.now();
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

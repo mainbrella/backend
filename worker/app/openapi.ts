@@ -1,48 +1,46 @@
+import { registerBuildRoutes, registerGithubBuildRoutes, registerProjectGithubRoutes } from '../vibe-openapi.ts';
 import { registerStorageBillingRoutes } from './openapi-storage-billing';
 import { registerDomainRoutes } from './openapi-domains';
 import { registerRepoLaunchRoutes } from "./openapi-repo-launches";
 import { registerGithubImportRoutes } from './openapi-github-import';
-import { registerGithubBuildRoutes } from './openapi-github-build';
-import { registerProjectGithubRoutes } from './openapi-project-github';
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { registerAPIKeyRoutes } from "./openapi-api-keys";
 import { registerProjectRoutes } from "./openapi-projects";
-import { registerProjectHostingRoutes } from './openapi-project-hosting';
+import { registerProjectHostingRoutes } from '../linux-openapi.ts';
 import { registerAdminRoutes } from "./openapi-admin";
 import { registerMarketingEmailRoutes } from "./openapi-marketing-email";
 import { registerAuthRoutes } from "./openapi-auth";
-import { registerContainerRoutes } from "./openapi-containers";
-import { registerContainerLifecycleRoutes } from './openapi-container-lifecycle';
-import { registerSecretRoutes } from './openapi-secrets';
-import { registerPoolRoutes } from './openapi-pools';
-import { registerCommandRoutes } from "./openapi-commands";
-import { registerFileRoutes } from "./openapi-files";
-import { registerFilesystemRoutes } from './openapi-filesystem';
-import { registerCapabilityRoutes } from './openapi-capabilities';
-import { registerActivityRoutes } from './openapi-activity';
-import { registerExecutionRoutes } from './openapi-executions';
-import { registerCodeContextRoutes } from './openapi-code-contexts';
-import { registerPreviewRoutes } from './openapi-previews';
+import { registerContainerRoutes } from "../linux-openapi.ts";
+import { registerContainerLifecycleRoutes } from '../linux-openapi.ts';
+import { registerSecretRoutes } from '../linux-openapi.ts';
+import { registerPoolRoutes } from '../linux-openapi.ts';
+import { registerCommandRoutes } from "../linux-openapi.ts";
+import { registerFileRoutes } from "../linux-openapi.ts";
+import { registerFilesystemRoutes } from '../linux-openapi.ts';
+import { registerCapabilityRoutes } from '../linux-openapi.ts';
+import { registerActivityRoutes } from '../linux-openapi.ts';
+import { registerExecutionRoutes } from '../linux-openapi.ts';
+import { registerCodeContextRoutes } from '../linux-openapi.ts';
+import { registerPreviewRoutes } from '../linux-openapi.ts';
 import { registerStatusRoutes } from './openapi-status';
-import { registerObservationRoutes } from './openapi-observations';
-import { registerTelemetryRoutes } from './openapi-telemetry';
-import { registerWebhookRoutes } from './openapi-webhooks';
-import { registerWorkspaceRoutes } from './openapi-workspaces';
-import { registerImageRoutes } from "./openapi-images";
+import { registerObservationRoutes } from '../linux-openapi.ts';
+import { registerTelemetryRoutes } from '../linux-openapi.ts';
+import { registerWebhookRoutes } from '../linux-openapi.ts';
+import { registerWorkspaceRoutes } from '../linux-openapi.ts';
+import { registerImageRoutes } from "../linux-openapi.ts";
 import { registerSubscriptionRoutes } from "./openapi-subscription";
 import { registerPrepaidBillingRoutes } from './openapi-prepaid-billing';
 import { registerAppleIAPRoutes } from './openapi-apple-iap';
 import { registerAccountingRoutes } from './openapi-accounting';
 import { registerOperationsRoutes } from "./openapi-operations";
-import { registerPrivateServiceRoutes } from './openapi-private-services';
+import { registerPrivateServiceRoutes } from '../linux-openapi.ts';
 import { registerAcquisitionRoutes } from './openapi-acquisition';
-import { registerBuildRoutes } from './openapi-build';
 import { forward, type LegacyHandler } from "./openapi-shared";
 import { registerSecurityInfrastructureRoutes } from './openapi-security-infrastructure';
-import { registerVoiceRoutes } from './openapi-voice';
-import { registerVoiceTelnyxRoutes } from './openapi-voice-telnyx';
-import { registerVoiceNumberSearchRoutes } from './openapi-voice-number-search';
+import { registerVoiceRoutes, registerVoiceTelnyxRoutes, registerVoiceNumberSearchRoutes } from '../voice-openapi.ts';
+import { registerBffRoutes } from '../bff/openapi.ts';
+import { isStaging, publicApiOrigin, publicWebOrigin } from '../lib/deployment-environment';
 
 // Independent service documents keep infrastructure routes off the customer API.
 export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: LegacyHandler) {
@@ -59,19 +57,37 @@ export function createSecurityInfrastructureApp(kind: 'relay' | 'ack', handler: 
 
 export function createOpenAPIApp(handler: LegacyHandler) {
   const app = new Hono<{ Bindings: Env }>();
+  // Chanfana owns the static document. Rewrite only the response for a staging
+  // request so production's generated schema and cached registry stay intact.
+  app.use('/openapi.json', async (context, next) => {
+    await next();
+    if (context.req.method !== 'GET' || !isStaging(context.env) || !context.res.ok) return;
+    const schema = await context.res.json() as {
+      servers: { url: string }[];
+      components: { securitySchemes: {
+        cookieAuth: { name: string };
+        apiKeyBearer: { description: string };
+      } };
+    };
+    schema.servers = [{ url: publicApiOrigin(context.env) }];
+    schema.components.securitySchemes.cookieAuth.name = 'mainbrella_session_stg';
+    schema.components.securitySchemes.apiKeyBearer.description = schema.components.securitySchemes.apiKeyBearer.description
+      .replace('mainbrella.com/api-keys/', `${new URL(publicWebOrigin(context.env)).host}/api-keys/`);
+    context.res = new Response(JSON.stringify(schema), { status: context.res.status, headers: context.res.headers });
+  });
   const api = fromHono(app, {
     docs_url: "/docs", redoc_url: "/redocs", openapi_url: "/openapi.json",
     schema: {
       openapi: "3.1.0",
       info: { title: "Mainbrella API", version: "1.0.0", description: "Account, billing, container, image build, and WebSocket API. Admin and marketing endpoints retain this origin and are forwarded to independently deployed Workers." },
       servers: [{ url: "https://api.mainbrella.com" }, { url: "http://localhost:8787", description: "Local development" }],
-      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Secrets", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build", "Voice"].map(name => ({ name })),
+      tags: ["Operations", "Authentication", "API Keys", "Projects", "Domains", "Subscriptions", "Billing", "Containers", "Private Services", "Secrets", "Images", "Internal", "Admin", "Marketing", "Acquisition", "Build", "Voice", "BFF"].map(name => ({ name })),
     },
   });
   const securitySchemes = {
     cookieAuth: { type: "apiKey", in: "cookie", name: "mainbrella_session" },
     sessionBearer: { type: "http", scheme: "bearer", description: "Browser session value; container and image automation only." },
-    apiKeyBearer: { type: "http", scheme: "bearer", description: "API key (mb_ prefix); account identity, container, image and SSH automation. Create at mainbrella.com/api-keys/." },
+    apiKeyBearer: { type: "http", scheme: "bearer", description: "Account API key (mb_ prefix); account identity, container, image, SSH and BFF owner automation. Create at mainbrella.com/api-keys/. Scoped BFF browser keys do not grant account access." },
     nativeBearer: { type: "http", scheme: "bearer", description: "Native app access token; native auth endpoints only." },
     sshGateway: { type: "http", scheme: "bearer", description: "Trusted SSH gateway secret." },
     imageBuild: { type: "http", scheme: "bearer", description: "Trusted image build service secret." },
@@ -91,6 +107,7 @@ export function createOpenAPIApp(handler: LegacyHandler) {
   registerVoiceRoutes(api, handler);
   registerVoiceTelnyxRoutes(api, handler);
   registerVoiceNumberSearchRoutes(api, handler);
+  registerBffRoutes(api, handler);
   registerAcquisitionRoutes(api, handler);
   registerOperationsRoutes(api, handler);
   registerAdminRoutes(api, handler);

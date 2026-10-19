@@ -1,6 +1,7 @@
 import { billingError, checkVoiceBalance, phoneRate, stopUserCalls } from './voice-billing';
 import { z } from 'zod';
 import { speechModelAvailable, validSpeechSelection, voiceLanguage, voiceModel, VOICE_LANGUAGES } from './voice-options';
+import { isStaging } from './deployment-environment';
 
 export const VOICE_MODELS = {
   stt: '@cf/deepgram/flux',
@@ -49,7 +50,7 @@ export function publicCall(row: VoiceCallRow) {
     transcript: JSON.parse(row.transcript_json) as VoiceTranscript };
 }
 export function voiceEnabled(env: Env): boolean {
-  return env.VOICE_ENABLED === 'true' && Boolean(env.AI && env.RECEPTIONIST_CALL);
+  return !isStaging(env) && env.VOICE_ENABLED === 'true' && Boolean(env.AI && env.RECEPTIONIST_CALL);
 }
 export function publicVoiceOrigin(env: Env): string | null {
   try {

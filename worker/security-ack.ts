@@ -3,6 +3,7 @@ import { readFileBytes } from '../containers/file-contract.js';
 import { createSecurityInfrastructureApp } from './app/openapi';
 import { handleSecurityAcknowledgment } from './app/security-ack';
 import { infrastructureError, operatorAuthorized } from './lib/security-infrastructure';
+import { publicApiOrigin } from './lib/deployment-environment';
 
 type State = { token: string; version: number; expiresAt: number; runId: string };
 export class SecurityAcknowledgment extends DurableObject<Env> {
@@ -33,7 +34,7 @@ export class SecurityAcknowledgment extends DurableObject<Env> {
     const authenticated = await operatorAuthorized(request, state.token);
     const internalHeaders = [...request.headers.keys()].some(name => /^(x-egress-|x-mainbrella-)/.test(name));
     const acknowledgment = { fixture: 'rodeo-security', runId, authenticated, version: state.version, internalHeaders };
-    if (action === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://api.mainbrella.com/capabilities' } });
+    if (action === 'redirect') return new Response(null, { status: 302, headers: { Location: `${publicApiOrigin(this.env)}/capabilities` } });
     if (action === 'reflect') return new Response(request.headers.get('Authorization') ?? '');
     if (action === 'reflect-base64') return new Response(btoa(state.token));
     if (action === 'reflect-header') return new Response('ok', { headers: { 'x-reflection': state.token } });

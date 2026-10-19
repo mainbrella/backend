@@ -8,12 +8,13 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveTool } from './resolve-tool.mjs';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { Mainbrella } from '../sdk/javascript/index.js';
 import { machineName } from '../containers/container-account-core.js';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const checksum = value => createHash('sha256').update(value).digest('hex');
 const docker = (args, timeoutMs = 10_000) => execFileSync('docker', args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 1024 * 1024 }).trim();
 const identity = value => ({ id: value.id, createdAt: value.createdAt });
@@ -165,10 +166,15 @@ export async function qualifyLocalStaging({ image, output }) {
     // Remove only hooks installed by this dedicated instance.
     for (const [signal, previous] of priorSignalListeners) for (const handler of process.listeners(signal)) if (!previous.has(handler)) process.off(signal, handler);
     report.bundleHashes = { api: checksum(await readFile(join(work, 'api.mjs'))), runtime: checksum(await readFile(join(work, 'runtime.mjs'))) };
-    report.tooling = Object.fromEntries(await Promise.all(['wrangler', 'miniflare', 'workerd'].map(async name => [name, JSON.parse(await readFile(join(root, 'node_modules', name, 'package.json'), 'utf8')).version])));
-    report.packageLockSha256 = checksum(await readFile(join(root, 'package-lock.json')));
+    report.tooling = Object.fromEntries(await Promise.all(['wrangler', 'miniflare', 'workerd'].map(async name => [name, JSON.parse(await readFile(resolveTool(name, 'package.json'), 'utf8')).version])));
+    let lockfile;
+    for (const path of ['package-lock.json', '../../package-lock.json']) {
+      try { lockfile = await readFile(join(root, path)); break; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    assert.ok(lockfile, 'Cannot find package-lock.json in the backend checkout.');
+    report.packageLockSha256 = checksum(lockfile);
     report.runnerSha256 = checksum(await readFile(fileURLToPath(import.meta.url)));
-    report.hostSdkEntrySha256 = checksum(await readFile(join(root, 'sdk/javascript/index.js')));
+    report.hostSdkEntrySha256 = checksum(await readFile(join(root, './sdk/javascript/index.js')));
     await bounded(mf.ready, 45_000, 'local_staging_ready_timeout', abort.signal);
     namespace = await bounded(mf.getDurableObjectNamespace('USER_CONTAINER', runtimeName), 5000, 'runtime_namespace_timeout', abort.signal);
     gateway = { fetch(address, options = {}) { const desired = new URL(address); assert.ok(desired.hostname.endsWith('.localhost')); assert.equal(desired.port, String(port)); return mf.dispatchFetch(desired.href, { ...options, redirect: 'manual', headers: { ...options.headers, Host: desired.host }, signal: abort.signal }); } };

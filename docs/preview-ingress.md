@@ -194,7 +194,7 @@ DNS/TLS for the redirect. Its preview route is `https://*.mainbrella.dev/*`
 in zone `e6597a41a75e1abb92f4bc5e5758c460`. Local API and gateway configurations
 include the separate routing database binding, matching `PREVIEW_DOMAIN` values
 of `mainbrella.dev` and `PREVIEWS_ENABLED: "true"`. `npm run check:previews` bundles
-the gateway without deploying it. `npm run deploy` publishes the preview
+the gateway without deploying it. `npm run deploy:all` publishes the preview
 gateway after the runtime and before the API. `npm run deploy:previews` remains
 available for a gateway-only publication after its preflight passes.
 
@@ -247,7 +247,7 @@ the routing migration, run `npm run previews:preflight` before publishing the
 gateway or advertising preview support from the API. Repeat it after changing
 either configuration, including the enablement flags. The general
 `deploy:preflight` checks the account database and compatibility predecessor;
-normal `npm run deploy` runs both checks before publishing the runtime, gateway,
+normal `npm run deploy:all` runs both checks before publishing the runtime, gateway,
 and API. Enabled project hosting also requires `002_project_endpoints.sql` and
 verifies its tables and indexes through the same routing preflight.
 

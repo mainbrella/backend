@@ -1,51 +1,20 @@
 import { BuildError } from './build-contract';
+import { inferenceTokenCostMicroUsd, type InferenceTokenUsage } from './inference-pricing';
+export {
+  inferenceTokenPrices as buildTokenPrices,
+  INFERENCE_MARKUP_PERCENT as BUILD_AI_MARKUP_PERCENT,
+  inferenceChargeMicroUsd as buildInferenceChargeMicroUsd,
+  readInferenceTokenUsage as readBuildTokenUsage,
+  type InferenceTokenUsage as BuildTokenUsage,
+} from './inference-pricing';
 
-// Verified 2026-10-10: https://developers.cloudflare.com/workers-ai/platform/pricing/
-// Micro-USD per million tokens. Use the greater of the advertised token rate
-// and the neuron equivalent ($0.011 / 1,000 neurons), so rounding cannot leave
-// us below Cloudflare's bill. Free account-wide allowances are not assumed.
-export const buildTokenPrices: Record<string, { input: number; cached: number; output: number }> = {
-  '@cf/zai-org/glm-5.3-flash': { input: 150_000, cached: 30_000, output: 500_005 },
-  '@cf/zai-org/glm-5.3': { input: 1_400_003, cached: 260_000, output: 4_400_000 },
-  '@cf/zai-org/glm-5.2': { input: 1_400_003, cached: 260_000, output: 4_400_000 },
-  '@cf/zai-org/glm-4.7-flash': { input: 60_500, cached: 60_500, output: 400_400 },
-  '@cf/moonshotai/kimi-k2.5': { input: 600_000, cached: 100_001, output: 3_000_000 },
-  '@cf/qwen/qwen2.5-coder-32b-instruct': { input: 660_000, cached: 660_000, output: 1_000_000 },
-  '@cf/openai/gpt-oss-120b': { input: 350_000, cached: 350_000, output: 750_002 },
-  '@cf/moonshotai/kimi-k2.6': { input: 950_004, cached: 160_000, output: 4_000_000 },
-  '@cf/moonshotai/kimi-k2.7-code': { input: 950_004, cached: 190_003, output: 4_000_000 },
-  '@cf/deepseek-ai/deepseek-v4-flash-0731': { input: 440_000, cached: 14_003, output: 1_320_000 },
-  '@cf/deepseek-ai/deepseek-v4-pro-0813': { input: 1_320_000, cached: 44_000, output: 3_960_000 },
-  '@cf/openai/gpt-oss-20b': { input: 200_002, cached: 200_002, output: 300_003 },
-  '@cf/google/gemma-4-26b-a4b-it': { input: 100_001, cached: 100_001, output: 300_003 },
-  '@cf/qwen/qwen3.8-27b': { input: 450_000, cached: 50_000, output: 3_200_000 },
-  '@cf/qwen/qwen3-30b-a3b-fp8': { input: 51_000, cached: 51_000, output: 335_225 },
-  '@cf/nvidia/nemotron-3-120b-a12b': { input: 500_005, cached: 500_005, output: 1_500_004 },
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast': { input: 293_348, cached: 293_348, output: 2_253_000 },
-  '@cf/meta/llama-4-scout-17b-16e-instruct': { input: 270_000, cached: 270_000, output: 850_003 },
-  '@cf/mistralai/mistral-small-3.1-24b-instruct': { input: 351_000, cached: 351_000, output: 555_368 },
-  '@cf/ibm-granite/granite-4.0-h-micro': { input: 17_000, cached: 17_000, output: 112_000 },
-};
-export type BuildTokenUsage = { inputTokens: number; cachedInputTokens: number; outputTokens: number };
-export const BUILD_AI_MARKUP_PERCENT = 50;
-export const buildInferenceChargeMicroUsd = (providerCostMicroUsd: number) => Math.ceil(providerCostMicroUsd * 1.5);
-const count = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
-
-export function readBuildTokenUsage(value: any): BuildTokenUsage | null {
-  if (!count(value?.prompt_tokens) || !count(value?.completion_tokens)) return null;
-  const cached = value.prompt_tokens_details?.cached_tokens ?? 0;
-  if (!count(cached) || cached > value.prompt_tokens) return null;
-  return { inputTokens: value.prompt_tokens, cachedInputTokens: cached, outputTokens: value.completion_tokens };
-}
-export function buildTokenCostMicroUsd(model: string, usage: BuildTokenUsage): number {
-  const price = buildTokenPrices[model];
-  if (!price) throw new BuildError('build_model_unpriced');
-  if (!count(usage.inputTokens) || !count(usage.cachedInputTokens) || !count(usage.outputTokens)
-    || usage.cachedInputTokens > usage.inputTokens) throw new BuildError('build_billing_reconciliation_required');
-  const total = BigInt(usage.inputTokens - usage.cachedInputTokens) * BigInt(price.input)
-    + BigInt(usage.cachedInputTokens) * BigInt(price.cached) + BigInt(usage.outputTokens) * BigInt(price.output);
-  // Round only to one millionth of a dollar, never to a whole credit/cent.
-  return Number((total + 999_999n) / 1_000_000n);
+export function buildTokenCostMicroUsd(model: string, usage: InferenceTokenUsage): number {
+  try { return inferenceTokenCostMicroUsd(model, usage); }
+  catch (error) {
+    if (error instanceof Error && error.message === 'inference_model_unpriced') throw new BuildError('build_model_unpriced');
+    if (error instanceof Error && error.message === 'inference_usage_invalid') throw new BuildError('build_billing_reconciliation_required');
+    throw error;
+  }
 }
 export const BUILD_IMAGE_WIDTH = 1024;
 export const BUILD_IMAGE_HEIGHT = 1024;

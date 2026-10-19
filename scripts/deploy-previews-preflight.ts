@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveTool } from './resolve-tool.mjs';
 import { previewDomain } from '../worker/lib/preview-routing';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -93,7 +94,7 @@ export function previewConfiguration(api: Config, gateway: Config, containers: C
 
 function wrangler(args: string[]) {
   try {
-    return JSON.parse(execFileSync(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args],
+    return JSON.parse(execFileSync(process.execPath, [resolveTool('wrangler', 'bin/wrangler.js'), ...args],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
   } catch {
     throw new PreviewPreflightError('Cannot read the routing database. Check Wrangler authentication, database existence and applied preview migrations.');

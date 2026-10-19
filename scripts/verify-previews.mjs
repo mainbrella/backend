@@ -9,7 +9,7 @@ import { previewBytes, previewCss, previewHtml } from './preview-app.mjs';
 const same = (a, b) => a.id === b.id && a.createdAt === b.createdAt;
 const requireCheck = value => { if (!value) throw new Error('check_failed'); };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const sources = ['scripts/verify-previews.mjs', 'scripts/preview-app.mjs', 'scripts/sdk-deployed-workflow.mjs', 'sdk/javascript/index.js'];
+const sources = ['scripts/verify-previews.mjs', 'scripts/preview-app.mjs', 'scripts/sdk-deployed-workflow.mjs', './sdk/javascript/index.js'];
 
 export function parsePreviewArgs(args, env = process.env) {
   const options = {};
@@ -258,7 +258,7 @@ export async function verifyPreviews(client, {
 export async function runPreviewVerification(options) {
   await mkdir(dirname(options.output), { recursive: true });
   await mkdir(options.output, { mode: 0o700 }); // Never overwrite a previous recovery checkpoint.
-  const root = fileURLToPath(new URL('../', import.meta.url));
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const verifierSources = await Promise.all(sources.map(async path => ({ path,
     sha256: createHash('sha256').update(await readFile(join(root, path))).digest('hex') })));
   const startedAt = new Date().toISOString();

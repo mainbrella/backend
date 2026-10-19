@@ -20,7 +20,7 @@ export async function startRegistration({ owner = 'mainbrella', port = 43188, pr
   if (!/^[A-Za-z0-9-]+$/.test(owner)) throw new Error('Invalid GitHub organization.');
   if (local && provision) throw new Error('Local registration cannot provision production credentials.');
   const state = randomBytes(32).toString('hex');
-  const root = fileURLToPath(new URL('../', import.meta.url));
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const base = `http://127.0.0.1:${port}`;
   const manifest = buildAppManifest(`${base}/callback`, { local });
   let finished = false;

@@ -1,7 +1,9 @@
 import { welcomeNewUser } from "./welcome-email";
 import { jsonResponse } from "../shared/http";
+import { isStaging } from "../lib/deployment-environment";
 
-const AUTH_COOKIE_NAME = "mainbrella_session";
+const sessionCookieName = (env: Pick<Env, 'DEPLOYMENT_ENVIRONMENT'>) =>
+  isStaging(env) ? 'mainbrella_session_stg' : 'mainbrella_session';
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISSUERS = new Set([
@@ -17,6 +19,15 @@ const AUTH_ORIGINS = new Set([
   "http://127.0.0.1:5173",
   "http://localhost:5174",
   "http://127.0.0.1:5174",
+]);
+const STAGING_AUTH_ORIGINS = new Set([
+  'https://stg.mainbrella.com',
+  'https://raindrop-stg.mainbrella.com',
+]);
+const BLOCKED_SIGNUP_EMAIL_DOMAINS = new Set([
+  "mailnesia.com",
+  "maxxspace.com",
+  "guerrillamailblock.com",
 ]);
 
 export interface AuthUser {
@@ -46,7 +57,14 @@ export class AuthError extends Error {
   }
 }
 
-export function authCorsHeaders(request: Request): StringHeaders | null {
+export function assertSignupEmailAllowed(email: string): void {
+  const domain = email.trim().toLowerCase().split("@").at(-1);
+  if (domain && BLOCKED_SIGNUP_EMAIL_DOMAINS.has(domain)) {
+    throw new AuthError("email_domain_blocked", 403);
+  }
+}
+
+export function authCorsHeaders(request: Request, env: Pick<Env, 'DEPLOYMENT_ENVIRONMENT'>): StringHeaders | null {
   const requestOrigin = request.headers.get("Origin");
   if (!requestOrigin) return {};
 
@@ -57,7 +75,7 @@ export function authCorsHeaders(request: Request): StringHeaders | null {
     return null;
   }
 
-  if (!AUTH_ORIGINS.has(origin)) return null;
+  if (!(isStaging(env) ? STAGING_AUTH_ORIGINS : AUTH_ORIGINS).has(origin)) return null;
 
   return {
     "access-control-allow-origin": origin,
@@ -249,6 +267,8 @@ export async function findOrCreateGoogleUser(
     return { user: existing, created: false };
   }
 
+  assertSignupEmailAllowed(identity.email);
+
   const user: AuthUser = {
     id: crypto.randomUUID(),
     email: identity.email,
@@ -310,12 +330,12 @@ function readCookie(request: Request, name: string): string | null {
   return cookie ? cookie.slice(name.length + 1) : null;
 }
 
-function sessionCookie(token: string): string {
-  return `${AUTH_COOKIE_NAME}=${token}; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/; HttpOnly; SameSite=None; Secure`;
+function sessionCookie(token: string, env: Env): string {
+  return `${sessionCookieName(env)}=${token}; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/; HttpOnly; SameSite=None; Secure`;
 }
 
-export function expiredSessionCookie(): string {
-  return `${AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=None; Secure`;
+export function expiredSessionCookie(env: Pick<Env, 'DEPLOYMENT_ENVIRONMENT'>): string {
+  return `${sessionCookieName(env)}=; Max-Age=0; Path=/; HttpOnly; SameSite=None; Secure`;
 }
 
 export async function createSession(env: Env, userID: string): Promise<string> {
@@ -326,11 +346,11 @@ export async function createSession(env: Env, userID: string): Promise<string> {
   await env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
     .bind(await hashToken(token), userID, expiresAt)
     .run();
-  return sessionCookie(token);
+  return sessionCookie(token, env);
 }
 
 export async function currentUser(env: Env, request: Request): Promise<AuthUser | null> {
-  const token = readCookie(request, AUTH_COOKIE_NAME);
+  const token = readCookie(request, sessionCookieName(env));
   return token ? sessionUser(env, token) : null;
 }
 
@@ -347,7 +367,7 @@ export async function sessionUser(env: Env, token: string): Promise<AuthUser | n
 
 export async function revokeSession(env: Env, request: Request): Promise<void> {
   if (!env.DB) return;
-  const token = readCookie(request, AUTH_COOKIE_NAME);
+  const token = readCookie(request, sessionCookieName(env));
   if (!token) return;
   await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await hashToken(token)).run();
 }

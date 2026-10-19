@@ -5,7 +5,7 @@ import { ledgerWatermark, type LedgerRow } from '../lib/accounting-ledger';
 import type { BillingEnv } from '../lib/stripe';
 
 export async function handleAccountingRequest(request: Request, env: BillingEnv): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), path = url.pathname;

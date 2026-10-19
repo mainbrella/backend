@@ -1,3 +1,13 @@
+import { isStaging } from './deployment-environment';
+
+export function stripeKeyAllowed(env: BillingEnv): boolean {
+  return Boolean(env.STRIPE_SECRET_KEY && (!isStaging(env) || /^(?:sk|rk)_test_/.test(env.STRIPE_SECRET_KEY)));
+}
+
+export function stripePublishableKeyAllowed(env: BillingEnv): boolean {
+  return Boolean(env.STRIPE_PUBLISHABLE_KEY && (!isStaging(env) || env.STRIPE_PUBLISHABLE_KEY.startsWith('pk_test_')));
+}
+
 export const PRO_PRICE_ID = "price_1UNAWSGSUs8K8zgHXfnoTiJE";
 export const PLAN_PRICES = {
   builder: "price_1UNAovGSUs8K8zgHwUCsCX16",
@@ -56,7 +66,7 @@ export interface CheckoutSession {
 export async function stripeRequest<T>(
   env: BillingEnv, path: string, params?: URLSearchParams, idempotencyKey?: string,
 ): Promise<T> {
-  if (!env.STRIPE_SECRET_KEY) throw new Error("billing_unavailable");
+  if (!stripeKeyAllowed(env)) throw new Error("billing_unavailable");
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
     "Stripe-Version": "2025-04-30.basil",

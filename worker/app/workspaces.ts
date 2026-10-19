@@ -7,7 +7,7 @@ import { readFileBytes } from '../../containers/file-contract.js';
 import { MAX_WORKSPACE_REQUEST_BYTES } from '../../containers/restore-launch.js';
 
 export async function handleWorkspacesRequest(request: Request, env: Env): Promise<Response> {
-  const cors=authCorsHeaders(request);
+  const cors=authCorsHeaders(request, env);
   if(cors===null)return authJson({error:'origin_not_allowed'},403,{});
   if(request.method==='OPTIONS')return new Response(null,{status:204,headers:cors});
   if(!['GET','POST','PATCH','DELETE'].includes(request.method))return authJson({error:'method_not_allowed'},405,{...cors,allow:'GET, POST, PATCH, DELETE, OPTIONS'});

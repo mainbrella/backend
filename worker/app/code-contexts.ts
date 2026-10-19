@@ -6,7 +6,7 @@ import { readCommandBody } from '../../containers/command-contract.js';
 import { validCodeContext, validCodeContextId, validCodeExecution } from '../../containers/code-contract.js';
 
 export async function handleCodeContextRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

@@ -193,7 +193,8 @@ test('real guest group differs from provider PID and kills descendants after a s
   assert.equal(Number(before.slice(before.lastIndexOf(')') + 2).split(' ')[2]), handle.groupId);
   assert.equal(await handle.dispose(), true); assert.equal(f.destroyed, 0);
   for (let n = 0; n < 100; n++) {
-    const state = await readFile(`/proc/${descendant}/stat`, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
+    const state = await readFile(`/proc/${descendant}/stat`, 'utf8').catch(error =>
+      ['ENOENT', 'ESRCH'].includes(error.code) ? '' : Promise.reject(error));
     if (!state || state.slice(state.lastIndexOf(')') + 2).startsWith('Z ')) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }

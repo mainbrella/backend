@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
 import { handleRequest } from './router';
 import { hashToken } from './auth-core';
 import { paidContainerFixture, SESSION_ONE, USER_ONE } from './paid-container-test-helpers';
@@ -62,7 +60,7 @@ test('JavaScript SDK creates and acquires through the real HTTP handler, persist
   f.sqlite.exec(readFileSync(new URL('../../migrations/010_api_keys.sql', import.meta.url), 'utf8'));
   f.sqlite.prepare('INSERT INTO api_keys (id,user_id,name,token_hash,prefix,created_at) VALUES (?,?,?,?,?,?)')
     .run('pool-key', USER_ONE, 'Pool tests', await hashToken(token), token.slice(0, 11), new Date().toISOString());
-  const module = process.env.MAINBRELLA_SDK_MODULE || pathToFileURL(join(process.cwd(), 'sdk/javascript/index.js')).href;
+  const module = process.env.MAINBRELLA_SDK_MODULE || new URL('../../sdk/javascript/index.js', import.meta.url).href;
   const { Mainbrella } = await import(module);
   const client = new Mainbrella({ apiKey: token, fetch: (input: string, init: RequestInit) => handleRequest(new Request(input, init), f.env) });
   const { pool } = await client.pools.create({ ...payload, idempotencyKey: 'create-sdk' });

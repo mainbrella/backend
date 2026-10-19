@@ -13,7 +13,7 @@ import { deploymentPreflight, verifyDeployedSDK } from './sdk-deployed-workflow.
 import { parseQualificationArgs, readCandidate, qualifyDeployedArtifacts } from './qualify-sdk-deployed.mjs';
 
 const key = `mb_${'c'.repeat(64)}`;
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const existing = { id: 'c1', createdAt: '2026-10-05T12:00:00.000Z', status: 'running' };
 const created = { id: 'small', createdAt: '2026-10-05T12:01:00.000Z', status: 'running', instance: 'lite' };
 const capabilities = { apiVersion: '2026-10-05', containers: { idempotentCreate: true, generationRequired: true },
@@ -100,7 +100,7 @@ async function pythonWorkflow(t, fixture) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const output = join(directory, 'python.json');
   const child = spawn(process.env.PYTHON || 'python3', ['scripts/sdk-deployed-workflow.py'], {
-    cwd: root, env: { ...process.env, PYTHONPATH: join(root, 'sdk/python'), MAINBRELLA_API_KEY: key,
+    cwd: root, env: { ...process.env, PYTHONPATH: join(root, './sdk/python'), MAINBRELLA_API_KEY: key,
       MAINBRELLA_API_URL: fixture.baseUrl, MAINBRELLA_SDK_REPORT: output }, stdio: 'ignore',
   });
   const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);

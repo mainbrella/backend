@@ -14,7 +14,7 @@ import { readFileBytes } from '../../containers/file-contract.js';
 import { securityAccountEnabled } from '../../containers/security-rollout.js';
 
 export async function handleContainersRequest(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

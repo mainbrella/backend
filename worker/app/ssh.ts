@@ -2,6 +2,7 @@ import { authCorsHeaders, authJson, hashToken, randomToken } from './auth-core';
 import { runningContainer, containerError } from '../lib/container-service';
 import { containerUser } from './container-auth';
 import { ACCESS_LIMITS } from '../../containers/plan-policy.js';
+import { isStaging } from '../lib/deployment-environment';
 
 type SSHEnv = Env & { SSH_GATEWAY_SECRET?: string; SSH_HOSTNAME?: string };
 type AccessToken = { user_id: string; container_created_at: string; container_id: string; expires_at: number };
@@ -21,6 +22,7 @@ export async function handleSSHRequest(request: Request, env: SSHEnv): Promise<R
   const path = new URL(request.url).pathname;
   if (path === '/containers/ssh') return issueAccess(request, env);
   if (!['/ssh/validate', '/ssh/connect'].includes(path)) return authJson({ error: 'not_found' }, 404, {});
+  if (isStaging(env) && (!env.SSH_HOSTNAME || env.SSH_HOSTNAME === 'ssh.mainbrella.com')) return authJson({ error: 'ssh_unavailable' }, 503, {});
   const expectedMethod = path === '/ssh/connect' ? 'GET' : 'POST';
   if (request.method !== expectedMethod) return authJson({ error: 'method_not_allowed' }, 405, {});
   try {
@@ -64,7 +66,7 @@ export async function handleSSHRequest(request: Request, env: SSHEnv): Promise<R
 }
 
 async function issueAccess(request: Request, env: SSHEnv): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (request.method !== 'POST') return authJson({ error: 'method_not_allowed' }, 405, cors);
@@ -72,6 +74,7 @@ async function issueAccess(request: Request, env: SSHEnv): Promise<Response> {
   try {
     const user = await containerUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
+    if (isStaging(env) && (!env.SSH_HOSTNAME || env.SSH_HOSTNAME === 'ssh.mainbrella.com')) return authJson({ error: 'ssh_unavailable' }, 503, cors);
     if (!env.SSH_GATEWAY_SECRET) return authJson({ error: 'ssh_unavailable' }, 503, cors);
     const body = await request.text();
     let id: string | null = null;

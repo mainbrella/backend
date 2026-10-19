@@ -7,7 +7,7 @@ import { parseEnv } from 'node:util';
 import { readFileBytes } from '../containers/file-contract.js';
 import { MAX_METRIC_RESPONSE_BYTES, queryMetrics } from '../worker/lib/workload-metrics';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const endpoint = 'https://api.cloudflare.com/client/v4/graphql';
 const schemaQuery = `query WorkloadSchema {

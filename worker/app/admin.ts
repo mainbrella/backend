@@ -72,7 +72,7 @@ const TABLES: TableDefinition[] = [
 ];
 
 export async function handleAdminRequest(request: Request, env: Env): Promise<Response> {
-  const corsHeaders = authCorsHeaders(request);
+  const corsHeaders = authCorsHeaders(request, env);
   if (corsHeaders === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (request.method !== "GET") return authJson({ error: "method_not_allowed" }, 405, { ...corsHeaders, allow: "GET" });

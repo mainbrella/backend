@@ -1,5 +1,5 @@
 {
-	"$schema": "./node_modules/wrangler/config-schema.json",
+	"$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
 	"name": "mainbrella-api",
 	"account_id": "2b7a9be82bb64187230703b024e25157",
 	"main": "worker/index.ts",
@@ -26,6 +26,7 @@
 		]
 	},
 	"vars": {
+    "BFF_ENABLED": "true",
 		"NAMECOM_ENABLED": "true",
 		"VOICE_ENABLED": "true",
 		"VOICE_PUBLIC_ORIGIN": "https://api.mainbrella.com",
@@ -85,6 +86,7 @@
 			"migrations_dir": "preview-migrations"
 		}
 	],
+  "worker_loaders": [{ "binding": "BFF_LOADER" }],
 	"ratelimits": [
 		{
 			"name": "VOICE_NUMBER_SEARCH_LIMIT",

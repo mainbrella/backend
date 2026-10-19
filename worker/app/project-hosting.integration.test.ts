@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { paidContainerFixture, SESSION_ONE, SESSION_TWO, USER_ONE } from './paid-container-test-helpers';
 import { handleRequest } from './router';
-import { handleApplicationGateway } from '../preview-gateway';
+import { handleApplicationGateway } from '../linux-preview-gateway';
 import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { planPrices } from '../lib/stripe';

@@ -121,7 +121,7 @@ from the API.
    `mainbrella-preview-routes` database. Never apply the account schema to the
    gateway routing database. Use `npm run db:migrate:remote` for account migrations
    and `npm run db:migrate:previews:remote` for routing migrations.
-2. Run `npm run deploy`. It checks account and routing migration metadata, then
+2. Run `npm run deploy:all`. It checks account and routing migration metadata, then
    publishes the container runtime, gateway, and API in that order. The gateway
    also binds `CONTAINER_ACCOUNT` from `mainbrella-api` for generation-specific
    network membership checks.

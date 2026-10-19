@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
+import { resolveTool } from './resolve-tool.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const targets = ['admin', 'marketing'];
@@ -54,7 +55,7 @@ const adminSecretSetup = 'Run npx wrangler secret put STRIPE_SECRET_KEY --config
 
 export function wrangler(args, execute = execFileSync) {
   try {
-    return JSON.parse(execute(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), ...args],
+    return JSON.parse(execute(process.execPath, [resolveTool('wrangler', 'bin/wrangler.js'), ...args],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
   } catch (error) {
     // Classify known errors without echoing Wrangler output or configuration data.

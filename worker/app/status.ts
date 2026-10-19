@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { authCorsHeaders, authJson, hashToken } from './auth-core';
 import { readCommandBody } from '../../containers/command-contract.js';
+import { publicApiOrigin, publicWebOrigin } from '../lib/deployment-environment';
 
 export const STATUS_COMPONENTS = ['website', 'api', 'auth', 'provisioning', 'ssh', 'images', 'billing'] as const;
 export const STATUS_STALE_MS = 15 * 60_000;
@@ -20,7 +21,7 @@ export async function recordObservations(env: Env, observations: Observation[], 
 }
 
 export async function handleStatusRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), internal = url.pathname.startsWith('/internal/status/');
@@ -92,7 +93,7 @@ export async function handleStatusRequest(request: Request, env: Env): Promise<R
 export async function collectStatus(env: Env, fetcher: typeof fetch = fetch,
   pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {
   const observations: Observation[] = [];
-  for (const [component, target] of [['website', 'https://mainbrella.com/'], ['api', 'https://api.mainbrella.com/health']] as const) {
+  for (const [component, target] of [['website', `${publicWebOrigin(env)}/`], ['api', `${publicApiOrigin(env)}/health`]] as const) {
     const start = Date.now();
     let state: Observation['state'] = 'outage';
     // Confirm failures before recording them: a short deployment interruption

@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { handleRequest } from './router';
-import { handlePreviewGateway } from '../preview-gateway';
+import { handlePreviewGateway } from '../linux-preview-gateway';
 import { previewDatabase } from '../lib/preview-test-helpers';
 import { previewTokenHash } from '../lib/preview-routing';
 import { previewGrantSchema } from './openapi-previews';

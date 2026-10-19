@@ -1,5 +1,6 @@
 import { storageMetered } from './r2-storage';
 import { ADMIN_EMAIL } from '../shared/admin';
+import { emailDeliveryEnabled } from './deployment-environment';
 
 export async function checkStorageHealth(env: Env) {
   if (!storageMetered(env)) return;
@@ -20,7 +21,7 @@ export async function checkStorageHealth(env: Env) {
     || (deletions!.oldest !== null && Date.parse(deletions!.oldest) < now - 86400000) || notices!.count > 0;
   if (!unhealthy) return;
   console.error('storage_health_alert', metrics);
-  if (!env.WELCOME_EMAIL) return;
+  if (!env.WELCOME_EMAIL || !emailDeliveryEnabled(env)) return;
   const id = `health_notice:${Math.floor(now / 86400000)}`;
   const claimed = await env.DB.prepare('INSERT INTO r2_meter_state(id,value) VALUES(?,?) ON CONFLICT(id) DO NOTHING RETURNING id').bind(id, String(now)).first();
   if (!claimed) return;

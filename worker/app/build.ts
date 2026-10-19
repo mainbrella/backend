@@ -7,8 +7,8 @@ import { readCommandBody } from '../../containers/command-contract.js';
 import { validExecutionId } from '../../containers/execution-contract.js';
 import { validIdempotencyKey } from '../../containers/container-account-core.js';
 import { resolveEntitlement } from '../lib/entitlements';
-import { accountResponse, containerError } from '../lib/container-service';
-import { previewsConfigured } from '../lib/preview-routing';
+import { accountResponse, containerError } from '../compute.ts';
+import { previewsConfigured } from '../compute.ts';
 import { BUILD_MODEL, BUILD_MAX_APPS, BuildError, buildCreateSchema, buildRenameSchema, buildTurnSchema, buildRestoreSchema,
   buildName, buildStarter, ownedBuildApp, type BuildAppRow, type BuildContainer, type BuildTurnRow, type BuildPreview } from '../lib/build-contract';
 import { buildSourceZip } from '../lib/build-zip';
@@ -16,7 +16,7 @@ import { buildAccountStream, buildAppStream, type BuildActivityRow } from '../li
 import { localCodexConfigured } from '../lib/build-codex';
 import { BUILD_AI_MARKUP_PERCENT, buildTokenPrices } from '../lib/build-pricing';
 import { settleReportedBuildUsage } from '../lib/build-billing';
-import { accountBillingRequest } from '../lib/prepaid-billing';
+import { walletRequest as accountBillingRequest } from '../lib/wallet-billing.ts';
 import { buildImageBytes, buildImagePath, publicBuildImage, savedBuildImages, buildImageEntries, serveBuildImage, type BuildImageRow } from '../lib/build-images';
 import { buildOperationTimeline, operationExplanation, type OperationRow } from '../lib/build-journal';
 import { buildGitEntries, buildGitVersion, publicGitVersion, exportBuildGit, deleteBuildGit, cleanupDeletedBuildGit, type BuildGitVersion } from '../lib/build-git';
@@ -143,7 +143,7 @@ function turnInsert(env: Env, appId: string, userId: string, turnId: string, key
 
 export async function handleBuildRequest(request: Request, env: Env): Promise<Response> {
   if (request.method === 'GET' && storageMetered(env) && (/\/build\/apps\//.test(new URL(request.url).pathname) || new URL(request.url).pathname === '/build/events')) {
-    const cors = authCorsHeaders(request);
+    const cors = authCorsHeaders(request, env);
     if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
     const user = await currentUser(env, request);
     if (!user) return authJson({ error: 'not_authenticated' }, 401, cors);
@@ -159,7 +159,7 @@ export async function handleBuildRequest(request: Request, env: Env): Promise<Re
   return buildRequest(request, env);
 }
 async function buildRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

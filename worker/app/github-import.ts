@@ -19,7 +19,7 @@ function returnURL(state: State, result: string) {
 const redirect = (url: string) => new Response(null, { status: 302, headers: { Location: url, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
 
 export async function handleGithubImportRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), route = url.pathname;

@@ -1,3 +1,4 @@
+import { applyUsage, usageReceiptKey } from './usage.js';
 import { normalizeNetworkPolicy, normalizeSecretBindings } from './security-contract.js';
 import { AccountLifecycle } from './account-lifecycle.js';
 import { AccountPools } from './account-pools.js';
@@ -374,11 +375,29 @@ export class ContainerAccountController {
           this.billing.wallet.checkpoint(state, asOf);
           this.billing.wallet.fundingEvidence(state);
           const fundings = Object.values(state.wallet?.fundings ?? {}).map(row => ({ id: row.id, creditCents: row.amountCents, revokedCents: row.disputed ? row.amountCents : row.refundedCents }));
-          const usedUnitMs = (state.wallet?.usedUnitMs ?? 0) + (state.wallet?.usedInferenceMicroUsd ?? 0) * 180;
+          const usedUnitMs = (state.wallet?.usedUnitMs ?? 0) + ((state.wallet?.usedInferenceMicroUsd ?? 0) + (state.wallet?.usedUsageMicroUsd ?? 0)) * 180;
           this.billing.wallet.queue(state, { key: `wallet_checkpoint:${crypto.randomUUID()}`, type: 'wallet_checkpoint', occurredAt: asOf,
             data: { asOf, usedUnitMs, usedStorageNanoUsd: state.wallet?.usedStorageNanoUsd ?? 0, fundings } });
           await this.saveState(state);
           return this.respond({ asOf, usedUnitMs, fundings, pendingEvents: Object.keys(state.wallet?.accounting?.pending ?? {}).length });
+        }
+        if (path === '/billing/usage') {
+          const key = usageReceiptKey(body);
+          const previous = await this.ctx.storage.get(key);
+          let receipt;
+          try { receipt = applyUsage(this.billing.wallet, state, body, previous); }
+          catch (error) {
+            if (body.action !== 'reserve' || error.message !== 'insufficient_balance' || state.wallet?.fundingRevoked) throw error;
+            // Only a validated, new reservation can use existing recharge
+            // consent. Persist pending reconciliation even if funds stay short.
+            await this.billing.wallet.maybeRecharge(state);
+            await this.saveState(state);
+            receipt = applyUsage(this.billing.wallet, state, body, previous);
+          }
+          // Multi-key put atomically commits the receipt, balance and ledger outbox.
+          await this.ctx.storage.put({ [KEY]: state, [key]: receipt });
+          await this.saveState(state);
+          return this.respond({ balance: this.billing.wallet.status(state), status: receipt.status });
         }
         if (path === '/billing/storage') {
           if (body.action === 'reserve' || body.action === 'expire') await this.billing.wallet.maybeRecharge(state);
@@ -408,14 +427,14 @@ export class ContainerAccountController {
         return this.respond({ balance: this.billing.wallet.status(state) });
       });
     } catch (error) {
-      const status = ['insufficient_balance', 'spend_limit_exceeded'].includes(error.message) ? 402 : error.message === 'account_mismatch' ? 403 : ['spend_limit_below_committed_usage', 'payment_conflict', 'build_billing_reconciliation_required', 'storage_receipt_conflict'].includes(error.message) ? 409 : 400;
-      return this.respond({ error: ['insufficient_balance','spend_limit_exceeded','storage_receipt_conflict','build_billing_reconciliation_required','account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge','invalid_history_cursor'].includes(error.message) ? error.message : 'invalid_request' }, status);
+      const status = ['insufficient_balance', 'spend_limit_exceeded'].includes(error.message) ? 402 : error.message === 'account_mismatch' ? 403 : ['spend_limit_below_committed_usage', 'payment_conflict', 'build_billing_reconciliation_required', 'storage_receipt_conflict', 'usage_receipt_conflict', 'usage_reconciliation_required'].includes(error.message) ? 409 : 400;
+      return this.respond({ error: ['usage_receipt_conflict','usage_reconciliation_required','insufficient_balance','spend_limit_exceeded','storage_receipt_conflict','build_billing_reconciliation_required','account_mismatch','spend_limit_below_committed_usage','payment_conflict','invalid_payment','invalid_customer','invalid_request','invalid_spend_limit','invalid_auto_recharge','invalid_history_cursor'].includes(error.message) ? error.message : 'invalid_request' }, status);
     }
   }
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/pools' || url.pathname.startsWith('/pools/')) return this.pools.fetch(request);
-    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint', '/billing/inference', '/billing/storage'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
+    if (['/billing/balance', '/billing/history', '/billing/funding', '/billing/settings', '/billing/accounting-checkpoint', '/billing/usage', '/billing/inference', '/billing/storage'].includes(url.pathname)) return this.prepaidRequest(request, url.pathname);
     if (url.pathname === '/billing/invoice') {
       if (request.method !== 'POST') return this.respond({ error: 'method_not_allowed' }, 405);
       return this.serialized(async () => {

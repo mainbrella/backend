@@ -117,9 +117,10 @@ test('lock route must reject GET after authenticating; redirects, missing routes
   }
 });
 
-test('default deploy gates both databases and publishes the runtime and gateway before the API', () => {
+test('backend deploy uses its local entry point while the full rollout gates runtime and gateway ordering', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)));
-  assert.equal(pkg.scripts.deploy, 'npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers && npm run deploy:previews && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api');
+  assert.equal(pkg.scripts.deploy, 'node scripts/deploy.mjs');
+  assert.equal(pkg.scripts['deploy:all'], 'npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers && npm run deploy:previews && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api');
   assert.equal(pkg.scripts['deploy:bootstrap-activity'], 'npm run deploy:preflight && npm run previews:preflight && npm run services:preflight && npm run deploy:containers -- --without-activity && npm run deploy:admin && npm run deploy:marketing && npm run deploy:api && npm run deploy:containers && npm run deploy:previews');
   assert.equal(pkg.scripts['deploy:previews'], 'wrangler deploy --config wrangler.previews.jsonc');
   assert.equal(pkg.scripts['db:migrate:previews:remote'], 'wrangler d1 migrations apply PREVIEW_ROUTES --remote --config wrangler.previews.jsonc');

@@ -1,5 +1,6 @@
 import { marketingUnsubscribeUrl, renderMarketingEmail } from "../templates/marketing-email";
 import { marketingSender, type MarketingEmail } from "../shared/marketing-email-contract";
+import { emailDeliveryEnabled } from './deployment-environment';
 export { marketingSender, marketingEmailSchema, marketingUnsubscribeSchema, type MarketingEmail } from "../shared/marketing-email-contract";
 
 export class MarketingEmailPreferenceError extends Error {
@@ -8,7 +9,8 @@ export class MarketingEmailPreferenceError extends Error {
   }
 }
 
-export async function sendMarketingEmail(env: Pick<Env, "DB" | "MARKETING_EMAIL">, email: MarketingEmail): Promise<EmailSendResult> {
+export async function sendMarketingEmail(env: Pick<Env, "DB" | "MARKETING_EMAIL" | "DEPLOYMENT_ENVIRONMENT" | "EMAIL_DELIVERY_ENABLED">, email: MarketingEmail): Promise<EmailSendResult> {
+  if (!emailDeliveryEnabled(env)) throw new Error('email_sending_unavailable');
   const sender = marketingSender(email.from);
   if (!sender) throw new Error("invalid_sender");
   let preference;

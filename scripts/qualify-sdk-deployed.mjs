@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const checksum = bytes => createHash('sha256').update(bytes).digest('hex');
 const workflows = ['scripts/qualify-sdk-deployed.mjs', 'scripts/sdk-deployed-workflow.mjs', 'scripts/sdk-deployed-workflow.py'];
 const localChecks = ['packageContents', 'license', 'npmCleanInstall', 'typescript', 'wheelCleanInstall',

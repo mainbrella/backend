@@ -1,13 +1,14 @@
-import { boundedPrivateBody } from "../../containers/private-services-contract.js";
+import { boundedBody as boundedPrivateBody } from '../shared/bounded-body.js';
 import { MarketingEmailPreferenceError, sendMarketingEmail } from "../lib/marketing-email";
 import { marketingEmailSchema, marketingUnsubscribeSchema } from "../shared/marketing-email-contract";
 import { ADMIN_EMAIL } from "../shared/admin";
 import { authCorsHeaders, authJson, currentUser } from "./auth-core";
+import { emailDeliveryEnabled } from '../lib/deployment-environment';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
 export async function handleMarketingEmailRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (request.method !== "POST") {
@@ -36,7 +37,7 @@ export async function handleMarketingEmailRequest(request: Request, env: Env): P
   }
   const input = marketingEmailSchema.safeParse(body);
   if (!input.success) return authJson({ error: "invalid_request" }, 400, cors);
-  if (!env.MARKETING_EMAIL) return authJson({ error: "email_sending_unavailable" }, 503, cors);
+  if (!env.MARKETING_EMAIL || !emailDeliveryEnabled(env)) return authJson({ error: "email_sending_unavailable" }, 503, cors);
 
   try {
     const result = await sendMarketingEmail(env, input.data);
@@ -55,7 +56,7 @@ export async function handleMarketingEmailRequest(request: Request, env: Env): P
 }
 
 export async function handleMarketingUnsubscribeRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: "origin_not_allowed" }, 403, {});
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (request.method !== "POST") {

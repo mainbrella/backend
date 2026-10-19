@@ -3,7 +3,7 @@ import { BuildError } from '../lib/build-contract';
 import { exchangeGithubBuildCode, githubBuildAPI, githubBuildCallbackURL, githubBuildConfigured, githubBuildPKCEChallenge, sealGithubBuildCredentials,
   githubBuildRepositories, validGithubRepositoryCursor } from '../lib/github-build';
 import { validGithubBranch } from '../lib/github-build';
-import { repoName } from '../lib/repo-launch';
+import { repoName } from '../shared/github-git';
 
 interface State { token_hash: string; user_id: string; project_id: string; repo: string; branch: string; return_origin: string; return_path: string; verifier: string; kind: 'authorize' | 'install' }
 
@@ -32,7 +32,7 @@ async function authorizeURL(env: Env, pending: { token: string; verifier: string
 }
 
 export async function handleGithubBuildRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), route = url.pathname;

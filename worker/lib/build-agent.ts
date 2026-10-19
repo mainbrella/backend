@@ -1,7 +1,8 @@
 import type { WorkflowStep } from 'cloudflare:workers';
-import { accountResponse, runningContainer } from './container-service';
+import { accountResponse, runningContainer } from '../compute.ts';
 import { resolveEntitlement } from './entitlements';
-import { handleOwnedPreviewRequest } from '../app/previews';
+import { handleOwnedPreviewRequest } from '../compute.ts';
+import { publicApiOrigin, publicWebOrigin } from './deployment-environment';
 import { failBuildTurn } from '../app/build';
 import { buildInference, buildSystemPrompt, buildFirstVersionPrompt, parseBuildTool, type BuildAIMessage, type BuildAIResult, type BuildToolCall } from './build-ai';
 import { listBuildFiles, readBuildFile, editBuildFile, compactBuildReads } from './build-source-tools';
@@ -435,8 +436,8 @@ export async function runBuildAgent(env: Env, params: BuildParams, step: Step, s
     if (launched.status !== 'succeeded') throw new BuildError('preview_start_failed');
     const preview = await step.do('Create preview', noRetry, async () => {
       const identity = new URLSearchParams({ id: ready.id, createdAt: ready.createdAt });
-      return json<BuildPreview>(await handleOwnedPreviewRequest(new Request(`https://api.mainbrella.com/containers/previews?${identity}`, {
-        method: 'POST', headers: { Origin: 'https://mainbrella.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ port: 3000, ttlSeconds: 1800 }),
+      return json<BuildPreview>(await handleOwnedPreviewRequest(new Request(`${publicApiOrigin(env)}/containers/previews?${identity}`, {
+        method: 'POST', headers: { Origin: publicWebOrigin(env), 'Content-Type': 'application/json' }, body: JSON.stringify({ port: 3000, ttlSeconds: 1800 }),
       }), env, params.userId));
     });
     await step.do('Save verified revision', retry, async () => {

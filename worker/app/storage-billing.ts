@@ -4,7 +4,7 @@ import { storageBillingSummary } from '../lib/r2-billing';
 import { storageMetered, storagePricing } from '../lib/r2-storage';
 
 export async function handleStorageBillingRequest(request: Request, env: Env) {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (!cors) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url);

@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { normalizeRestoreLaunch } from '../../containers/restore-launch.js';
 
-export const repoName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/)
-  .refine(value => !['.', '..'].includes(value.split('/')[1]));
+import { repoName } from '../shared/github-git';
+export { repoName } from '../shared/github-git';
 export const repoRef = z.string().min(1).max(200).refine(value => !/[\x00-\x20\x7f]/.test(value));
 export const repoCwd = z.string().max(200).refine(value => value === '.' ||
   /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) && value.split('/').every(part => part !== '.' && part !== '..'));

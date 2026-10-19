@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTool } from './resolve-tool.mjs';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 
 test('configured type generation preserves bindings without depending on local secrets', async t => {
   const fixture = await mkdtemp(join(tmpdir(), 'mainbrella-types-'));
@@ -17,7 +18,8 @@ test('configured type generation preserves bindings without depending on local s
   await mkdir(join(fixture, 'worker'));
   await copyFile(join(root, 'scripts/type-generation.env'), join(fixture, 'scripts/type-generation.env'));
   await copyFile(join(root, 'worker/env.d.ts'), join(fixture, 'worker/env.d.ts'));
-  await symlink(join(root, 'node_modules'), join(fixture, 'node_modules'), 'dir');
+  const wranglerPackage = resolveTool('wrangler', 'package.json');
+  await symlink(dirname(dirname(wranglerPackage)), join(fixture, 'node_modules'), 'dir');
   await writeFile(join(fixture, 'worker/index.ts'), 'export default { fetch() { return new Response("ok"); } };\n');
   await writeFile(join(fixture, 'wrangler.jsonc'), JSON.stringify({
     name: 'mainbrella-type-fixture', main: 'worker/index.ts', compatibility_date: '2026-09-18',
@@ -40,6 +42,6 @@ test('configured type generation preserves bindings without depending on local s
   // an integration can be absent, while configured bindings remain available.
   await writeFile(join(fixture, 'bindings.d.ts'), 'interface D1Database {}\n');
   await writeFile(join(fixture, 'check.ts'), 'const optional: Env["STRIPE_SECRET_KEY"] = undefined;\nconst binding: D1Database = ({} as Env).DB;\n');
-  execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--strict', '--noEmit', '--skipLibCheck',
+  execFileSync(process.execPath, [resolveTool('typescript', 'bin/tsc'), '--strict', '--noEmit', '--skipLibCheck',
     'check.ts', 'bindings.d.ts', 'worker/env.d.ts', 'cloudflare-configuration.d.ts'], { cwd: fixture, stdio: 'pipe', timeout: 30_000 });
 });

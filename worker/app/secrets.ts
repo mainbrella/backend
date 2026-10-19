@@ -6,7 +6,7 @@ import { readFileBytes } from '../../containers/file-contract.js';
 import { securityAccountEnabled } from '../../containers/security-rollout.js';
 
 export async function handleSecretsRequest(request: Request, env: Env): Promise<Response> {
-  const cors = authCorsHeaders(request);
+  const cors = authCorsHeaders(request, env);
   if (cors === null) return authJson({ error: 'origin_not_allowed' }, 403, {});
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   const url = new URL(request.url), match = /^\/secrets(?:\/(sec_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}))?$/.exec(url.pathname);

@@ -15,3 +15,6 @@ __pycache__/
 .github-build-local-secrets.json
 /.env
 /.dev.vars
+
+.env.local
+.env.*.local
