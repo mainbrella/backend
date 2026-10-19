@@ -1,3 +1,5 @@
+always use your save-prompts skill
+
 When adding or changing an API endpoint, update its Chanfana/Zod schema in
 `worker/app/openapi-*.ts` in the same change. Include request parameters/body,
 responses, authentication, and a unique operation ID. Register new feature modules
