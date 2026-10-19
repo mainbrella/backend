@@ -135,7 +135,7 @@ test('BFF preview images document the HTMLRewriter behavior and nullable image U
   const { paths } = await document();
   const operation = paths['/bff/og-image'].post;
   assert.equal(operation.operationId, 'getBffOgImage');
-  assert.deepEqual(operation.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }]);
+  assert.deepEqual(operation.security, [{ cookieAuth: [] }, { apiKeyBearer: [] }, { bffApiKey: [], bffUserSession: [] }]);
   const input = operation.requestBody.content['application/json'].schema;
   assert.deepEqual(input.required, ['url']);
   assert.equal(input.additionalProperties, false);
@@ -143,7 +143,13 @@ test('BFF preview images document the HTMLRewriter behavior and nullable image U
   assert.match(operation.description, /MainbrellaPreviewBot\/1\.0/);
   assert.match(operation.description, /8-second deadline/);
   assert.match(operation.description, /final page URL after redirects/);
-  for (const status of [400, 401, 403, 405, 408, 413, 415, 502, 503, 504]) assert.ok(operation.responses[status]);
+  assert.match(operation.description, /send both apikey: bff_pk_\.\.\. and Authorization: Bearer bff_us_/);
+  assert.match(operation.description, /browser key by itself is insufficient/);
+  assert.match(operation.description, /ready, unpaused, and unblocked/);
+  assert.match(operation.description, /same project/);
+  assert.match(operation.description, /does not require a project table-operation grant/);
+  assert.ok(operation.responses[409].content['application/json'].schema.properties.error);
+  for (const status of [400, 401, 403, 405, 408, 409, 413, 415, 502, 503, 504]) assert.ok(operation.responses[status]);
 });
 
 test('BFF browser APIs distinguish scoped project keys from owner management and raw SQL', async () => {

@@ -7,7 +7,7 @@ import { handleDataRequest } from './data-routes';
 import { handleDemoSessionRequest } from './demo';
 import { handleEmailAuthRequest } from './email-auth';
 import { FETCH_LIMITS, fetchInput, fetchUrl } from './fetch';
-import { getOgImage, ogImageInput } from './og-image';
+import { handleOgImageRequest } from './og-image-routes';
 import { body, enabled, readyProject } from './http';
 import { invokeFunction } from './invocation';
 import { managePolicies } from './policies';
@@ -40,6 +40,7 @@ async function provision(env: Env, project: Project) {
 }
 
 export async function handleBffRequest(request: Request, env: Env): Promise<Response> {
+  if (new URL(request.url).pathname === '/bff/og-image') return handleOgImageRequest(request, env);
   if (new URL(request.url).pathname === '/bff/demo/session') return handleDemoSessionRequest(request, env);
   if (/^\/bff\/data\/[a-f0-9-]{36}\/auth\//.test(new URL(request.url).pathname)) return handleEmailAuthRequest(request, env);
   if (new URL(request.url).pathname.startsWith('/bff/data/')) return handleDataRequest(request, env);
@@ -61,12 +62,6 @@ export async function handleBffRequest(request: Request, env: Env): Promise<Resp
       if (method !== 'POST') throw new BffError('method_not_allowed', 405);
       enabled(env);
       return reply(await fetchUrl(parse(fetchInput, await body(request, FETCH_LIMITS.requestBytes)), request.signal));
-    }
-    if (url.pathname === '/bff/og-image') {
-      if (method !== 'POST') throw new BffError('method_not_allowed', 405);
-      enabled(env);
-      const input = parse(ogImageInput, await body(request, FETCH_LIMITS.requestBytes));
-      return reply({ image: await getOgImage(input.url, request.signal) });
     }
     if (url.pathname === '/bff/projects') {
       if (method === 'GET') {

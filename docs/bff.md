@@ -112,10 +112,18 @@ the database UUID; it is never accepted from the browser or customer code.
 ## Fetch and preview image services
 
 These services use the Worker’s outbound `fetch()` and require no BFF project,
-customer database, or function deployment. BFF must be enabled. Authenticate with
-a Mainbrella session cookie from an allowed Mainbrella origin, or an account API
-key (`Authorization: Bearer mb_...`) from a trusted server. Scoped project browser
-keys do not grant access to these endpoints.
+customer database, or function deployment when called by an owner. BFF must be
+enabled. Owner calls authenticate with a Mainbrella session cookie from an allowed
+Mainbrella origin, or an account API key (`Authorization: Bearer mb_...`) from a
+trusted server. `/bff/og-image` also supports a project user: send both the
+project's scoped browser key (`apikey: bff_pk_...`) and a live project user session
+(`Authorization: Bearer bff_us_...`). The key identifies the project; its live
+grant must belong to that project's owner, and a supplied browser Origin must be
+configured for the key. The project must be ready, unpaused, and unblocked, and
+the unexpired session must belong to that same project. A browser key alone is
+not enough. Explicit project credentials do not fall back to an account cookie.
+Project calls need an available control database and can return 409
+`database_not_ready`; they do not need a project table-operation grant.
 
 `POST /bff/fetch` accepts `{ "url": "https://example.com", "userAgent": "MyApp/1.0" }`.
 It performs a GET with that User-Agent and returns HTTP 200 with
@@ -158,6 +166,27 @@ const { image } = await bffService('og-image', {
   url: 'https://example.com/article',
 });
 ```
+
+From a project frontend, pass both project credentials and omit cookies. Replace
+the placeholders with the scoped browser key and a session issued for a user in
+that project:
+
+```js
+const response = await fetch('https://api.mainbrella.com/bff/og-image', {
+  method: 'POST',
+  credentials: 'omit',
+  headers: {
+    'Content-Type': 'application/json',
+    apikey: 'bff_pk_…',
+    Authorization: 'Bearer bff_us_…',
+  },
+  body: JSON.stringify({ url: 'https://example.com/article' }),
+});
+const { image } = await response.json();
+```
+
+The browser key alone cannot authorize this endpoint; the user session is also
+required. `/bff/fetch` remains owner-only.
 
 Both services accept public HTTP(S) URLs on default ports without embedded
 credentials or fragments. Private IP literals and local/reserved hostnames are
